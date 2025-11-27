@@ -25,3 +25,34 @@ By inviting or interacting with **Grim** (the Discord bot for Seclude & Affiliat
 - Questions? DM the devs in Seclude— we're listening in the dark.
 
 By proceeding, you enter the pact. Enter if you dare. 🌑
+
+## Privacy Policy
+Last updated: November 27, 2025
+
+Grim respects your shadows. Here’s exactly what we do (and don’t do) with your data.
+
+### 1. What We Collect
+- **Discord User ID** — to know who’s talking to Grim and enforce cooldowns/bans.
+- **Server (Guild) ID** — to remember server-specific settings.
+- **Message content** — only when you directly @Grim or use a slash command. We immediately forward it to xAI (Grok) and throw it away after the response.
+- **Nothing else.** No usernames, no profiles, no DMs, no message history, no logs saved to disk.
+
+### 2. How It’s Used
+- Solely to make the bot work and to generate replies via xAI’s API.
+- xAI sees your prompt (that’s how Grok works) and follows their own [privacy policy](https://x.ai/legal/privacy-policy).
+
+### 3. Storage & Deletion
+- In-memory only (gone when the bot restarts — Replit sleeps = data dies).
+- We do not write anything to permanent databases or logs.
+- Want everything erased right now? Kick the bot or DM `!gdpr delete` and we forget you instantly.
+
+### 4. Sharing
+- Never sold, never shared, never leaked.
+- Only exception: xAI temporarily sees your message content to generate a reply (again, see their policy).
+
+### 5. Changes
+We’ll update this section in the repo if anything changes. Continued use after updates = you’re cool with it.
+
+That’s it. No cookies, no trackers, no creepy stuff. Stay hidden. 🌑
+
+— Deathxi & the Deathly Hollows
