@@ -1155,7 +1155,7 @@ async def check_livetweets():
                                     embed.set_image(url=media.preview_image_url)
                                     break
                     
-                    embed.set_footer(text="X")
+                    embed.set_footer(text=f"X · {VERSION}")
                     await channel.send(embed=embed)
                 
                 livetweet_channels[channel_id]["last_tweet_id"] = str(tweets.data[0].id)
@@ -1216,7 +1216,7 @@ async def check_ghostwrite_live():
                     embed.add_field(name="\u200b", value=f"**{specific_topic}**", inline=False)
                     embed.add_field(name="\u200b", value=f"```{data['topic']}```", inline=True)
                     embed.add_field(name="\u200b", value=f"```{data.get('interval_display', str(data.get('interval_hours', '?')) + 'h')}```", inline=True)
-                    embed.set_footer(text="Ghostwrite")
+                    embed.set_footer(text=f"Ghostwrite · {VERSION}")
                     
                     await channel.send(embed=embed)
                     
@@ -1270,7 +1270,7 @@ async def check_newsfeed():
                     
                     embed.add_field(name="\u200b", value=f"```{data['topic']}```", inline=True)
                     embed.add_field(name="\u200b", value=f"```{data.get('interval_display', '?')}```", inline=True)
-                    embed.set_footer(text="Grim News Network")
+                    embed.set_footer(text=f"Grim News Network · {VERSION}")
                     
                     await channel.send(embed=embed)
                     
@@ -1432,7 +1432,7 @@ async def check_nftwatch():
                         
                         embed.add_field(name="\u200b", value=f"```{slug}```", inline=True)
                         embed.add_field(name="\u200b", value=f"```NEW LISTING```", inline=True)
-                        embed.set_footer(text="Grim NFT Watch")
+                        embed.set_footer(text=f"Grim NFT Watch · {VERSION}")
                         
                         await channel.send(embed=embed)
                         await asyncio.sleep(1)
@@ -1484,7 +1484,7 @@ async def check_reminders():
                 embed.description = subject if not is_url(subject) else f"[Open Link]({subject})"
                 embed.add_field(name="Reminder", value=f"```Tomorrow```", inline=True)
                 embed.add_field(name="Drop Date", value=f"```{drop_str}```", inline=True)
-                embed.set_footer(text="Grim Reminder — Day Before")
+                embed.set_footer(text=f"Grim Reminder — Day Before · {VERSION}")
                 
                 content = f"<@{user_id}>"
                 if is_url(subject):
@@ -1501,7 +1501,7 @@ async def check_reminders():
                 embed.description = subject if not is_url(subject) else f"[Open Link]({subject})"
                 embed.add_field(name="Reminder", value=f"```Today — Now```", inline=True)
                 embed.add_field(name="Drop Date", value=f"```{drop_str}```", inline=True)
-                embed.set_footer(text="Grim Reminder — Day Of")
+                embed.set_footer(text=f"Grim Reminder — Day Of · {VERSION}")
                 
                 content = f"<@{user_id}>"
                 if is_url(subject):
@@ -1796,7 +1796,7 @@ async def info(interaction: discord.Interaction):
     embed.add_field(name="Roles", value=f"```{len(guild.roles)}```", inline=True)
     embed.add_field(name="Boosts", value=f"```{guild.premium_subscription_count}```", inline=True)
     
-    embed.set_footer(text=f"{interaction.user.name}")
+    embed.set_footer(text=f"{interaction.user.name} · {VERSION}")
     
     await interaction.response.send_message(embed=embed)
 
@@ -1816,7 +1816,7 @@ async def howdie(interaction: discord.Interaction, user: discord.Member):
         color=discord.Color.from_rgb(18, 18, 18)
     )
     embed.set_thumbnail(url=user.display_avatar.url)
-    embed.set_footer(text=f"{interaction.user.name}")
+    embed.set_footer(text=f"{interaction.user.name} · {VERSION}")
     
     await interaction.followup.send(embed=embed)
 
@@ -1836,7 +1836,7 @@ async def eightball(interaction: discord.Interaction, question: str):
     )
     embed.add_field(name="\u200b", value=f"*{question}*", inline=False)
     embed.add_field(name="\u200b", value=answer, inline=False)
-    embed.set_footer(text=f"{interaction.user.name}")
+    embed.set_footer(text=f"{interaction.user.name} · {VERSION}")
     
     await interaction.followup.send(embed=embed)
 
@@ -1855,7 +1855,7 @@ async def truth(interaction: discord.Interaction, question: str):
         color=discord.Color.from_rgb(18, 18, 18)
     )
     embed.add_field(name="\u200b", value=f"*{question}*", inline=False)
-    embed.set_footer(text=f"{interaction.user.name}")
+    embed.set_footer(text=f"{interaction.user.name} · {VERSION}")
     
     await interaction.followup.send(embed=embed)
 
@@ -1874,7 +1874,7 @@ async def summon(interaction: discord.Interaction):
         color=discord.Color.from_rgb(18, 18, 18)
     )
     embed.set_author(name="Grim", icon_url=bot.user.display_avatar.url)
-    embed.set_footer(text=f"{interaction.user.name}")
+    embed.set_footer(text=f"{interaction.user.name} · {VERSION}")
     
     await interaction.followup.send(embed=embed)
 
@@ -1892,7 +1892,7 @@ async def inspire(interaction: discord.Interaction):
         description=story,
         color=discord.Color.from_rgb(18, 18, 18)
     )
-    embed.set_footer(text=f"{interaction.user.name}")
+    embed.set_footer(text=f"{interaction.user.name} · {VERSION}")
     
     await interaction.followup.send(embed=embed)
 
@@ -1912,7 +1912,7 @@ async def roast(interaction: discord.Interaction, user: discord.Member):
         color=discord.Color.from_rgb(18, 18, 18)
     )
     embed.set_thumbnail(url=user.display_avatar.url)
-    embed.set_footer(text=f"{interaction.user.name}")
+    embed.set_footer(text=f"{interaction.user.name} · {VERSION}")
     
     await interaction.followup.send(embed=embed)
 
@@ -1955,7 +1955,7 @@ async def ghostwrite(interaction: discord.Interaction, username: str, topics: st
         color=discord.Color.from_rgb(18, 18, 18)
     )
     embed.add_field(name="\u200b", value=f"**{topics}**", inline=False)
-    embed.set_footer(text=f"{interaction.user.name}")
+    embed.set_footer(text=f"{interaction.user.name} · {VERSION}")
     
     await interaction.followup.send(embed=embed)
 
@@ -2042,7 +2042,7 @@ async def ghostwritelive(interaction: discord.Interaction, interval: str, userna
     embed.add_field(name="Account", value=f"@{clean_username}", inline=True)
     embed.add_field(name="Broad Topic", value=topic, inline=True)
     embed.add_field(name="Interval", value=f"Every {interval_display}", inline=True)
-    embed.set_footer(text=f"Enabled by {interaction.user.name} | Use same command to disable")
+    embed.set_footer(text=f"Enabled by {interaction.user.name} | Use same command to disable · {VERSION}")
     
     await interaction.followup.send(embed=embed)
 
@@ -2362,7 +2362,7 @@ async def newsfeed_status(interaction: discord.Interaction):
         embed.add_field(name="Feeds", value="No active feeds", inline=False)
     
     # Bot uptime info
-    embed.set_footer(text=f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    embed.set_footer(text=f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} · {VERSION}")
     
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
@@ -2427,7 +2427,7 @@ async def newsfeed(interaction: discord.Interaction, interval: str, topic: str):
     
     embed.add_field(name="\u200b", value=f"```{topic}```", inline=True)
     embed.add_field(name="\u200b", value=f"```{interval_display}```", inline=True)
-    embed.set_footer(text="Grim News Network")
+    embed.set_footer(text=f"Grim News Network · {VERSION}")
     
     await interaction.followup.send(embed=embed)
 
@@ -2455,7 +2455,7 @@ async def quote_message(interaction: discord.Interaction, message: discord.Messa
     )
     embed.set_author(name=display_name, icon_url=avatar_url)
     embed.set_image(url=avatar_url)
-    embed.set_footer(text=f"@{target.name}")
+    embed.set_footer(text=f"@{target.name} · {VERSION}")
     
     await interaction.response.send_message(embed=embed)
 
@@ -2515,7 +2515,7 @@ async def nftwatch(interaction: discord.Interaction, link: str):
         embed.set_thumbnail(url=image_url)
     embed.add_field(name="\u200b", value=f"```{slug}```", inline=True)
     embed.add_field(name="\u200b", value=f"```LIVE```", inline=True)
-    embed.set_footer(text="Grim NFT Watch")
+    embed.set_footer(text=f"Grim NFT Watch · {VERSION}")
     
     await interaction.followup.send(embed=embed)
 
@@ -2545,7 +2545,7 @@ async def nftwatch_cancel(interaction: discord.Interaction):
             description=f"Stopped watching **{wdata.get('collection_name', wdata['slug'])}**",
             color=discord.Color.from_rgb(18, 18, 18)
         )
-        embed.set_footer(text="Grim NFT Watch")
+        embed.set_footer(text=f"Grim NFT Watch · {VERSION}")
         await interaction.response.send_message(embed=embed)
         return
     
@@ -2571,7 +2571,7 @@ async def nftwatch_cancel(interaction: discord.Interaction):
                 description="\n".join([f"Stopped watching **{c}**" for c in cancelled]),
                 color=discord.Color.from_rgb(18, 18, 18)
             )
-            embed.set_footer(text="Grim NFT Watch")
+            embed.set_footer(text=f"Grim NFT Watch · {VERSION}")
             await inter.response.send_message(embed=embed)
     
     class NFTWatchCancelView(ui.View):
@@ -2605,7 +2605,7 @@ async def mod_add(interaction: discord.Interaction, word: str):
         description=f"```{word}```",
         color=discord.Color.from_rgb(18, 18, 18)
     )
-    embed.set_footer(text=f"{len(moderation_data['banned_words'])} word(s) on list")
+    embed.set_footer(text=f"{len(moderation_data['banned_words'])} word(s) on list · {VERSION}")
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 @bot.tree.command(name="mod_remove", description="Remove a word from the auto-delete list")
@@ -2631,7 +2631,7 @@ async def mod_remove(interaction: discord.Interaction, word: str):
         description=f"```{word}```",
         color=discord.Color.from_rgb(18, 18, 18)
     )
-    embed.set_footer(text=f"{len(moderation_data['banned_words'])} word(s) on list")
+    embed.set_footer(text=f"{len(moderation_data['banned_words'])} word(s) on list · {VERSION}")
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 @bot.tree.command(name="mod_list", description="View all words on the auto-delete list")
@@ -2652,7 +2652,7 @@ async def mod_list(interaction: discord.Interaction):
     else:
         embed.description = "```empty```"
     
-    embed.set_footer(text=f"{len(words)} word(s)")
+    embed.set_footer(text=f"{len(words)} word(s) · {VERSION}")
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 @bot.tree.command(name="remind", description="Set a reminder for a product drop or event")
@@ -2697,7 +2697,7 @@ async def remind(interaction: discord.Interaction, subject: str, when: str):
     embed.description = subject if not is_url(subject) else f"[Open Link]({subject})"
     embed.add_field(name="Day Before", value=f"```{day_before_display}```", inline=True)
     embed.add_field(name="Drop", value=f"```{drop_display}```", inline=True)
-    embed.set_footer(text="Grim Reminder — Set")
+    embed.set_footer(text=f"Grim Reminder — Set · {VERSION}")
     
     content = None
     if is_url(subject):
@@ -2735,7 +2735,7 @@ async def reminders_cmd(interaction: discord.Interaction):
         field_val = f"Drop: `{data['drop_display']}` • Day before: {day_before_status}\nID: `{rid}`"
         embed.add_field(name=label, value=field_val, inline=False)
     
-    embed.set_footer(text="Use /remind_cancel <id> to remove one")
+    embed.set_footer(text=f"Use /remind_cancel <id> to remove one · {VERSION}")
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 @bot.tree.command(name="remind_cancel", description="Cancel an active reminder by its ID")
@@ -2764,7 +2764,7 @@ async def remind_cancel(interaction: discord.Interaction, reminder_id: str):
         description=subj if len(subj) <= 100 else subj[:97] + "...",
         color=discord.Color.from_rgb(18, 18, 18)
     )
-    embed.set_footer(text="Grim Reminder")
+    embed.set_footer(text=f"Grim Reminder · {VERSION}")
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 SECLUDE_ICON_URL = "https://cdn.discordapp.com/icons/1101443658953261076/a_7df56c851d8a26e198d706cc3c640426.webp?size=1024&animated=true"
@@ -2779,7 +2779,7 @@ async def support(interaction: discord.Interaction):
     embed.add_field(name="HUB / FAQ", value="[Seclude & Affiliates](https://discord.com/invite/KFcpDGtckz)", inline=False)
     if SECLUDE_ICON_URL:
         embed.set_thumbnail(url=SECLUDE_ICON_URL)
-    embed.set_footer(text="Grim")
+    embed.set_footer(text=f"Grim · {VERSION}")
     await interaction.response.send_message(embed=embed)
 
 @bot.tree.command(name="creator", description="Meet the creator of Grim")
@@ -2792,7 +2792,7 @@ async def creator(interaction: discord.Interaction):
         color=discord.Color.from_rgb(18, 18, 18)
     )
     embed.add_field(name="\u200b", value="[deathi.net](https://deathi.net)", inline=False)
-    embed.set_footer(text="Grim")
+    embed.set_footer(text=f"Grim · {VERSION}")
     
     await interaction.response.send_message(embed=embed)
 
@@ -2850,7 +2850,7 @@ async def livetweet(interaction: discord.Interaction, username: str):
         )
         if hasattr(user.data, 'profile_image_url'):
             embed.set_thumbnail(url=user.data.profile_image_url)
-        embed.set_footer(text="Run again to disable")
+        embed.set_footer(text=f"Run again to disable · {VERSION}")
         
         await interaction.followup.send(embed=embed)
         
@@ -2898,7 +2898,7 @@ async def welcome_on(interaction: discord.Interaction):
         description=f"New member greetings will be posted in <#{interaction.channel_id}>.",
         color=discord.Color.from_rgb(18, 18, 18)
     )
-    embed.set_footer(text="Grim")
+    embed.set_footer(text=f"Grim · {VERSION}")
     await interaction.response.send_message(embed=embed)
 
 @bot.tree.command(name="welcome_off", description="Disable welcome messages for new members")
@@ -2915,7 +2915,7 @@ async def welcome_off(interaction: discord.Interaction):
             description="New member greetings have been turned off.",
             color=discord.Color.from_rgb(18, 18, 18)
         )
-        embed.set_footer(text="Grim")
+        embed.set_footer(text=f"Grim · {VERSION}")
         await interaction.response.send_message(embed=embed)
     else:
         await interaction.response.send_message("Welcome messages are not enabled in this server.", ephemeral=True)
@@ -2995,7 +2995,7 @@ async def haiku(ctx):
         description=f"*{haiku_text}*",
         color=discord.Color.from_rgb(18, 18, 18)
     )
-    embed.set_footer(text="Grim")
+    embed.set_footer(text=f"Grim · {VERSION}")
     await ctx.send(embed=embed)
 
 @bot.command(name="help_grim")
@@ -3022,7 +3022,7 @@ async def help_grim(ctx):
     embed.add_field(name="/ghostwrite", value="Ghostwrite", inline=True)
     embed.add_field(name="/nftwatch", value="NFT tracker", inline=True)
     embed.add_field(name="/nftwatch_cancel", value="Stop NFT watch", inline=True)
-    embed.set_footer(text="Grim")
+    embed.set_footer(text=f"Grim · {VERSION}")
     await ctx.send(embed=embed)
 
 token = os.environ.get("DISCORD_TOKEN")
