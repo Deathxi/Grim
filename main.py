@@ -215,22 +215,39 @@ def save_welcome_data(data):
 
 welcome_channels = load_welcome_data()
 
-UPDATES_FILE = _data_path("updates_data.json")
+# Channel config lives in project root — pushed to GitHub so it survives redeploys
+UPDATES_CONFIG_FILE = "updates_data.json"
+# SHA tracking lives in ~/.grim_data/ — ephemeral, resetting on fresh deploy is fine
+UPDATES_SHA_FILE = _data_path("updates_sha.json")
 
 def load_updates_data():
     try:
-        if os.path.exists(UPDATES_FILE):
-            with open(UPDATES_FILE, 'r') as f:
+        if os.path.exists(UPDATES_CONFIG_FILE):
+            with open(UPDATES_CONFIG_FILE, 'r') as f:
                 return json.load(f)
     except:
         pass
     return {}
 
 def save_updates_data(data):
-    with open(UPDATES_FILE, 'w') as f:
+    with open(UPDATES_CONFIG_FILE, 'w') as f:
+        json.dump(data, f)
+
+def load_updates_sha():
+    try:
+        if os.path.exists(UPDATES_SHA_FILE):
+            with open(UPDATES_SHA_FILE, 'r') as f:
+                return json.load(f)
+    except:
+        pass
+    return {}
+
+def save_updates_sha(data):
+    with open(UPDATES_SHA_FILE, 'w') as f:
         json.dump(data, f)
 
 updates_channels = load_updates_data()
+updates_sha = load_updates_sha()
 
 def is_url(text):
     return text.strip().startswith(("http://", "https://"))
@@ -1648,7 +1665,7 @@ async def push_to_github_on_startup():
     token = os.environ.get("GITHUB_PERSONAL_ACCESS_TOKEN")
     if not token:
         return
-    files = ["main.py", "CHANGELOG.md", ".gitignore", "replit.md", "version.txt"]
+    files = ["main.py", "CHANGELOG.md", ".gitignore", "replit.md", "version.txt", "updates_data.json"]
     repo = "Deathxi/Grim"
     branch = "main"
     pushed = []
@@ -1726,7 +1743,7 @@ async def post_update_notification():
             latest_sha = all_commits[0]["sha"]
             print(f"[Updates] Latest GitHub SHA: {latest_sha[:7]} — checking {len(updates_channels)} channel(s)")
             for guild_id, data in list(updates_channels.items()):
-                last_sha = data.get("last_commit_sha")
+                last_sha = updates_sha.get(guild_id)
                 print(f"[Updates] Guild {guild_id} — last SHA: {last_sha[:7] if last_sha else 'None'}")
                 # Collect commits newer than last_sha (cap at 10)
                 new_commits = []
@@ -1738,8 +1755,8 @@ async def post_update_notification():
                         break
                 if not new_commits:
                     print(f"[Updates] No new commits for guild {guild_id}, skipping.")
-                    updates_channels[guild_id]["last_commit_sha"] = latest_sha
-                    save_updates_data(updates_channels)
+                    updates_sha[guild_id] = latest_sha
+                    save_updates_sha(updates_sha)
                     continue
                 print(f"[Updates] {len(new_commits)} new commit(s) to post for guild {guild_id}")
                 # Fetch changed files across new commits
@@ -1765,10 +1782,11 @@ async def post_update_notification():
                     channel = await bot.fetch_channel(int(data["channel_id"]))
                     await channel.send(embed=embed)
                     print(f"[Updates] Posted to channel {data['channel_id']} in guild {guild_id}")
+                    # Only advance SHA if post succeeded
+                    updates_sha[guild_id] = latest_sha
+                    save_updates_sha(updates_sha)
                 except Exception as ce:
                     print(f"[Updates] Could not post to channel {data['channel_id']}: {ce}")
-                updates_channels[guild_id]["last_commit_sha"] = latest_sha
-                save_updates_data(updates_channels)
     except Exception as e:
         print(f"[Updates] Failed to post update notification: {e}")
 
@@ -2872,7 +2890,9 @@ async def grim_updates(interaction: discord.Interaction):
     guild_id = str(interaction.guild_id)
     if guild_id in updates_channels:
         del updates_channels[guild_id]
+        updates_sha.pop(guild_id, None)
         save_updates_data(updates_channels)
+        save_updates_sha(updates_sha)
         embed = discord.Embed(
             title="Update Announcements Disabled",
             description="Grim will no longer post patch notes in this server.",
@@ -2881,7 +2901,7 @@ async def grim_updates(interaction: discord.Interaction):
         embed.set_footer(text=f"Powered by {BOT_NAME} • {VERSION}")
         await interaction.response.send_message(embed=embed)
     else:
-        updates_channels[guild_id] = {"channel_id": str(interaction.channel_id), "last_commit_sha": None}
+        updates_channels[guild_id] = {"channel_id": str(interaction.channel_id)}
         save_updates_data(updates_channels)
         embed = discord.Embed(
             title="Update Announcements Enabled",
@@ -2890,6 +2910,24 @@ async def grim_updates(interaction: discord.Interaction):
         )
         embed.set_footer(text=f"Powered by {BOT_NAME} • {VERSION}")
         await interaction.response.send_message(embed=embed)
+    # Push config to GitHub immediately so it survives the next redeploy
+    token = os.environ.get("GITHUB_PERSONAL_ACCESS_TOKEN")
+    if token:
+        try:
+            import base64 as _b64
+            with open(UPDATES_CONFIG_FILE, "rb") as f:
+                content = _b64.b64encode(f.read()).decode()
+            async with aiohttp.ClientSession() as session:
+                headers = {"Authorization": f"token {token}", "Accept": "application/vnd.github.v3+json", "User-Agent": "GrimBot"}
+                async with session.get(f"https://api.github.com/repos/Deathxi/Grim/contents/{UPDATES_CONFIG_FILE}?ref=main", headers=headers) as r:
+                    existing = await r.json()
+                payload = {"message": "Update updates_data.json via bot command", "content": content, "branch": "main"}
+                if existing.get("sha"):
+                    payload["sha"] = existing["sha"]
+                await session.put(f"https://api.github.com/repos/Deathxi/Grim/contents/{UPDATES_CONFIG_FILE}", headers=headers, json=payload)
+                print(f"[Updates] Pushed updates_data.json to GitHub")
+        except Exception as e:
+            print(f"[Updates] Could not push config to GitHub: {e}")
 
 @bot.tree.command(name="welcome_on", description="Enable welcome messages for new members in this channel")
 async def welcome_on(interaction: discord.Interaction):
