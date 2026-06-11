@@ -25,6 +25,8 @@ Grim is a Discord bot for Seclude & Affiliates. Built with Python and discord.py
 - `/newsfeed_status` - View status dashboard with active feeds and next run times
 - `/nftwatch <link>` - Watch an OpenSea collection for live new listings
 - `/nftwatch_cancel` - Cancel active NFT watches via dropdown selector
+- `/welcome_on` - Enable new member welcome messages in the current channel
+- `/welcome_off` - Disable new member welcome messages
 - `/creator` - Meet the creator of Grim
 - `/help_grim` - Show available commands
 
