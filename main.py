@@ -11,6 +11,9 @@ from discord import ui
 from openai import OpenAI
 import tweepy
 
+BOT_NAME = "Grim"
+VERSION = "1.0.0"
+
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
@@ -2778,7 +2781,7 @@ async def on_member_join(member):
         color=discord.Color.from_rgb(18, 18, 18)
     )
     embed.set_thumbnail(url=avatar_url)
-    embed.set_footer(text="Grim")
+    embed.set_footer(text=f"Powered by {BOT_NAME} • {VERSION}")
     await channel.send(embed=embed)
 
 @bot.event
