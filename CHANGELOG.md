@@ -8,6 +8,7 @@ All notable changes to this project are documented here, organized by month.
 
 ### Added
 - `/support` — Shows contact info (`x@deathi.net`) and a link to the Seclude & Affiliates Discord hub/FAQ. Displays the server icon as a thumbnail once the CDN URL is configured.
+- Version counter moved to `~/.grim_data/version_count.txt` (persists across redeploys). Project-root `version.txt` stays in sync for GitHub visibility.
 - `/grim_updates` — Toggles auto-posted patch notes in the current channel. On every deploy, Grim fetches new GitHub commits, lists changed files and commit messages, and posts an embed with the new version number.
 - `/welcome_on` — Enables welcome messages for new members in the current channel. Sends a dark embed with Grim as author, the new member's username as title, server name as description, and their profile picture as thumbnail.
 - `/welcome_off` — Disables welcome messages for the server. Settings persist across restarts via `welcome_data.json`.
