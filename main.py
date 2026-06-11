@@ -1752,24 +1752,14 @@ async def post_update_notification():
                         detail = await r.json()
                     for file in detail.get("files", []):
                         changed_files[file["filename"]] = file["status"]
-                commit_lines = []
-                for commit in new_commits:
-                    msg = commit["commit"]["message"].split("\n")[0]
-                    date = commit["commit"]["author"]["date"][:10]
-                    commit_lines.append(f"`{commit['sha'][:7]}` {msg} — {date}")
-                file_lines = [f"`{fname}` — {status}" for fname, status in changed_files.items()]
-                description = "\n".join(commit_lines)
-                if len(description) > 4000:
-                    description = description[:4000] + "\n…"
+                file_list = "\n".join(f"`{fname}`" for fname in list(changed_files.keys())[:10]) or "`main.py`"
                 embed = discord.Embed(
                     title=f"Grim — {VERSION}",
-                    description=description or "Internal update",
+                    description=f"**{len(new_commits)} commit(s)** deployed\n\n{file_list}",
                     color=discord.Color.from_rgb(18, 18, 18)
                 )
-                if file_lines:
-                    embed.add_field(name="Files Updated", value="\n".join(file_lines[:15]), inline=False)
                 embed.add_field(name="Repository", value="[Deathxi/Grim](https://github.com/Deathxi/Grim)", inline=True)
-                embed.add_field(name="Commits", value=str(len(new_commits)), inline=True)
+                embed.add_field(name="Changes", value=str(len(changed_files)), inline=True)
                 embed.set_footer(text=f"Powered by {BOT_NAME} • {VERSION}")
                 try:
                     channel = await bot.fetch_channel(int(data["channel_id"]))
