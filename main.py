@@ -13,25 +13,40 @@ import tweepy
 
 BOT_NAME = "Grim"
 
+VERSION_COUNT_FILE = os.path.expanduser("~/.grim_data/version_count.txt")
+
 def _format_version(count):
     return f"V{count // 100}.{count % 100:02d}"
 
 def _load_version():
-    try:
-        with open("version.txt", "r") as f:
-            return _format_version(int(f.read().strip()))
-    except:
-        return "V0.00"
+    # Persistent file survives redeploys; fall back to project-root version.txt for first boot
+    for path in [VERSION_COUNT_FILE, "version.txt"]:
+        try:
+            with open(path, "r") as f:
+                val = f.read().strip()
+                if val.isdigit():
+                    return _format_version(int(val))
+        except:
+            pass
+    return "V1.01"
 
 def _bump_version():
     global VERSION
     try:
-        with open("version.txt", "r") as f:
+        with open(VERSION_COUNT_FILE, "r") as f:
             count = int(f.read().strip())
     except:
-        count = 0
+        # Seed from project-root version.txt if persistent file doesn't exist yet
+        try:
+            with open("version.txt", "r") as f:
+                count = int(f.read().strip())
+        except:
+            count = 101
     count += 1
     VERSION = _format_version(count)
+    with open(VERSION_COUNT_FILE, "w") as f:
+        f.write(str(count))
+    # Keep project-root version.txt in sync for GitHub visibility
     with open("version.txt", "w") as f:
         f.write(str(count))
     print(f"[Version] Deploy #{count} → {VERSION}")
