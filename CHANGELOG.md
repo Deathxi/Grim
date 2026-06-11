@@ -7,8 +7,7 @@ All notable changes to this project are documented here, organized by month.
 ## June 2026
 
 ### Added
-- All bot embeds now display `· discord.gg/KFcpDGtckz` in the footer, linking users to the Seclude & Affiliates support server and Deathxi's projects hub.
-
+- `/support` — Shows contact info (`x@deathi.net`) and a link to the Seclude & Affiliates Discord hub/FAQ. Displays the server icon as a thumbnail once the CDN URL is configured.
 
 - `/remind <subject> <when>` — Set a reminder for a drop or event. Grim sends a day-before ping and a day-of ping in the channel where the reminder was created. Subject can be a URL (auto-embedded by Discord) or plain text.
 - `/reminders` — View all your active reminders with their IDs and scheduled dates. Admins see all server reminders.
