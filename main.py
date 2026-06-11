@@ -156,6 +156,23 @@ def save_reminders_data(data):
 
 reminders_store = load_reminders_data()
 
+WELCOME_FILE = _data_path("welcome_data.json")
+
+def load_welcome_data():
+    try:
+        if os.path.exists(WELCOME_FILE):
+            with open(WELCOME_FILE, 'r') as f:
+                return json.load(f)
+    except:
+        pass
+    return {}
+
+def save_welcome_data(data):
+    with open(WELCOME_FILE, 'w') as f:
+        json.dump(data, f)
+
+welcome_channels = load_welcome_data()
+
 def is_url(text):
     return text.strip().startswith(("http://", "https://"))
 
@@ -2710,9 +2727,60 @@ async def livetweet(interaction: discord.Interaction, username: str):
         print(f"Error setting up livetweet: {e}")
         await interaction.followup.send(f"Error: Could not set up tracking. The X API may be rate limited or the username is invalid.")
 
+@bot.tree.command(name="welcome_on", description="Enable welcome messages for new members in this channel")
+async def welcome_on(interaction: discord.Interaction):
+    if not interaction.user.guild_permissions.manage_channels:
+        await interaction.response.send_message("You need 'Manage Channels' permission to use this command.", ephemeral=True)
+        return
+    guild_id = str(interaction.guild_id)
+    welcome_channels[guild_id] = str(interaction.channel_id)
+    save_welcome_data(welcome_channels)
+    embed = discord.Embed(
+        title="Welcome Messages Enabled",
+        description=f"New member greetings will be posted in <#{interaction.channel_id}>.",
+        color=discord.Color.from_rgb(18, 18, 18)
+    )
+    embed.set_footer(text="Grim")
+    await interaction.response.send_message(embed=embed)
+
+@bot.tree.command(name="welcome_off", description="Disable welcome messages for new members")
+async def welcome_off(interaction: discord.Interaction):
+    if not interaction.user.guild_permissions.manage_channels:
+        await interaction.response.send_message("You need 'Manage Channels' permission to use this command.", ephemeral=True)
+        return
+    guild_id = str(interaction.guild_id)
+    if guild_id in welcome_channels:
+        del welcome_channels[guild_id]
+        save_welcome_data(welcome_channels)
+        embed = discord.Embed(
+            title="Welcome Messages Disabled",
+            description="New member greetings have been turned off.",
+            color=discord.Color.from_rgb(18, 18, 18)
+        )
+        embed.set_footer(text="Grim")
+        await interaction.response.send_message(embed=embed)
+    else:
+        await interaction.response.send_message("Welcome messages are not enabled in this server.", ephemeral=True)
+
 @bot.event
 async def on_member_join(member):
-    print(f"{member.name} has joined the server")
+    print(f"{member.name} has joined {member.guild.name}")
+    guild_id = str(member.guild.id)
+    if guild_id not in welcome_channels:
+        return
+    channel = member.guild.get_channel(int(welcome_channels[guild_id]))
+    if not channel:
+        return
+    avatar_url = member.display_avatar.url
+    embed = discord.Embed(
+        title=f"Greetings, {member.name}",
+        description=f"Welcome to **{member.guild.name}**",
+        color=discord.Color.from_rgb(18, 18, 18)
+    )
+    embed.set_author(name="Grim", icon_url=member.guild.me.display_avatar.url)
+    embed.set_thumbnail(url=avatar_url)
+    embed.set_footer(text="Grim")
+    await channel.send(embed=embed)
 
 @bot.event
 async def on_message(message):
