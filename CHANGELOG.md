@@ -8,6 +8,8 @@ All notable changes to this project are documented here, organized by month.
 
 ### Added
 - `/support` — Shows contact info (`x@deathi.net`) and a link to the Seclude & Affiliates Discord hub/FAQ. Displays the server icon as a thumbnail once the CDN URL is configured.
+- `/welcome_on` — Enables welcome messages for new members in the current channel. Sends a dark embed with Grim as author, the new member's username as title, server name as description, and their profile picture as thumbnail.
+- `/welcome_off` — Disables welcome messages for the server. Settings persist across restarts via `welcome_data.json`.
 
 - `/remind <subject> <when>` — Set a reminder for a drop or event. Grim sends a day-before ping and a day-of ping in the channel where the reminder was created. Subject can be a URL (auto-embedded by Discord) or plain text.
 - `/reminders` — View all your active reminders with their IDs and scheduled dates. Admins see all server reminders.
