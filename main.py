@@ -2777,7 +2777,6 @@ async def on_member_join(member):
         description=f"Welcome to **{member.guild.name}**",
         color=discord.Color.from_rgb(18, 18, 18)
     )
-    embed.set_author(name="Grim", icon_url=member.guild.me.display_avatar.url)
     embed.set_thumbnail(url=avatar_url)
     embed.set_footer(text="Grim")
     await channel.send(embed=embed)
