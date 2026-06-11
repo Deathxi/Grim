@@ -11,6 +11,7 @@ All notable changes to this project are documented here, organized by month.
 - Version counter moved to `~/.grim_data/version_count.txt` (persists across redeploys). Project-root `version.txt` stays in sync for GitHub visibility.
 - `/grim_updates` config now stored in project root and pushed to GitHub on toggle — survives all future redeploys without needing to be re-enabled.
 - SHA tracking separated from channel config; SHA only advances on a successful post so failed notifications retry on the next deploy.
+- `sync_from_github()` now runs first on every startup — pulls `version.txt` and `updates_data.json` directly from GitHub so version and channel config are always correct regardless of deploy snapshot.
 - `/grim_updates` — Toggles auto-posted patch notes in the current channel. On every deploy, Grim fetches new GitHub commits, lists changed files and commit messages, and posts an embed with the new version number.
 - `/welcome_on` — Enables welcome messages for new members in the current channel. Sends a dark embed with Grim as author, the new member's username as title, server name as description, and their profile picture as thumbnail.
 - `/welcome_off` — Disables welcome messages for the server. Settings persist across restarts via `welcome_data.json`.
