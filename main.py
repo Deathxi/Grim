@@ -200,6 +200,23 @@ def save_welcome_data(data):
 
 welcome_channels = load_welcome_data()
 
+UPDATES_FILE = _data_path("updates_data.json")
+
+def load_updates_data():
+    try:
+        if os.path.exists(UPDATES_FILE):
+            with open(UPDATES_FILE, 'r') as f:
+                return json.load(f)
+    except:
+        pass
+    return {}
+
+def save_updates_data(data):
+    with open(UPDATES_FILE, 'w') as f:
+        json.dump(data, f)
+
+updates_channels = load_updates_data()
+
 def is_url(text):
     return text.strip().startswith(("http://", "https://"))
 
@@ -1662,6 +1679,77 @@ async def push_to_github_on_startup():
         print(f"[GitHub Sync] Pushed: {', '.join(pushed)}")
     if failed:
         print(f"[GitHub Sync] Failed: {', '.join(failed)}")
+    await post_update_notification()
+
+async def post_update_notification():
+    if not updates_channels:
+        return
+    token = os.environ.get("GITHUB_PERSONAL_ACCESS_TOKEN")
+    if not token:
+        return
+    repo = "Deathxi/Grim"
+    branch = "main"
+    headers = {
+        "Authorization": f"token {token}",
+        "Accept": "application/vnd.github.v3+json",
+        "User-Agent": "GrimBot"
+    }
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                f"https://api.github.com/repos/{repo}/commits?ref={branch}&per_page=25",
+                headers=headers
+            ) as r:
+                all_commits = await r.json()
+            if not isinstance(all_commits, list) or not all_commits:
+                return
+            latest_sha = all_commits[0]["sha"]
+            for guild_id, data in list(updates_channels.items()):
+                last_sha = data.get("last_commit_sha")
+                new_commits = []
+                for commit in all_commits:
+                    if commit["sha"] == last_sha:
+                        break
+                    new_commits.append(commit)
+                if not new_commits:
+                    if last_sha is None:
+                        new_commits = all_commits[:3]
+                    else:
+                        updates_channels[guild_id]["last_commit_sha"] = latest_sha
+                        save_updates_data(updates_channels)
+                        continue
+                changed_files = {}
+                for commit in new_commits[:10]:
+                    async with session.get(
+                        f"https://api.github.com/repos/{repo}/commits/{commit['sha']}",
+                        headers=headers
+                    ) as r:
+                        detail = await r.json()
+                    for f in detail.get("files", []):
+                        changed_files[f["filename"]] = f["status"]
+                commit_lines = []
+                for commit in new_commits[:10]:
+                    msg = commit["commit"]["message"].split("\n")[0]
+                    date = commit["commit"]["author"]["date"][:10]
+                    commit_lines.append(f"`{commit['sha'][:7]}` {msg} — {date}")
+                file_lines = [f"`{fname}` — {status}" for fname, status in changed_files.items()]
+                embed = discord.Embed(
+                    title=f"Grim — {VERSION}",
+                    description="\n".join(commit_lines) or "Internal update",
+                    color=discord.Color.from_rgb(18, 18, 18)
+                )
+                if file_lines:
+                    embed.add_field(name="Files Updated", value="\n".join(file_lines[:15]), inline=False)
+                embed.add_field(name="Repository", value="[Deathxi/Grim](https://github.com/Deathxi/Grim)", inline=True)
+                embed.add_field(name="Commits", value=str(len(new_commits)), inline=True)
+                embed.set_footer(text=f"Powered by {BOT_NAME} • {VERSION}")
+                channel = bot.get_channel(int(data["channel_id"]))
+                if channel:
+                    await channel.send(embed=embed)
+                updates_channels[guild_id]["last_commit_sha"] = latest_sha
+                save_updates_data(updates_channels)
+    except Exception as e:
+        print(f"[Updates] Failed to post update notification: {e}")
 
 @bot.tree.command(name="info", description="Get server status and info")
 async def info(interaction: discord.Interaction):
@@ -2754,6 +2842,33 @@ async def livetweet(interaction: discord.Interaction, username: str):
     except Exception as e:
         print(f"Error setting up livetweet: {e}")
         await interaction.followup.send(f"Error: Could not set up tracking. The X API may be rate limited or the username is invalid.")
+
+@bot.tree.command(name="grim_updates", description="Toggle Grim update announcements in this channel")
+async def grim_updates(interaction: discord.Interaction):
+    if not interaction.user.guild_permissions.manage_channels:
+        await interaction.response.send_message("You need 'Manage Channels' permission to use this command.", ephemeral=True)
+        return
+    guild_id = str(interaction.guild_id)
+    if guild_id in updates_channels:
+        del updates_channels[guild_id]
+        save_updates_data(updates_channels)
+        embed = discord.Embed(
+            title="Update Announcements Disabled",
+            description="Grim will no longer post patch notes in this server.",
+            color=discord.Color.from_rgb(18, 18, 18)
+        )
+        embed.set_footer(text=f"Powered by {BOT_NAME} • {VERSION}")
+        await interaction.response.send_message(embed=embed)
+    else:
+        updates_channels[guild_id] = {"channel_id": str(interaction.channel_id), "last_commit_sha": None}
+        save_updates_data(updates_channels)
+        embed = discord.Embed(
+            title="Update Announcements Enabled",
+            description=f"Grim will post patch notes in <#{interaction.channel_id}> whenever a new version is deployed.",
+            color=discord.Color.from_rgb(18, 18, 18)
+        )
+        embed.set_footer(text=f"Powered by {BOT_NAME} • {VERSION}")
+        await interaction.response.send_message(embed=embed)
 
 @bot.tree.command(name="welcome_on", description="Enable welcome messages for new members in this channel")
 async def welcome_on(interaction: discord.Interaction):
