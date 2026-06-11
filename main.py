@@ -1698,10 +1698,14 @@ async def push_to_github_on_startup():
 
 async def post_update_notification():
     if not updates_channels:
+        print("[Updates] No channels registered, skipping.")
         return
     token = os.environ.get("GITHUB_PERSONAL_ACCESS_TOKEN")
     if not token:
+        print("[Updates] No GitHub token, skipping.")
         return
+    # Small delay to ensure guild/channel cache is fully populated after startup
+    await asyncio.sleep(5)
     repo = "Deathxi/Grim"
     branch = "main"
     headers = {
@@ -1717,40 +1721,49 @@ async def post_update_notification():
             ) as r:
                 all_commits = await r.json()
             if not isinstance(all_commits, list) or not all_commits:
+                print(f"[Updates] GitHub returned unexpected response: {all_commits}")
                 return
             latest_sha = all_commits[0]["sha"]
+            print(f"[Updates] Latest GitHub SHA: {latest_sha[:7]} — checking {len(updates_channels)} channel(s)")
             for guild_id, data in list(updates_channels.items()):
                 last_sha = data.get("last_commit_sha")
+                print(f"[Updates] Guild {guild_id} — last SHA: {last_sha[:7] if last_sha else 'None'}")
+                # Collect commits newer than last_sha (cap at 10)
                 new_commits = []
                 for commit in all_commits:
                     if commit["sha"] == last_sha:
                         break
                     new_commits.append(commit)
+                    if len(new_commits) >= 10:
+                        break
                 if not new_commits:
-                    if last_sha is None:
-                        new_commits = all_commits[:3]
-                    else:
-                        updates_channels[guild_id]["last_commit_sha"] = latest_sha
-                        save_updates_data(updates_channels)
-                        continue
+                    print(f"[Updates] No new commits for guild {guild_id}, skipping.")
+                    updates_channels[guild_id]["last_commit_sha"] = latest_sha
+                    save_updates_data(updates_channels)
+                    continue
+                print(f"[Updates] {len(new_commits)} new commit(s) to post for guild {guild_id}")
+                # Fetch changed files across new commits
                 changed_files = {}
-                for commit in new_commits[:10]:
+                for commit in new_commits[:5]:
                     async with session.get(
                         f"https://api.github.com/repos/{repo}/commits/{commit['sha']}",
                         headers=headers
                     ) as r:
                         detail = await r.json()
-                    for f in detail.get("files", []):
-                        changed_files[f["filename"]] = f["status"]
+                    for file in detail.get("files", []):
+                        changed_files[file["filename"]] = file["status"]
                 commit_lines = []
-                for commit in new_commits[:10]:
+                for commit in new_commits:
                     msg = commit["commit"]["message"].split("\n")[0]
                     date = commit["commit"]["author"]["date"][:10]
                     commit_lines.append(f"`{commit['sha'][:7]}` {msg} — {date}")
                 file_lines = [f"`{fname}` — {status}" for fname, status in changed_files.items()]
+                description = "\n".join(commit_lines)
+                if len(description) > 4000:
+                    description = description[:4000] + "\n…"
                 embed = discord.Embed(
                     title=f"Grim — {VERSION}",
-                    description="\n".join(commit_lines) or "Internal update",
+                    description=description or "Internal update",
                     color=discord.Color.from_rgb(18, 18, 18)
                 )
                 if file_lines:
@@ -1758,9 +1771,12 @@ async def post_update_notification():
                 embed.add_field(name="Repository", value="[Deathxi/Grim](https://github.com/Deathxi/Grim)", inline=True)
                 embed.add_field(name="Commits", value=str(len(new_commits)), inline=True)
                 embed.set_footer(text=f"Powered by {BOT_NAME} • {VERSION}")
-                channel = bot.get_channel(int(data["channel_id"]))
-                if channel:
+                try:
+                    channel = await bot.fetch_channel(int(data["channel_id"]))
                     await channel.send(embed=embed)
+                    print(f"[Updates] Posted to channel {data['channel_id']} in guild {guild_id}")
+                except Exception as ce:
+                    print(f"[Updates] Could not post to channel {data['channel_id']}: {ce}")
                 updates_channels[guild_id]["last_commit_sha"] = latest_sha
                 save_updates_data(updates_channels)
     except Exception as e:
