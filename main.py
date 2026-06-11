@@ -13,24 +13,28 @@ import tweepy
 
 BOT_NAME = "Grim"
 
+def _format_version(count):
+    return f"V{count // 100}.{count % 100:02d}"
+
 def _load_version():
     try:
         with open("version.txt", "r") as f:
-            return f.read().strip()
+            return _format_version(int(f.read().strip()))
     except:
-        return "1.0.0"
+        return "V0.00"
 
 def _bump_version():
     global VERSION
     try:
-        parts = VERSION.split(".")
-        parts[2] = str(int(parts[2]) + 1)
-        VERSION = ".".join(parts)
-        with open("version.txt", "w") as f:
-            f.write(VERSION)
-        print(f"[Version] Bumped to {VERSION}")
-    except Exception as e:
-        print(f"[Version] Could not bump: {e}")
+        with open("version.txt", "r") as f:
+            count = int(f.read().strip())
+    except:
+        count = 0
+    count += 1
+    VERSION = _format_version(count)
+    with open("version.txt", "w") as f:
+        f.write(str(count))
+    print(f"[Version] Deploy #{count} → {VERSION}")
 
 VERSION = _load_version()
 
