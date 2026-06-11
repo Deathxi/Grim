@@ -67,4 +67,4 @@ All notable changes to this project are documented here, organized by month.
 - `/creator` — Meet the creator of Grim.
 - `/help_grim` — Display all available commands.
 - xAI Grok API integration for all AI features (`grok-3` for chat, `grok-4-1-fast` with web search for newsfeed).
-- Monochromatic Tesla/X.com aesthetic across all embeds (dark charcoal `rgb(18, 18, 18)`).
+- Monochromatic dark aesthetic across all embeds (dark charcoal `rgb(18, 18, 18)`).
