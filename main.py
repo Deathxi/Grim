@@ -1573,6 +1573,60 @@ async def on_ready():
     if not health_monitor.is_running():
         health_monitor.start()
         print("Started health monitor (checks every 5 minutes)")
+    
+    asyncio.create_task(push_to_github_on_startup())
+
+async def push_to_github_on_startup():
+    token = os.environ.get("GITHUB_PERSONAL_ACCESS_TOKEN")
+    if not token:
+        return
+    files = ["main.py", "CHANGELOG.md", ".gitignore", "replit.md"]
+    repo = "Deathxi/Grim"
+    branch = "main"
+    pushed = []
+    failed = []
+    async with aiohttp.ClientSession() as session:
+        for filepath in files:
+            if not os.path.exists(filepath):
+                continue
+            try:
+                with open(filepath, "rb") as f:
+                    import base64
+                    content = base64.b64encode(f.read()).decode()
+                headers = {
+                    "Authorization": f"token {token}",
+                    "Accept": "application/vnd.github.v3+json",
+                    "User-Agent": "GrimBot"
+                }
+                async with session.get(
+                    f"https://api.github.com/repos/{repo}/contents/{filepath}?ref={branch}",
+                    headers=headers
+                ) as r:
+                    existing = await r.json()
+                sha = existing.get("sha")
+                payload = {
+                    "message": f"Auto-sync: update {filepath}",
+                    "content": content,
+                    "branch": branch
+                }
+                if sha:
+                    payload["sha"] = sha
+                async with session.put(
+                    f"https://api.github.com/repos/{repo}/contents/{filepath}",
+                    headers=headers,
+                    json=payload
+                ) as r:
+                    result = await r.json()
+                if "content" in result:
+                    pushed.append(filepath)
+                else:
+                    failed.append(filepath)
+            except Exception as e:
+                failed.append(f"{filepath}({e})")
+    if pushed:
+        print(f"[GitHub Sync] Pushed: {', '.join(pushed)}")
+    if failed:
+        print(f"[GitHub Sync] Failed: {', '.join(failed)}")
 
 @bot.tree.command(name="info", description="Get server status and info")
 async def info(interaction: discord.Interaction):
