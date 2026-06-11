@@ -1650,6 +1650,14 @@ async def sync_from_github():
     # Reload updates_channels from the freshly pulled file
     updates_channels = load_updates_data()
     print(f"[Sync] updates_channels reloaded — {len(updates_channels)} guild(s) registered")
+    # Set VERSION directly from the synced file so it's correct before _bump_version runs
+    global VERSION
+    try:
+        with open("version.txt", "r") as f:
+            VERSION = _format_version(int(f.read().strip()))
+        print(f"[Sync] VERSION pre-set to {VERSION}")
+    except Exception as e:
+        print(f"[Sync] Could not pre-set VERSION: {e}")
 
 @bot.event
 async def on_ready():
@@ -1692,6 +1700,7 @@ async def on_ready():
     
     _bump_version()
     asyncio.create_task(push_to_github_on_startup())
+    asyncio.create_task(post_update_notification())
 
 async def push_to_github_on_startup():
     token = os.environ.get("GITHUB_PERSONAL_ACCESS_TOKEN")
@@ -1743,18 +1752,14 @@ async def push_to_github_on_startup():
         print(f"[GitHub Sync] Pushed: {', '.join(pushed)}")
     if failed:
         print(f"[GitHub Sync] Failed: {', '.join(failed)}")
-    await post_update_notification()
 
 async def post_update_notification():
-    if not updates_channels:
-        print("[Updates] No channels registered, skipping.")
-        return
     token = os.environ.get("GITHUB_PERSONAL_ACCESS_TOKEN")
     if not token:
         print("[Updates] No GitHub token, skipping.")
         return
-    # Small delay to ensure guild/channel cache is fully populated after startup
-    await asyncio.sleep(5)
+    # Delay to ensure push completes and guild/channel cache is fully populated
+    await asyncio.sleep(30)
     repo = "Deathxi/Grim"
     branch = "main"
     headers = {
@@ -1764,6 +1769,20 @@ async def post_update_notification():
     }
     try:
         async with aiohttp.ClientSession() as session:
+            # Always pull channel config fresh from GitHub — never rely on local state
+            async with session.get(
+                f"https://api.github.com/repos/{repo}/contents/updates_data.json?ref={branch}",
+                headers=headers
+            ) as r:
+                cfg = await r.json()
+            if "content" not in cfg:
+                print(f"[Updates] Could not fetch updates_data.json: {cfg.get('message')}")
+                return
+            live_channels = json.loads(base64.b64decode(cfg["content"]).decode())
+            if not live_channels:
+                print("[Updates] No channels registered in GitHub config, skipping.")
+                return
+            print(f"[Updates] Loaded {len(live_channels)} channel(s) from GitHub")
             async with session.get(
                 f"https://api.github.com/repos/{repo}/commits?ref={branch}&per_page=25",
                 headers=headers
@@ -1773,8 +1792,8 @@ async def post_update_notification():
                 print(f"[Updates] GitHub returned unexpected response: {all_commits}")
                 return
             latest_sha = all_commits[0]["sha"]
-            print(f"[Updates] Latest GitHub SHA: {latest_sha[:7]} — checking {len(updates_channels)} channel(s)")
-            for guild_id, data in list(updates_channels.items()):
+            print(f"[Updates] Latest GitHub SHA: {latest_sha[:7]} — checking {len(live_channels)} channel(s)")
+            for guild_id, data in list(live_channels.items()):
                 last_sha = updates_sha.get(guild_id)
                 print(f"[Updates] Guild {guild_id} — last SHA: {last_sha[:7] if last_sha else 'None'}")
                 # Collect commits newer than last_sha (cap at 10)
