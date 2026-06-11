@@ -2619,7 +2619,7 @@ async def remind_cancel(interaction: discord.Interaction, reminder_id: str):
     embed.set_footer(text="Grim Reminder")
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
-SECLUDE_ICON_URL = ""  # Paste Seclude server icon CDN URL here
+SECLUDE_ICON_URL = "https://cdn.discordapp.com/icons/1101443658953261076/a_7df56c851d8a26e198d706cc3c640426.webp?size=1024&animated=true"
 
 @bot.tree.command(name="support", description="Get support or connect with the Seclude community")
 async def support(interaction: discord.Interaction):
