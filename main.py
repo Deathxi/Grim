@@ -12,7 +12,27 @@ from openai import OpenAI
 import tweepy
 
 BOT_NAME = "Grim"
-VERSION = "1.0.0"
+
+def _load_version():
+    try:
+        with open("version.txt", "r") as f:
+            return f.read().strip()
+    except:
+        return "1.0.0"
+
+def _bump_version():
+    global VERSION
+    try:
+        parts = VERSION.split(".")
+        parts[2] = str(int(parts[2]) + 1)
+        VERSION = ".".join(parts)
+        with open("version.txt", "w") as f:
+            f.write(VERSION)
+        print(f"[Version] Bumped to {VERSION}")
+    except Exception as e:
+        print(f"[Version] Could not bump: {e}")
+
+VERSION = _load_version()
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -1585,13 +1605,14 @@ async def on_ready():
         health_monitor.start()
         print("Started health monitor (checks every 5 minutes)")
     
+    _bump_version()
     asyncio.create_task(push_to_github_on_startup())
 
 async def push_to_github_on_startup():
     token = os.environ.get("GITHUB_PERSONAL_ACCESS_TOKEN")
     if not token:
         return
-    files = ["main.py", "CHANGELOG.md", ".gitignore", "replit.md"]
+    files = ["main.py", "CHANGELOG.md", ".gitignore", "replit.md", "version.txt"]
     repo = "Deathxi/Grim"
     branch = "main"
     pushed = []
