@@ -4,6 +4,7 @@ import json
 import asyncio
 import aiohttp
 import uuid
+import base64
 import discord
 from discord.ext import commands, tasks
 from discord import ui
@@ -22,17 +23,7 @@ DATA_DIR = os.path.expanduser("~/.grim_data")
 os.makedirs(DATA_DIR, exist_ok=True)
 
 def _data_path(filename):
-    new_path = os.path.join(DATA_DIR, filename)
-    old_path = filename  # old location (project root, tracked by git)
-    # One-time migration: move existing data from old path to new path
-    if not os.path.exists(new_path) and os.path.exists(old_path):
-        try:
-            import shutil
-            shutil.copy2(old_path, new_path)
-            print(f"[Data] Migrated {filename} → {new_path}")
-        except Exception as e:
-            print(f"[Data] Migration failed for {filename}: {e}")
-    return new_path
+    return os.path.join(DATA_DIR, filename)
 
 # Twitter/X API client
 def get_twitter_client():
@@ -1591,7 +1582,6 @@ async def push_to_github_on_startup():
                 continue
             try:
                 with open(filepath, "rb") as f:
-                    import base64
                     content = base64.b64encode(f.read()).decode()
                 headers = {
                     "Authorization": f"token {token}",
