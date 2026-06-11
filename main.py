@@ -1620,11 +1620,43 @@ async def health_monitor():
 async def before_health_monitor():
     await bot.wait_until_ready()
 
+async def sync_from_github():
+    """Pull version.txt and updates_data.json from GitHub before startup — source of truth."""
+    global updates_channels
+    token = os.environ.get("GITHUB_PERSONAL_ACCESS_TOKEN")
+    if not token:
+        return
+    repo = "Deathxi/Grim"
+    headers = {"Authorization": f"token {token}", "Accept": "application/vnd.github.v3+json", "User-Agent": "GrimBot"}
+    files_to_sync = ["version.txt", "updates_data.json"]
+    async with aiohttp.ClientSession() as session:
+        for fname in files_to_sync:
+            try:
+                async with session.get(f"https://api.github.com/repos/{repo}/contents/{fname}?ref=main", headers=headers) as r:
+                    data = await r.json()
+                if "content" not in data:
+                    print(f"[Sync] Could not fetch {fname} from GitHub: {data.get('message')}")
+                    continue
+                content = base64.b64decode(data["content"]).decode()
+                with open(fname, "w") as f:
+                    f.write(content)
+                # Also sync version.txt into persistent counter file
+                if fname == "version.txt":
+                    with open(VERSION_COUNT_FILE, "w") as f:
+                        f.write(content.strip())
+                print(f"[Sync] Pulled {fname} from GitHub")
+            except Exception as e:
+                print(f"[Sync] Failed to pull {fname}: {e}")
+    # Reload updates_channels from the freshly pulled file
+    updates_channels = load_updates_data()
+    print(f"[Sync] updates_channels reloaded — {len(updates_channels)} guild(s) registered")
+
 @bot.event
 async def on_ready():
     print(f"{bot.user} has connected to Discord!")
     print(f"Bot is in {len(bot.guilds)} server(s)")
     print(f"[Startup] Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S UTC')}")
+    await sync_from_github()
     
     await bot.change_presence(activity=discord.Activity(type=discord.ActivityType.watching, name="𝕴𝖋 𝕷𝖔𝖔𝖐𝖘 𝕮𝖔𝖚𝖑𝖉 𝕶𝖎𝖑𝖑"))
     
