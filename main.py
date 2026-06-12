@@ -2286,13 +2286,22 @@ async def sync_from_github():
                     else:
                         print(f"[Sync] VERSION_COUNT_FILE already exists — not overwriting with GitHub copy")
                 elif fname == "updates_data.json":
-                    # Only seed persistent copy if it doesn't already have data
-                    if not os.path.exists(UPDATES_CONFIG_FILE):
+                    # Restore from GitHub if local persistent copy is missing or empty
+                    needs_restore = True
+                    if os.path.exists(UPDATES_CONFIG_FILE):
+                        try:
+                            with open(UPDATES_CONFIG_FILE, "r") as f:
+                                existing = json.load(f)
+                            if existing:  # has real data — trust it over GitHub
+                                needs_restore = False
+                        except:
+                            pass
+                    if needs_restore:
                         with open(UPDATES_CONFIG_FILE, "w") as f:
                             f.write(content)
-                        print(f"[Sync] Seeded persistent updates_data.json from GitHub")
+                        print(f"[Sync] Restored persistent updates_data.json from GitHub")
                     else:
-                        print(f"[Sync] Persistent updates_data.json already exists — not overwriting")
+                        print(f"[Sync] Persistent updates_data.json has data — keeping it")
                 print(f"[Sync] Pulled {fname} from GitHub")
             except Exception as e:
                 print(f"[Sync] Failed to pull {fname}: {e}")
