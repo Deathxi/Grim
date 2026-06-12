@@ -2277,14 +2277,21 @@ async def sync_from_github():
                 with open(fname, "w") as f:
                     f.write(content)
                 if fname == "version.txt":
-                    # Only sync to persistent counter if it doesn't already exist
-                    # (persistent counter is authoritative; GitHub is a backup seed)
-                    if not os.path.exists(VERSION_COUNT_FILE):
+                    # GitHub is source of truth — use whichever is higher (local or GitHub)
+                    github_count = int(content.strip())
+                    local_count = 0
+                    if os.path.exists(VERSION_COUNT_FILE):
+                        try:
+                            with open(VERSION_COUNT_FILE, "r") as f:
+                                local_count = int(f.read().strip())
+                        except:
+                            pass
+                    if github_count >= local_count:
                         with open(VERSION_COUNT_FILE, "w") as f:
-                            f.write(content.strip())
-                        print(f"[Sync] Seeded VERSION_COUNT_FILE from GitHub: {content.strip()}")
+                            f.write(str(github_count))
+                        print(f"[Sync] VERSION_COUNT_FILE set from GitHub: {github_count} (local was {local_count})")
                     else:
-                        print(f"[Sync] VERSION_COUNT_FILE already exists — not overwriting with GitHub copy")
+                        print(f"[Sync] Local VERSION_COUNT_FILE ({local_count}) ahead of GitHub ({github_count}) — keeping local")
                 elif fname == "updates_data.json":
                     # Restore from GitHub if local persistent copy is missing or empty
                     needs_restore = True
