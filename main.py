@@ -2548,25 +2548,22 @@ async def post_update_notification():
         except Exception as e:
             print(f"[Updates] Could not fetch GitHub commit data: {e}")
 
-    # Build embed — rich if we have commit data, simple fallback if not
-    if new_commits and changed_files:
-        file_list = "\n".join(f"`{fname}`" for fname in list(changed_files.keys())[:10])
-        embed = discord.Embed(
-            title=f"Grim — {VERSION}",
-            description=f"**{len(new_commits)} commit(s)** deployed\n\n{file_list}",
-            color=discord.Color.from_rgb(18, 18, 18)
-        )
-        embed.add_field(name="Repository", value=f"[{repo}](https://github.com/{repo})", inline=True)
-        embed.add_field(name="Changes", value=str(len(changed_files)), inline=True)
+    # Build embed — always clean and minimal
+    if new_commits:
+        file_list = "\n".join(f"`{fname}`" for fname in list(changed_files.keys())[:10]) if changed_files else ""
+        description = f"**{len(new_commits)} commit(s) deployed**"
+        if file_list:
+            description += f"\n\n{file_list}"
     else:
-        changelog_notes = _load_changelog_notes()
-        description = changelog_notes if changelog_notes else "Grim has been updated and redeployed."
-        embed = discord.Embed(
-            title=f"Grim — {VERSION}",
-            description=description,
-            color=discord.Color.from_rgb(18, 18, 18)
-        )
-        embed.add_field(name="Repository", value=f"[{repo}](https://github.com/{repo})", inline=True)
+        description = "Grim has been updated and redeployed."
+    embed = discord.Embed(
+        title=f"Grim — {VERSION}",
+        description=description,
+        color=discord.Color.from_rgb(18, 18, 18)
+    )
+    embed.add_field(name="Repository", value=f"[{repo}](https://github.com/{repo})", inline=True)
+    if changed_files:
+        embed.add_field(name="Changes", value=str(len(changed_files)), inline=True)
     embed.set_footer(text=f"Powered by {BOT_NAME} • {VERSION}")
 
     posted = False
