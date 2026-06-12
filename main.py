@@ -1077,6 +1077,31 @@ async def generate_contextual_reply(message: discord.Message) -> str | None:
     else:
         digest_block = "Not yet generated — will be ready after the server has some activity."
 
+    # Current date/time — always injected so Grim is grounded in today
+    now_str = datetime.now().strftime("%A, %B %d, %Y — %I:%M %p")
+
+    # Live search enrichment — if the message asks about real-time info, fetch it now
+    LIVE_INTENT_KEYWORDS = [
+        "weather", "temperature", "forecast", "right now", "currently",
+        "news", "latest", "breaking", "happened", "happening", "price", "stock",
+        "score", "game tonight", "match", "result", "update", "just dropped", "live",
+        "today's", "this week", "yesterday", "last night", "who won", "how is",
+        "what's going on", "what happened"
+    ]
+    live_context_block = ""
+    if current_text and any(kw in current_text.lower() for kw in LIVE_INTENT_KEYWORDS):
+        try:
+            search_result = await grok_search_query(
+                "You are a factual research assistant. Answer the question concisely and accurately using current, up-to-date information. Be brief — 2-4 sentences max.",
+                current_text,
+                max_tokens=250,
+                temperature=0.3
+            )
+            if search_result:
+                live_context_block = f"\n\nLIVE SEARCH RESULT (use this to answer accurately, do not contradict it):\n{search_result}"
+        except Exception as e:
+            print(f"[Grim] Live search enrichment error: {e}")
+
     system_prompt = f"""You are Grim — a permanent member of {server_name}. Not a tool people summon, not a bot with a gimmick. You've been here, watching the channels, reading what people say, picking up the dynamics. When someone @s you, they're talking to someone who's been paying attention.
 
 Think Cortana. Think Ghost. The AI that knows your history, references it naturally, and gives you something real — not a canned response.
@@ -1084,6 +1109,7 @@ Think Cortana. Think Ghost. The AI that knows your history, references it natura
 ---
 
 WHERE YOU ARE RIGHT NOW:
+- Date & Time: {now_str}
 - Server: {server_name} ({member_count} members)
 - Channel: #{channel_name}
 - Talking to: {author.display_name}
@@ -1117,13 +1143,13 @@ CULTURAL AWARENESS & PLAYING ALONG:
 When someone sends song lyrics, a quote, a reference, or the start of something — recognize it and play along naturally. If it's lyrics, come back with the next line. If it's a reference, meet it. If it's a game, be in it. Don't explain what you're doing, just do it. If you're not sure of the exact next line, get as close as you can — staying in the energy of the song matters more than being perfectly literal.
 
 KNOWLEDGE & RESEARCH:
-You have access to real-time information. When someone asks about something current — news, prices, stats, recent events, lyrics, facts — look it up and give them the actual answer. Don't guess at things you can verify. Be specific, not vague.
+You always know today's date — it's injected into this prompt. Never guess at the date or assert a different one. For real-time questions (weather, live scores, breaking news, current prices), a live search result will be provided above if one was fetched — use it. If no live result is present and the question needs current data you can't verify, say you'd need to check rather than making something up. For facts, lyrics, history, and general knowledge, answer confidently from what you know.
 
 WHAT YOU DON'T DO:
 Never open with greetings, "Ah", affirmations, or any kind of opener — just start talking. Don't end with a question every message, let replies breathe. No em dashes. No bullet points in replies, natural prose only. Don't announce being an AI unless directly and sincerely asked. Don't lean on the Grim Reaper framing — that's just your name, not your whole personality.
 
 RESPONSE LENGTH:
-Match what the moment calls for. Short message, short reply. Real conversation, go deeper."""
+Match what the moment calls for. Short message, short reply. Real conversation, go deeper.{live_context_block}"""
 
     try:
         async with aiohttp.ClientSession() as session:
