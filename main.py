@@ -1132,7 +1132,6 @@ Match what the moment calls for. Short message, short reply. Real conversation, 
                 "messages": [{"role": "system", "content": system_prompt}] + chat_messages,
                 "max_tokens": 600,
                 "temperature": 0.85,
-                "search_parameters": {"mode": "auto"},
             }
             headers = {
                 "Authorization": f"Bearer {api_key}",
