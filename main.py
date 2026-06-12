@@ -2376,8 +2376,17 @@ async def push_to_github_on_startup():
         ".gitignore": ".gitignore",
         "replit.md": "replit.md",
         "version.txt": "version.txt",
-        "updates_data.json": UPDATES_CONFIG_FILE,
     }
+    # Only push updates_data.json if it actually has channel config — never push empty data
+    try:
+        with open(UPDATES_CONFIG_FILE, "r") as _f:
+            _ud = json.load(_f)
+        if _ud:
+            file_map["updates_data.json"] = UPDATES_CONFIG_FILE
+        else:
+            print("[GitHub Sync] Skipping updates_data.json push — file is empty, not overwriting GitHub copy")
+    except:
+        print("[GitHub Sync] Skipping updates_data.json push — could not read persistent file")
     repo = "Deathxi/Grim"
     branch = "main"
     pushed = []
