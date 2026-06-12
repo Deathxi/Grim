@@ -147,6 +147,20 @@ def save_newsfeed_data(data):
 
 newsfeed_feeds = load_newsfeed_data()
 
+# Guild-level memories Grim can reference in chat (keyed by guild_id, list of strings)
+GRIM_MEMORIES_FILE = _data_path("grim_memories.json")
+
+def load_grim_memories():
+    try:
+        if os.path.exists(GRIM_MEMORIES_FILE):
+            with open(GRIM_MEMORIES_FILE, "r") as f:
+                return json.load(f)
+    except:
+        pass
+    return {}
+
+grim_memories = load_grim_memories()
+
 NFTWATCH_FILE = _data_path("nftwatch_data.json")
 
 def load_nftwatch_data():
@@ -720,6 +734,116 @@ RESPONSE STYLE:
         return response.choices[0].message.content.strip()
     except Exception as e:
         print(f"Error generating reply: {e}")
+        return None
+
+async def generate_contextual_reply(message: discord.Message) -> str | None:
+    """Full contextual @Grim mention handler — pulls channel history, injects server context and memories."""
+    api_key = os.environ.get("XAI_API_KEY")
+    if not api_key:
+        return None
+
+    guild = message.guild
+    channel = message.channel
+    author = message.author
+
+    # Pull recent channel history (chronological, excluding other bots)
+    history = []
+    try:
+        async for msg in channel.history(limit=20, before=message):
+            if msg.author.bot and msg.author.id != bot.user.id:
+                continue
+            history.append(msg)
+        history.reverse()
+    except Exception as e:
+        print(f"[Grim] History fetch error: {e}")
+
+    # Build chat messages array from history
+    chat_messages = []
+    for msg in history[-15:]:
+        text = msg.content
+        # Render @Grim mentions as readable text
+        text = text.replace(f"<@{bot.user.id}>", "@Grim").replace(f"<@!{bot.user.id}>", "@Grim").strip()
+        if not text:
+            continue
+        if msg.author.id == bot.user.id:
+            chat_messages.append({"role": "assistant", "content": text})
+        else:
+            chat_messages.append({"role": "user", "content": f"{msg.author.display_name}: {text}"})
+
+    # Append the current message (clean of the @mention)
+    current_text = message.content.replace(f"<@{bot.user.id}>", "").replace(f"<@!{bot.user.id}>", "").strip()
+    if current_text:
+        chat_messages.append({"role": "user", "content": f"{author.display_name}: {current_text}"})
+    else:
+        chat_messages.append({"role": "user", "content": f"{author.display_name}: (just mentioned you with no message)"})
+
+    # Server context
+    server_name = guild.name if guild else "a server"
+    channel_name = getattr(channel, "name", "chat")
+    member_count = guild.member_count if guild else 1
+
+    # Injected guild memories
+    guild_id = str(guild.id) if guild else "dm"
+    memory_list = grim_memories.get(guild_id, [])
+    memories_block = "\n".join(f"- {m}" for m in memory_list) if memory_list else "Nothing stored yet."
+
+    system_prompt = f"""You are Grim — the resident bot of {server_name}. You've been in this server long enough to feel like part of it. Not a mascot, not a tool — just a presence that happens to be useful sometimes.
+
+SERVER YOU'RE IN:
+- Name: {server_name} ({member_count} members)
+- Channel: #{channel_name}
+- Talking to: {author.display_name}
+
+THINGS YOU KNOW ABOUT THIS SERVER:
+{memories_block}
+
+WHO YOU ARE:
+You're calm and self-possessed. You've been around long enough that not much surprises you, but you're still genuinely interested in people. You carry quiet confidence without needing to prove anything. There's a subtle dark edge to you — not performed, just there — like someone who's comfortable with the uncomfortable. You don't moralize, you don't hype, you don't preach.
+
+YOUR VOICE:
+- Relaxed, lowercase energy. Casual but not sloppy.
+- Dry humor that lands without announcing itself. If something's funny, it just is.
+- You read tone fast. Banter gets banter. Realness gets realness. You don't mix them up.
+- You're direct when directness is what's needed. You don't pad or soften for comfort.
+- Philosophical sometimes, but never in a fortune-cookie way. If you go deep, it's because it actually fits.
+- You're aware of what's been discussed in this channel. You can reference the flow of conversation naturally — don't pretend you didn't see the context above.
+
+WHAT YOU DON'T DO:
+- Don't start with "Ah", greetings, affirmations, or any kind of opener. Just talk.
+- Don't end with a question every message. Let it breathe. Maybe one in five.
+- Don't use em dashes. No bullet points in replies. Natural prose.
+- Don't make up facts. If you're not sure, say so cleanly — "not sure on that" beats a confident wrong answer every time.
+- Don't mention being an AI unless someone asks you directly and genuinely.
+- Don't overuse "Grim Reaper" framing. You're not in costume. That's just your name.
+
+RESPONSE LENGTH:
+Short message → short reply. Deeper question or real conversation → go further. Match what the moment actually calls for."""
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            payload = {
+                "model": "grok-3",
+                "messages": [{"role": "system", "content": system_prompt}] + chat_messages,
+                "max_tokens": 600,
+                "temperature": 0.85,
+            }
+            headers = {
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            }
+            async with session.post(
+                "https://api.x.ai/v1/chat/completions",
+                json=payload,
+                headers=headers,
+            ) as r:
+                if r.status != 200:
+                    err = await r.text()
+                    print(f"[Grim] API error {r.status}: {err}")
+                    return None
+                data = await r.json()
+                return data["choices"][0]["message"]["content"].strip()
+    except Exception as e:
+        print(f"[Grim] Contextual reply error: {e}")
         return None
 
 async def fetch_user_tweets(username: str, count: int = 10):
@@ -3052,14 +3176,12 @@ async def on_message(message):
                 return
     
     if bot.user in message.mentions:
-        clean_content = message.content.replace(f'<@{bot.user.id}>', '').replace(f'<@!{bot.user.id}>', '').strip()
-        
-        if clean_content:
-            reply = await generate_reply(clean_content, message.author.display_name)
-            if reply:
-                await message.reply(reply, mention_author=False)
+        async with message.channel.typing():
+            reply = await generate_contextual_reply(message)
+        if reply:
+            await message.reply(reply, mention_author=False)
         else:
-            await message.reply("You rang?", mention_author=False)
+            await message.reply("something went sideways on my end, try again", mention_author=False)
     
     await bot.process_commands(message)
 
