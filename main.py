@@ -5,6 +5,7 @@ import asyncio
 import aiohttp
 import uuid
 import base64
+import sqlite3
 import discord
 from discord.ext import commands, tasks
 from discord import ui
@@ -160,6 +161,64 @@ def load_grim_memories():
     return {}
 
 grim_memories = load_grim_memories()
+
+def save_grim_memories():
+    with open(GRIM_MEMORIES_FILE, "w") as f:
+        json.dump(grim_memories, f, indent=2)
+
+# Persistent chat history — SQLite survives restarts and grows forever
+CHAT_DB_FILE = _data_path("chat_history.db")
+
+def init_chat_db():
+    conn = sqlite3.connect(CHAT_DB_FILE)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            guild_id TEXT,
+            channel_id TEXT,
+            message_id TEXT UNIQUE,
+            author_name TEXT,
+            content TEXT,
+            timestamp REAL,
+            is_grim INTEGER DEFAULT 0
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+init_chat_db()
+
+def save_message_to_db(guild_id: str, channel_id: str, message_id: str,
+                        author_name: str, content: str, timestamp: float, is_grim: bool = False):
+    if not content.strip():
+        return
+    try:
+        conn = sqlite3.connect(CHAT_DB_FILE)
+        conn.execute("""
+            INSERT OR IGNORE INTO messages
+            (guild_id, channel_id, message_id, author_name, content, timestamp, is_grim)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (guild_id, channel_id, message_id, author_name, content, timestamp, 1 if is_grim else 0))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"[DB] Save error: {e}")
+
+def get_channel_history_from_db(guild_id: str, channel_id: str, limit: int = 50):
+    """Returns rows as (author_name, content, is_grim) in chronological order."""
+    try:
+        conn = sqlite3.connect(CHAT_DB_FILE)
+        rows = conn.execute("""
+            SELECT author_name, content, is_grim FROM messages
+            WHERE guild_id = ? AND channel_id = ?
+            ORDER BY timestamp DESC LIMIT ?
+        """, (guild_id, channel_id, limit)).fetchall()
+        conn.close()
+        rows.reverse()
+        return rows
+    except Exception as e:
+        print(f"[DB] Fetch error: {e}")
+        return []
 
 NFTWATCH_FILE = _data_path("nftwatch_data.json")
 
@@ -746,29 +805,42 @@ async def generate_contextual_reply(message: discord.Message) -> str | None:
     channel = message.channel
     author = message.author
 
-    # Pull recent channel history (chronological, excluding other bots)
-    history = []
-    try:
-        async for msg in channel.history(limit=20, before=message):
-            if msg.author.bot and msg.author.id != bot.user.id:
-                continue
-            history.append(msg)
-        history.reverse()
-    except Exception as e:
-        print(f"[Grim] History fetch error: {e}")
+    guild_id = str(guild.id) if guild else "dm"
+    channel_id = str(channel.id)
 
-    # Build chat messages array from history
+    # Primary source: persistent SQLite history (survives restarts, grows forever)
+    db_rows = get_channel_history_from_db(guild_id, channel_id, limit=50)
+
+    # If DB is sparse (bot just deployed), supplement with live Discord history
     chat_messages = []
-    for msg in history[-15:]:
-        text = msg.content
-        # Render @Grim mentions as readable text
-        text = text.replace(f"<@{bot.user.id}>", "@Grim").replace(f"<@!{bot.user.id}>", "@Grim").strip()
-        if not text:
-            continue
-        if msg.author.id == bot.user.id:
-            chat_messages.append({"role": "assistant", "content": text})
-        else:
-            chat_messages.append({"role": "user", "content": f"{msg.author.display_name}: {text}"})
+    if len(db_rows) < 10:
+        try:
+            discord_history = []
+            async for msg in channel.history(limit=50, before=message):
+                if msg.author.bot and msg.author.id != bot.user.id:
+                    continue
+                discord_history.append(msg)
+            discord_history.reverse()
+            for msg in discord_history:
+                text = msg.content.replace(f"<@{bot.user.id}>", "@Grim").replace(f"<@!{bot.user.id}>", "@Grim").strip()
+                if not text:
+                    continue
+                if msg.author.id == bot.user.id:
+                    chat_messages.append({"role": "assistant", "content": text})
+                else:
+                    chat_messages.append({"role": "user", "content": f"{msg.author.display_name}: {text}"})
+        except Exception as e:
+            print(f"[Grim] Discord history fallback error: {e}")
+    else:
+        # Use persistent DB history
+        for author_name, content, is_grim in db_rows:
+            content = content.replace(f"<@{bot.user.id}>", "@Grim").replace(f"<@!{bot.user.id}>", "@Grim").strip()
+            if not content:
+                continue
+            if is_grim:
+                chat_messages.append({"role": "assistant", "content": content})
+            else:
+                chat_messages.append({"role": "user", "content": f"{author_name}: {content}"})
 
     # Append the current message (clean of the @mention)
     current_text = message.content.replace(f"<@{bot.user.id}>", "").replace(f"<@!{bot.user.id}>", "").strip()
@@ -783,7 +855,6 @@ async def generate_contextual_reply(message: discord.Message) -> str | None:
     member_count = guild.member_count if guild else 1
 
     # Injected guild memories
-    guild_id = str(guild.id) if guild else "dm"
     memory_list = grim_memories.get(guild_id, [])
     memories_block = "\n".join(f"- {m}" for m in memory_list) if memory_list else "Nothing stored yet."
 
@@ -3175,14 +3246,29 @@ async def on_message(message):
                     print(f"[Moderation] Failed to delete message: {e}")
                 return
     
+    # Persist every human message to the chat history DB
+    if message.guild:
+        save_message_to_db(
+            str(message.guild.id), str(message.channel.id),
+            str(message.id), message.author.display_name,
+            message.content, message.created_at.timestamp(), is_grim=False
+        )
+
     if bot.user in message.mentions:
         async with message.channel.typing():
             reply = await generate_contextual_reply(message)
         if reply:
-            await message.reply(reply, mention_author=False)
+            sent = await message.reply(reply, mention_author=False)
+            # Persist Grim's reply so it's part of future context
+            if message.guild:
+                save_message_to_db(
+                    str(message.guild.id), str(message.channel.id),
+                    str(sent.id), BOT_NAME,
+                    reply, sent.created_at.timestamp(), is_grim=True
+                )
         else:
             await message.reply("something went sideways on my end, try again", mention_author=False)
-    
+
     await bot.process_commands(message)
 
 @bot.command(name="ping")
@@ -3241,6 +3327,63 @@ async def help_grim(ctx):
     embed.add_field(name="/nftwatch_cancel", value="Stop NFT watch", inline=True)
     embed.set_footer(text=f"Grim · {VERSION}")
     await ctx.send(embed=embed)
+
+@bot.tree.command(name="grim_remember", description="Give Grim a permanent memory about this server")
+@discord.app_commands.describe(memory="The fact or detail you want Grim to remember")
+async def grim_remember(interaction: discord.Interaction, memory: str):
+    guild_id = str(interaction.guild_id)
+    if guild_id not in grim_memories:
+        grim_memories[guild_id] = []
+    if memory in grim_memories[guild_id]:
+        await interaction.response.send_message("already know that one.", ephemeral=True)
+        return
+    grim_memories[guild_id].append(memory)
+    save_grim_memories()
+    embed = discord.Embed(
+        description=f"got it. i'll remember that.",
+        color=discord.Color.from_rgb(18, 18, 18)
+    )
+    embed.add_field(name="memory added", value=f"```{memory}```", inline=False)
+    embed.set_footer(text=f"Grim · {VERSION}")
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+@bot.tree.command(name="grim_memories", description="View everything Grim has been told to remember about this server")
+async def grim_memories_cmd(interaction: discord.Interaction):
+    guild_id = str(interaction.guild_id)
+    memories = grim_memories.get(guild_id, [])
+    embed = discord.Embed(
+        title="what i know",
+        color=discord.Color.from_rgb(18, 18, 18)
+    )
+    if not memories:
+        embed.description = "nothing stored yet. use `/grim_remember` to add something."
+    else:
+        lines = "\n".join(f"{i+1}. {m}" for i, m in enumerate(memories))
+        embed.description = f"```{lines}```"
+        embed.set_footer(text=f"{len(memories)} memor{'y' if len(memories) == 1 else 'ies'} · Grim · {VERSION}")
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+@bot.tree.command(name="grim_forget", description="Remove a memory Grim has about this server")
+@discord.app_commands.describe(number="The memory number from /grim_memories")
+async def grim_forget(interaction: discord.Interaction, number: int):
+    guild_id = str(interaction.guild_id)
+    memories = grim_memories.get(guild_id, [])
+    if not memories:
+        await interaction.response.send_message("nothing to forget.", ephemeral=True)
+        return
+    if number < 1 or number > len(memories):
+        await interaction.response.send_message(f"pick a number between 1 and {len(memories)}.", ephemeral=True)
+        return
+    removed = memories.pop(number - 1)
+    grim_memories[guild_id] = memories
+    save_grim_memories()
+    embed = discord.Embed(
+        description=f"forgotten.",
+        color=discord.Color.from_rgb(18, 18, 18)
+    )
+    embed.add_field(name="removed", value=f"```{removed}```", inline=False)
+    embed.set_footer(text=f"Grim · {VERSION}")
+    await interaction.response.send_message(embed=embed, ephemeral=True)
 
 token = os.environ.get("DISCORD_TOKEN")
 if not token:
