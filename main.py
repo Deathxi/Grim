@@ -3687,21 +3687,25 @@ async def grim_updates(interaction: discord.Interaction):
         embed.set_footer(text=f"Powered by {BOT_NAME} • {VERSION}")
         await interaction.response.send_message(embed=embed)
     # Push config to GitHub immediately so it survives the next redeploy
+    # NOTE: always push to "updates_data.json" (GitHub path), read from UPDATES_CONFIG_FILE (local persistent path)
     token = os.environ.get("GITHUB_PERSONAL_ACCESS_TOKEN")
     if token:
         try:
-            import base64 as _b64
             with open(UPDATES_CONFIG_FILE, "rb") as f:
-                content = _b64.b64encode(f.read()).decode()
+                content = base64.b64encode(f.read()).decode()
             async with aiohttp.ClientSession() as session:
                 headers = {"Authorization": f"token {token}", "Accept": "application/vnd.github.v3+json", "User-Agent": "GrimBot"}
-                async with session.get(f"https://api.github.com/repos/Deathxi/Grim/contents/{UPDATES_CONFIG_FILE}?ref=main", headers=headers) as r:
+                async with session.get(f"https://api.github.com/repos/Deathxi/Grim/contents/updates_data.json?ref=main", headers=headers) as r:
                     existing = await r.json()
                 payload = {"message": "Update updates_data.json via bot command", "content": content, "branch": "main"}
                 if existing.get("sha"):
                     payload["sha"] = existing["sha"]
-                await session.put(f"https://api.github.com/repos/Deathxi/Grim/contents/{UPDATES_CONFIG_FILE}", headers=headers, json=payload)
-                print(f"[Updates] Pushed updates_data.json to GitHub")
+                async with session.put(f"https://api.github.com/repos/Deathxi/Grim/contents/updates_data.json", headers=headers, json=payload) as r:
+                    result = await r.json()
+                if "content" in result:
+                    print(f"[Updates] Pushed updates_data.json to GitHub ✓")
+                else:
+                    print(f"[Updates] GitHub push failed: {result.get('message')}")
         except Exception as e:
             print(f"[Updates] Could not push config to GitHub: {e}")
 
