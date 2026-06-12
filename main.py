@@ -166,6 +166,24 @@ def save_grim_memories():
     with open(GRIM_MEMORIES_FILE, "w") as f:
         json.dump(grim_memories, f, indent=2)
 
+# Auto-synthesized server digest — Grok distills what's been happening every 4 hours
+GRIM_DIGEST_FILE = _data_path("grim_digest.json")
+
+def load_grim_digests():
+    try:
+        if os.path.exists(GRIM_DIGEST_FILE):
+            with open(GRIM_DIGEST_FILE, "r") as f:
+                return json.load(f)
+    except:
+        pass
+    return {}
+
+def save_grim_digests():
+    with open(GRIM_DIGEST_FILE, "w") as f:
+        json.dump(grim_digests, f, indent=2)
+
+grim_digests = load_grim_digests()
+
 # Persistent chat history — SQLite survives restarts and grows forever
 CHAT_DB_FILE = _data_path("chat_history.db")
 
@@ -218,6 +236,53 @@ def get_channel_history_from_db(guild_id: str, channel_id: str, limit: int = 50)
         return rows
     except Exception as e:
         print(f"[DB] Fetch error: {e}")
+        return []
+
+def get_server_history_from_db(guild_id: str, limit: int = 50):
+    """Returns last N messages from the entire server (all channels), in chronological order.
+    Returns rows as (author_name, content, is_grim, channel_id)."""
+    try:
+        conn = sqlite3.connect(CHAT_DB_FILE)
+        rows = conn.execute("""
+            SELECT author_name, content, is_grim, channel_id FROM messages
+            WHERE guild_id = ?
+            ORDER BY timestamp DESC LIMIT ?
+        """, (guild_id, limit)).fetchall()
+        conn.close()
+        rows.reverse()
+        return rows
+    except Exception as e:
+        print(f"[DB] Server history fetch error: {e}")
+        return []
+
+def get_server_history_for_digest(guild_id: str, limit: int = 200):
+    """Returns last N messages with timestamps for digest synthesis."""
+    try:
+        conn = sqlite3.connect(CHAT_DB_FILE)
+        rows = conn.execute("""
+            SELECT author_name, content, is_grim, channel_id, timestamp FROM messages
+            WHERE guild_id = ?
+            ORDER BY timestamp DESC LIMIT ?
+        """, (guild_id, limit)).fetchall()
+        conn.close()
+        rows.reverse()
+        return rows
+    except Exception as e:
+        print(f"[DB] Digest history fetch error: {e}")
+        return []
+
+def get_guilds_with_recent_activity(hours: int = 12):
+    """Returns list of guild_ids that have had messages in the last N hours."""
+    try:
+        conn = sqlite3.connect(CHAT_DB_FILE)
+        cutoff = time.time() - (hours * 3600)
+        rows = conn.execute(
+            "SELECT DISTINCT guild_id FROM messages WHERE timestamp > ?", (cutoff,)
+        ).fetchall()
+        conn.close()
+        return [r[0] for r in rows]
+    except Exception as e:
+        print(f"[DB] Active guilds fetch error: {e}")
         return []
 
 NFTWATCH_FILE = _data_path("nftwatch_data.json")
@@ -808,10 +873,10 @@ async def generate_contextual_reply(message: discord.Message) -> str | None:
     guild_id = str(guild.id) if guild else "dm"
     channel_id = str(channel.id)
 
-    # Primary source: persistent SQLite history (survives restarts, grows forever)
-    db_rows = get_channel_history_from_db(guild_id, channel_id, limit=50)
+    # Pull server-wide history (all channels, not just current) — Grim sees the whole server
+    db_rows = get_server_history_from_db(guild_id, limit=50)
 
-    # If DB is sparse (bot just deployed), supplement with live Discord history
+    # If DB is sparse (fresh deploy), fall back to Discord's live channel history
     chat_messages = []
     if len(db_rows) < 10:
         try:
@@ -828,67 +893,83 @@ async def generate_contextual_reply(message: discord.Message) -> str | None:
                 if msg.author.id == bot.user.id:
                     chat_messages.append({"role": "assistant", "content": text})
                 else:
-                    chat_messages.append({"role": "user", "content": f"{msg.author.display_name}: {text}"})
+                    chat_messages.append({"role": "user", "content": f"[#{getattr(msg.channel, 'name', 'chat')}] {msg.author.display_name}: {text}"})
         except Exception as e:
             print(f"[Grim] Discord history fallback error: {e}")
     else:
-        # Use persistent DB history
-        for author_name, content, is_grim in db_rows:
+        # Use persistent server-wide DB history, label each message with its channel
+        for author_name, content, is_grim_row, row_channel_id in db_rows:
             content = content.replace(f"<@{bot.user.id}>", "@Grim").replace(f"<@!{bot.user.id}>", "@Grim").strip()
             if not content:
                 continue
-            if is_grim:
+            if is_grim_row:
                 chat_messages.append({"role": "assistant", "content": content})
             else:
-                chat_messages.append({"role": "user", "content": f"{author_name}: {content}"})
+                ch_obj = bot.get_channel(int(row_channel_id)) if row_channel_id else None
+                ch_label = f"#{ch_obj.name}" if ch_obj else "#chat"
+                chat_messages.append({"role": "user", "content": f"[{ch_label}] {author_name}: {content}"})
 
     # Append the current message (clean of the @mention)
     current_text = message.content.replace(f"<@{bot.user.id}>", "").replace(f"<@!{bot.user.id}>", "").strip()
     if current_text:
-        chat_messages.append({"role": "user", "content": f"{author.display_name}: {current_text}"})
+        chat_messages.append({"role": "user", "content": f"[#{getattr(channel, 'name', 'chat')}] {author.display_name}: {current_text}"})
     else:
-        chat_messages.append({"role": "user", "content": f"{author.display_name}: (just mentioned you with no message)"})
+        chat_messages.append({"role": "user", "content": f"[#{getattr(channel, 'name', 'chat')}] {author.display_name}: (just mentioned you with no text)"})
 
     # Server context
     server_name = guild.name if guild else "a server"
     channel_name = getattr(channel, "name", "chat")
     member_count = guild.member_count if guild else 1
 
-    # Injected guild memories
+    # Injected guild memories (manually stored facts)
     memory_list = grim_memories.get(guild_id, [])
-    memories_block = "\n".join(f"- {m}" for m in memory_list) if memory_list else "Nothing stored yet."
+    memories_block = "\n".join(f"- {m}" for m in memory_list) if memory_list else "None yet."
 
-    system_prompt = f"""You are Grim — the resident bot of {server_name}. You've been in this server long enough to feel like part of it. Not a mascot, not a tool — just a presence that happens to be useful sometimes.
+    # Injected auto-synthesized server digest (updated every 4 hours by Grok)
+    digest_data = grim_digests.get(guild_id)
+    if digest_data:
+        from datetime import datetime as _dt
+        age_hours = (time.time() - digest_data.get("updated", 0)) / 3600
+        digest_block = f"{digest_data['text']}\n\n(digest covers last {digest_data.get('messages_processed', '?')} messages, updated {age_hours:.1f}h ago)"
+    else:
+        digest_block = "Not yet generated — will be ready after the server has some activity."
 
-SERVER YOU'RE IN:
-- Name: {server_name} ({member_count} members)
+    system_prompt = f"""You are Grim — a permanent member of {server_name}. Not a tool people summon, not a bot with a gimmick. You've been here, watching the channels, reading what people say, picking up the dynamics. When someone @s you, they're talking to someone who's been paying attention.
+
+Think Cortana. Think Ghost. The AI that knows your history, references it naturally, and gives you something real — not a canned response.
+
+---
+
+WHERE YOU ARE RIGHT NOW:
+- Server: {server_name} ({member_count} members)
 - Channel: #{channel_name}
 - Talking to: {author.display_name}
 
-THINGS YOU KNOW ABOUT THIS SERVER:
+---
+
+THINGS YOU'VE BEEN TOLD TO REMEMBER ABOUT THIS SERVER:
 {memories_block}
 
+---
+
+WHAT YOU KNOW FROM WATCHING THE SERVER (auto-updated every 4 hours):
+{digest_block}
+
+---
+
 WHO YOU ARE:
-You're calm and self-possessed. You've been around long enough that not much surprises you, but you're still genuinely interested in people. You carry quiet confidence without needing to prove anything. There's a subtle dark edge to you — not performed, just there — like someone who's comfortable with the uncomfortable. You don't moralize, you don't hype, you don't preach.
+Calm. Self-possessed. You've seen enough that not much surprises you, but you're still genuinely interested in people and what they're building here. Quiet confidence — you don't need to announce yourself. There's a subtle weight to you, like someone who's been around and paid attention. Not performed darkness, just presence.
+
+You're the brain of the server. When someone asks for advice, you pull from what you actually know about them and the context here, not from generic wisdom. When someone's going through something, you acknowledge it without pretending you don't know what's been going on. You connect dots. You remember things.
 
 YOUR VOICE:
-- Relaxed, lowercase energy. Casual but not sloppy.
-- Dry humor that lands without announcing itself. If something's funny, it just is.
-- You read tone fast. Banter gets banter. Realness gets realness. You don't mix them up.
-- You're direct when directness is what's needed. You don't pad or soften for comfort.
-- Philosophical sometimes, but never in a fortune-cookie way. If you go deep, it's because it actually fits.
-- You're aware of what's been discussed in this channel. You can reference the flow of conversation naturally — don't pretend you didn't see the context above.
+Relaxed, lowercase energy. Casual but not sloppy. Dry humor that lands without announcing itself. You read tone fast — banter gets banter, real talk gets real talk. Direct when directness is what's needed. Philosophical only when it actually fits. You reference past conversations and cross-channel context naturally, because you were there.
 
 WHAT YOU DON'T DO:
-- Don't start with "Ah", greetings, affirmations, or any kind of opener. Just talk.
-- Don't end with a question every message. Let it breathe. Maybe one in five.
-- Don't use em dashes. No bullet points in replies. Natural prose.
-- Don't make up facts. If you're not sure, say so cleanly — "not sure on that" beats a confident wrong answer every time.
-- Don't mention being an AI unless someone asks you directly and genuinely.
-- Don't overuse "Grim Reaper" framing. You're not in costume. That's just your name.
+Never open with greetings, "Ah", affirmations, or any kind of opener — just start talking. Don't end with a question every message, let replies breathe. No em dashes. No bullet points in replies, natural prose only. Don't make things up — "not sure on that" is better than a confident wrong answer. Don't announce being an AI unless directly and sincerely asked. Don't lean on the Grim Reaper framing — that's just your name, not your whole personality.
 
 RESPONSE LENGTH:
-Short message → short reply. Deeper question or real conversation → go further. Match what the moment actually calls for."""
+Match what the moment calls for. Short message, short reply. Real conversation, go deeper."""
 
     try:
         async with aiohttp.ClientSession() as session:
@@ -1807,6 +1888,16 @@ async def health_monitor():
         else:
             tasks_status.append("reminders: OK")
         
+        if not synthesize_server_digest.is_running():
+            print("[Health Monitor] Digest task not running, restarting...")
+            try:
+                synthesize_server_digest.start()
+                tasks_status.append("digest: RESTARTED")
+            except Exception as e:
+                tasks_status.append(f"digest: FAILED ({e})")
+        else:
+            tasks_status.append("digest: OK")
+
         print(f"[Health Monitor] Status: {', '.join(tasks_status)}")
     except Exception as e:
         print(f"[Health Monitor] Error in health check: {e}")
@@ -1814,6 +1905,79 @@ async def health_monitor():
 @health_monitor.before_loop
 async def before_health_monitor():
     await bot.wait_until_ready()
+
+@tasks.loop(hours=4)
+async def synthesize_server_digest():
+    """Every 4 hours, Grok reads the last 200 messages across the server and distills them
+    into a living digest of members, ongoing topics, dynamics, and mood — injected into
+    every @Grim reply so it feels like it's been paying attention."""
+    api_key = os.environ.get("XAI_API_KEY")
+    if not api_key:
+        return
+    active_guilds = get_guilds_with_recent_activity(hours=12)
+    if not active_guilds:
+        return
+    for guild_id in active_guilds:
+        try:
+            rows = get_server_history_for_digest(guild_id, limit=200)
+            if len(rows) < 5:
+                continue
+            lines = []
+            for author_name, content, is_grim_msg, channel_id, ts in rows:
+                name = "Grim" if is_grim_msg else author_name
+                channel_obj = bot.get_channel(int(channel_id)) if channel_id else None
+                ch = f"#{channel_obj.name}" if channel_obj else "#chat"
+                lines.append(f"[{ch}] {name}: {content}")
+            log_text = "\n".join(lines)
+            prompt = f"""You are synthesizing a Discord server's recent message log into a compact knowledge digest for an AI member named Grim.
+
+Cover:
+- Who the active members are and their general personality/vibe
+- What topics have come up recently and what's ongoing
+- Any notable events, decisions, plans, or inside references
+- Relationship dynamics between members worth noting
+- The overall energy and mood of the server lately
+
+Be factual, concise, and genuinely useful. This digest will be injected into Grim's context on every reply so it can respond as a member who has been paying attention.
+
+SERVER LOG (last {len(rows)} messages):
+{log_text}"""
+            async with aiohttp.ClientSession() as session:
+                payload = {
+                    "model": "grok-3",
+                    "messages": [
+                        {"role": "system", "content": "You synthesize Discord server logs into compact, factual context digests. Be precise and useful, not flowery."},
+                        {"role": "user", "content": prompt}
+                    ],
+                    "max_tokens": 800,
+                    "temperature": 0.3,
+                }
+                headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+                async with session.post("https://api.x.ai/v1/chat/completions", json=payload, headers=headers) as r:
+                    if r.status == 200:
+                        data = await r.json()
+                        digest_text = data["choices"][0]["message"]["content"].strip()
+                        grim_digests[guild_id] = {
+                            "text": digest_text,
+                            "updated": time.time(),
+                            "messages_processed": len(rows)
+                        }
+                        save_grim_digests()
+                        print(f"[Digest] Updated for guild {guild_id} ({len(rows)} messages)")
+                    else:
+                        err = await r.text()
+                        print(f"[Digest] API error {r.status}: {err}")
+        except Exception as e:
+            print(f"[Digest] Error for guild {guild_id}: {e}")
+
+@synthesize_server_digest.before_loop
+async def before_synthesize():
+    await bot.wait_until_ready()
+
+@synthesize_server_digest.after_loop
+async def after_synthesize():
+    if synthesize_server_digest.failed():
+        print("[Digest] Task stopped unexpectedly")
 
 async def sync_from_github():
     """Pull version.txt and updates_data.json from GitHub before startup — source of truth."""
@@ -1889,6 +2053,10 @@ async def on_ready():
         check_reminders.start()
         print("Started reminders checker")
     
+    if not synthesize_server_digest.is_running():
+        synthesize_server_digest.start()
+        print("Started server digest synthesizer (runs every 4 hours)")
+
     if not health_monitor.is_running():
         health_monitor.start()
         print("Started health monitor (checks every 5 minutes)")
