@@ -3895,8 +3895,8 @@ async def on_message(message):
         if profile_needs_update(gid, mid, msg_count):
             asyncio.create_task(_synthesize_member_profile(gid, mid, name, msg_count))
 
-        # 5% chance to drop a comical surveillance warning
-        if random.random() < 0.05 and message.channel.type in (discord.ChannelType.text, discord.ChannelType.news):
+        # 0.1% chance to drop a comical surveillance warning
+        if random.random() < 0.001 and message.channel.type in (discord.ChannelType.text, discord.ChannelType.news):
             _SURVEILLANCE_WARNINGS = [
                 "careful... Palantir is watching.",
                 "the NSA has eyes everywhere.",
