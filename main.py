@@ -445,15 +445,31 @@ def save_welcome_data(data):
 welcome_channels = load_welcome_data()
 
 # Channel config lives in project root — pushed to GitHub so it survives redeploys
-UPDATES_CONFIG_FILE = "updates_data.json"
+UPDATES_CONFIG_FILE = _data_path("updates_data.json")  # persistent disk — survives deploys
+UPDATES_CONFIG_FALLBACK = "updates_data.json"           # project-root snapshot (migration fallback)
 # SHA tracking lives in ~/.grim_data/ — ephemeral, resetting on fresh deploy is fine
 UPDATES_SHA_FILE = _data_path("updates_sha.json")
 
 def load_updates_data():
+    # Primary: persistent disk
     try:
         if os.path.exists(UPDATES_CONFIG_FILE):
             with open(UPDATES_CONFIG_FILE, 'r') as f:
-                return json.load(f)
+                data = json.load(f)
+                if data:  # prefer persistent over empty
+                    return data
+    except:
+        pass
+    # Fallback: project-root snapshot (first-ever deploy before persistent copy exists)
+    try:
+        if os.path.exists(UPDATES_CONFIG_FALLBACK):
+            with open(UPDATES_CONFIG_FALLBACK, 'r') as f:
+                data = json.load(f)
+                if data:
+                    # Migrate to persistent location immediately
+                    save_updates_data(data)
+                    print(f"[Updates] Migrated updates_data.json to persistent disk")
+                    return data
     except:
         pass
     return {}
@@ -461,6 +477,12 @@ def load_updates_data():
 def save_updates_data(data):
     with open(UPDATES_CONFIG_FILE, 'w') as f:
         json.dump(data, f)
+    # Also keep project-root copy in sync so GitHub push has something to push
+    try:
+        with open(UPDATES_CONFIG_FALLBACK, 'w') as f:
+            json.dump(data, f)
+    except:
+        pass
 
 def load_updates_sha():
     try:
@@ -2254,10 +2276,23 @@ async def sync_from_github():
                 content = base64.b64decode(data["content"]).decode()
                 with open(fname, "w") as f:
                     f.write(content)
-                # Also sync version.txt into persistent counter file
                 if fname == "version.txt":
-                    with open(VERSION_COUNT_FILE, "w") as f:
-                        f.write(content.strip())
+                    # Only sync to persistent counter if it doesn't already exist
+                    # (persistent counter is authoritative; GitHub is a backup seed)
+                    if not os.path.exists(VERSION_COUNT_FILE):
+                        with open(VERSION_COUNT_FILE, "w") as f:
+                            f.write(content.strip())
+                        print(f"[Sync] Seeded VERSION_COUNT_FILE from GitHub: {content.strip()}")
+                    else:
+                        print(f"[Sync] VERSION_COUNT_FILE already exists — not overwriting with GitHub copy")
+                elif fname == "updates_data.json":
+                    # Only seed persistent copy if it doesn't already have data
+                    if not os.path.exists(UPDATES_CONFIG_FILE):
+                        with open(UPDATES_CONFIG_FILE, "w") as f:
+                            f.write(content)
+                        print(f"[Sync] Seeded persistent updates_data.json from GitHub")
+                    else:
+                        print(f"[Sync] Persistent updates_data.json already exists — not overwriting")
                 print(f"[Sync] Pulled {fname} from GitHub")
             except Exception as e:
                 print(f"[Sync] Failed to pull {fname}: {e}")
