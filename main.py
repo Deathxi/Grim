@@ -201,6 +201,17 @@ def init_chat_db():
             is_grim INTEGER DEFAULT 0
         )
     """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS member_profiles (
+            guild_id TEXT,
+            member_id TEXT,
+            display_name TEXT,
+            profile_text TEXT,
+            message_count INTEGER DEFAULT 0,
+            last_updated REAL,
+            PRIMARY KEY (guild_id, member_id)
+        )
+    """)
     conn.commit()
     conn.close()
 
@@ -284,6 +295,86 @@ def get_guilds_with_recent_activity(hours: int = 12):
     except Exception as e:
         print(f"[DB] Active guilds fetch error: {e}")
         return []
+
+def get_member_messages_for_profile(guild_id: str, member_id: str, limit: int = 60):
+    """Returns recent messages from a specific member for profile synthesis."""
+    try:
+        conn = sqlite3.connect(CHAT_DB_FILE)
+        rows = conn.execute("""
+            SELECT content FROM messages
+            WHERE guild_id = ? AND author_name = ? AND is_grim = 0
+            ORDER BY timestamp DESC LIMIT ?
+        """, (guild_id, member_id, limit)).fetchall()
+        conn.close()
+        return [r[0] for r in reversed(rows)]
+    except Exception as e:
+        print(f"[DB] Member messages fetch error: {e}")
+        return []
+
+def get_member_message_count(guild_id: str, display_name: str) -> int:
+    try:
+        conn = sqlite3.connect(CHAT_DB_FILE)
+        row = conn.execute("""
+            SELECT COUNT(*) FROM messages
+            WHERE guild_id = ? AND author_name = ? AND is_grim = 0
+        """, (guild_id, display_name)).fetchone()
+        conn.close()
+        return row[0] if row else 0
+    except:
+        return 0
+
+def get_member_profile(guild_id: str, member_id: str) -> str | None:
+    try:
+        conn = sqlite3.connect(CHAT_DB_FILE)
+        row = conn.execute("""
+            SELECT profile_text FROM member_profiles
+            WHERE guild_id = ? AND member_id = ?
+        """, (guild_id, member_id)).fetchone()
+        conn.close()
+        return row[0] if row else None
+    except:
+        return None
+
+def save_member_profile(guild_id: str, member_id: str, display_name: str, profile_text: str, msg_count: int):
+    try:
+        conn = sqlite3.connect(CHAT_DB_FILE)
+        conn.execute("""
+            INSERT INTO member_profiles (guild_id, member_id, display_name, profile_text, message_count, last_updated)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(guild_id, member_id) DO UPDATE SET
+                display_name=excluded.display_name,
+                profile_text=excluded.profile_text,
+                message_count=excluded.message_count,
+                last_updated=excluded.last_updated
+        """, (guild_id, member_id, display_name, profile_text, msg_count, time.time()))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"[DB] Save profile error: {e}")
+
+def profile_needs_update(guild_id: str, member_id: str, current_count: int) -> bool:
+    """Returns True if the profile should be regenerated based on message count thresholds."""
+    try:
+        conn = sqlite3.connect(CHAT_DB_FILE)
+        row = conn.execute("""
+            SELECT message_count, last_updated FROM member_profiles
+            WHERE guild_id = ? AND member_id = ?
+        """, (guild_id, member_id)).fetchone()
+        conn.close()
+        if not row:
+            return current_count >= 20
+        last_count, last_updated = row
+        age_hours = (time.time() - last_updated) / 3600
+        # Regenerate at count milestones or every 24h if active
+        milestones = [20, 50, 100, 200, 400]
+        for m in milestones:
+            if last_count < m <= current_count:
+                return True
+        if current_count >= 20 and age_hours >= 24 and current_count > last_count + 10:
+            return True
+        return False
+    except:
+        return False
 
 NFTWATCH_FILE = _data_path("nftwatch_data.json")
 
@@ -916,6 +1007,10 @@ async def generate_contextual_reply(message: discord.Message) -> str | None:
     else:
         chat_messages.append({"role": "user", "content": f"[#{getattr(channel, 'name', 'chat')}] {author.display_name}: (just mentioned you with no text)"})
 
+    # Member profile — inject what Grim knows about the person talking to it
+    member_profile = get_member_profile(guild_id, str(author.id))
+    member_profile_block = member_profile if member_profile else f"Not enough messages from {author.display_name} yet to build a profile."
+
     # Server context
     server_name = guild.name if guild else "a server"
     channel_name = getattr(channel, "name", "chat")
@@ -954,6 +1049,11 @@ THINGS YOU'VE BEEN TOLD TO REMEMBER ABOUT THIS SERVER:
 
 WHAT YOU KNOW FROM WATCHING THE SERVER (auto-updated every 4 hours):
 {digest_block}
+
+---
+
+ABOUT THE PERSON TALKING TO YOU RIGHT NOW ({author.display_name}):
+{member_profile_block}
 
 ---
 
@@ -997,6 +1097,161 @@ Match what the moment calls for. Short message, short reply. Real conversation, 
     except Exception as e:
         print(f"[Grim] Contextual reply error: {e}")
         return None
+
+# ── Proactive chiming ──────────────────────────────────────────────────────────
+# Grim watches every channel and occasionally chimes in when it has something
+# genuinely worth saying — without being @mentioned.
+
+_channel_msg_counter: dict[str, int] = {}    # channel_id -> msgs since last Grim post
+_channel_last_grim_post: dict[str, float] = {}  # channel_id -> timestamp
+_channels_evaluating: set = set()           # prevent concurrent evaluations
+
+PROACTIVE_TRIGGER_EVERY = 7    # evaluate after this many messages
+PROACTIVE_COOLDOWN_SEC  = 1800  # 30-minute minimum gap per channel
+
+async def maybe_chime_in(message: discord.Message):
+    """Called on every human message. Schedules an evaluation every N messages."""
+    if not message.guild:
+        return
+    # Only in regular text channels
+    if message.channel.type not in (discord.ChannelType.text, discord.ChannelType.news):
+        return
+
+    cid = str(message.channel.id)
+    _channel_msg_counter[cid] = _channel_msg_counter.get(cid, 0) + 1
+
+    if _channel_msg_counter[cid] < PROACTIVE_TRIGGER_EVERY:
+        return
+    _channel_msg_counter[cid] = 0
+
+    if time.time() - _channel_last_grim_post.get(cid, 0) < PROACTIVE_COOLDOWN_SEC:
+        return
+    if cid in _channels_evaluating:
+        return
+
+    asyncio.create_task(_evaluate_and_chime(message))
+
+async def _evaluate_and_chime(message: discord.Message):
+    """Uses Grok to decide whether Grim has something worth adding, then optionally sends it."""
+    cid = str(message.channel.id)
+    _channels_evaluating.add(cid)
+    try:
+        api_key = os.environ.get("XAI_API_KEY")
+        if not api_key:
+            return
+
+        guild    = message.guild
+        channel  = message.channel
+        guild_id = str(guild.id)
+
+        db_rows = get_server_history_from_db(guild_id, limit=15)
+        if len(db_rows) < 4:
+            return
+
+        lines = []
+        for author_name, content, is_grim_row, row_channel_id in db_rows:
+            name   = "Grim" if is_grim_row else author_name
+            ch_obj = bot.get_channel(int(row_channel_id)) if row_channel_id else None
+            ch     = f"#{ch_obj.name}" if ch_obj else "#chat"
+            lines.append(f"[{ch}] {name}: {content}")
+        convo = "\n".join(lines)
+
+        digest_data = grim_digests.get(guild_id)
+        digest_block = digest_data["text"] if digest_data else ""
+
+        memory_list = grim_memories.get(guild_id, [])
+        memories_block = "\n".join(f"- {m}" for m in memory_list) if memory_list else ""
+
+        server_name  = guild.name
+        channel_name = getattr(channel, "name", "chat")
+
+        prompt = f"""You are Grim, a member of {server_name}. You've been watching #{channel_name}.
+
+RECENT CONVERSATION:
+{convo}
+
+SERVER KNOWLEDGE:
+{digest_block}
+
+{memories_block}
+
+Decide: do you have something genuinely worth adding RIGHT NOW?
+
+Only say yes if:
+- You have a real insight, observation, or piece of info that fits naturally
+- The timing is right (not jumping into something private or clearly wrapping up)
+- What you'd say would actually land — useful, funny at the right moment, or meaningfully extending the topic
+- You haven't recently spoken in this channel
+
+If yes, write your response as Grim would — natural, concise, like you just dropped in.
+If no, respond with exactly: PASS
+
+Be highly selective. Silence is better than noise. Most of the time should be PASS."""
+
+        async with aiohttp.ClientSession() as session:
+            payload = {
+                "model": "grok-3",
+                "messages": [
+                    {"role": "system", "content": f"You are Grim, an AI member of {server_name}. Speak casually and only when you have something genuinely worth saying. Most evaluations should result in PASS."},
+                    {"role": "user", "content": prompt}
+                ],
+                "max_tokens": 350,
+                "temperature": 0.8,
+            }
+            headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+            async with session.post("https://api.x.ai/v1/chat/completions", json=payload, headers=headers) as r:
+                if r.status != 200:
+                    return
+                data     = await r.json()
+                response = data["choices"][0]["message"]["content"].strip()
+
+        if response.upper().startswith("PASS"):
+            print(f"[Proactive] #{channel_name}: PASS")
+            return
+
+        sent = await channel.send(response)
+        _channel_last_grim_post[cid] = time.time()
+        print(f"[Proactive] Chimed in on #{channel_name}: {response[:60]}...")
+
+        if guild:
+            save_message_to_db(
+                guild_id, cid, str(sent.id),
+                BOT_NAME, response, sent.created_at.timestamp(), is_grim=True
+            )
+    except Exception as e:
+        print(f"[Proactive] Error: {e}")
+    finally:
+        _channels_evaluating.discard(cid)
+
+async def _synthesize_member_profile(guild_id: str, member_id: str, display_name: str, msg_count: int):
+    """Calls Grok to build a profile of a member from their message history."""
+    api_key = os.environ.get("XAI_API_KEY")
+    if not api_key:
+        return
+    messages = get_member_messages_for_profile(guild_id, member_id, limit=60)
+    if len(messages) < 15:
+        return
+    sample = "\n".join(f"- {m}" for m in messages)
+    try:
+        async with aiohttp.ClientSession() as session:
+            payload = {
+                "model": "grok-3",
+                "messages": [
+                    {"role": "system", "content": "You build concise, factual member profiles from Discord message samples. Focus on personality, interests, communication style, and anything notable. 3-5 sentences max. No fluff."},
+                    {"role": "user", "content": f"Build a profile of a Discord member named {display_name} based on their recent messages:\n\n{sample}"}
+                ],
+                "max_tokens": 250,
+                "temperature": 0.4,
+            }
+            headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+            async with session.post("https://api.x.ai/v1/chat/completions", json=payload, headers=headers) as r:
+                if r.status == 200:
+                    data = await r.json()
+                    profile_text = data["choices"][0]["message"]["content"].strip()
+                    save_member_profile(guild_id, member_id, display_name, profile_text, msg_count)
+                    print(f"[Profile] Built profile for {display_name} ({msg_count} msgs)")
+    except Exception as e:
+        print(f"[Profile] Error for {display_name}: {e}")
 
 async def fetch_user_tweets(username: str, count: int = 10):
     """Fetch recent tweets from an X username to analyze their style."""
@@ -3421,8 +3676,18 @@ async def on_message(message):
             str(message.id), message.author.display_name,
             message.content, message.created_at.timestamp(), is_grim=False
         )
+        # Update member profile if they've crossed a milestone
+        gid  = str(message.guild.id)
+        mid  = str(message.author.id)
+        name = message.author.display_name
+        msg_count = get_member_message_count(gid, name)
+        if profile_needs_update(gid, mid, msg_count):
+            asyncio.create_task(_synthesize_member_profile(gid, mid, name, msg_count))
 
     if bot.user in message.mentions:
+        # Reset counter — Grim is already responding, no need to also proactively chime
+        _channel_msg_counter[str(message.channel.id)] = 0
+        _channel_last_grim_post[str(message.channel.id)] = time.time()
         async with message.channel.typing():
             reply = await generate_contextual_reply(message)
         if reply:
@@ -3436,6 +3701,9 @@ async def on_message(message):
                 )
         else:
             await message.reply("something went sideways on my end, try again", mention_author=False)
+    else:
+        # Not @mentioned — let Grim decide if it wants to drop in
+        await maybe_chime_in(message)
 
     await bot.process_commands(message)
 
