@@ -2389,7 +2389,7 @@ async def on_ready():
     print(f"[Startup] Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S UTC')}")
     await sync_from_github()
     
-    await bot.change_presence(activity=discord.Activity(type=discord.ActivityType.watching, name="𝕴𝖋 𝕷𝖔𝖔𝖐𝖘 𝕮𝖔𝖚𝖑𝖉 𝕶𝖎𝖑𝖑"))
+    await bot.change_presence(activity=discord.Activity(type=discord.ActivityType.competing, name="죽은 자의 궁전"))
     
     try:
         synced = await bot.tree.sync()
