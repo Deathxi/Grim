@@ -52,6 +52,32 @@ def _bump_version():
         f.write(str(count))
     print(f"[Version] Deploy #{count} → {VERSION}")
 
+async def _push_version_to_github():
+    """Push the bumped version.txt to GitHub immediately — ensures next deploy always gets the right base count."""
+    token = os.environ.get("GITHUB_PERSONAL_ACCESS_TOKEN")
+    if not token:
+        print("[Version] No token — skipping GitHub version push")
+        return
+    try:
+        with open("version.txt", "rb") as f:
+            content = base64.b64encode(f.read()).decode()
+        headers = {"Authorization": f"token {token}", "Accept": "application/vnd.github.v3+json", "User-Agent": "GrimBot"}
+        async with aiohttp.ClientSession() as session:
+            async with session.get("https://api.github.com/repos/Deathxi/Grim/contents/version.txt?ref=main", headers=headers) as r:
+                existing = await r.json()
+            sha = existing.get("sha")
+            payload = {"message": f"Version bump → {VERSION}", "content": content, "branch": "main"}
+            if sha:
+                payload["sha"] = sha
+            async with session.put("https://api.github.com/repos/Deathxi/Grim/contents/version.txt", headers=headers, json=payload) as r:
+                result = await r.json()
+        if "content" in result:
+            print(f"[Version] Pushed version.txt ({VERSION}) to GitHub ✓")
+        else:
+            print(f"[Version] GitHub version push failed: {result.get('message')}")
+    except Exception as e:
+        print(f"[Version] Could not push version.txt to GitHub: {e}")
+
 VERSION = _load_version()
 
 intents = discord.Intents.default()
@@ -2368,6 +2394,7 @@ async def on_ready():
         print("Started health monitor (checks every 5 minutes)")
     
     _bump_version()
+    await _push_version_to_github()   # atomic — must succeed before notification fires
     asyncio.create_task(push_to_github_on_startup())
     asyncio.create_task(post_update_notification())
 
