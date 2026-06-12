@@ -2359,17 +2359,26 @@ async def push_to_github_on_startup():
     token = os.environ.get("GITHUB_PERSONAL_ACCESS_TOKEN")
     if not token:
         return
-    files = ["main.py", "CHANGELOG.md", ".gitignore", "replit.md", "version.txt", "updates_data.json"]
+    # Map: GitHub filename -> local path to read from
+    # updates_data.json reads from persistent disk (the real data), not project root snapshot
+    file_map = {
+        "main.py": "main.py",
+        "CHANGELOG.md": "CHANGELOG.md",
+        ".gitignore": ".gitignore",
+        "replit.md": "replit.md",
+        "version.txt": "version.txt",
+        "updates_data.json": UPDATES_CONFIG_FILE,
+    }
     repo = "Deathxi/Grim"
     branch = "main"
     pushed = []
     failed = []
     async with aiohttp.ClientSession() as session:
-        for filepath in files:
-            if not os.path.exists(filepath):
+        for filepath, local_path in file_map.items():
+            if not os.path.exists(local_path):
                 continue
             try:
-                with open(filepath, "rb") as f:
+                with open(local_path, "rb") as f:
                     content = base64.b64encode(f.read()).decode()
                 headers = {
                     "Authorization": f"token {token}",
@@ -2406,93 +2415,78 @@ async def push_to_github_on_startup():
     if failed:
         print(f"[GitHub Sync] Failed: {', '.join(failed)}")
 
-async def post_update_notification():
-    token = os.environ.get("GITHUB_PERSONAL_ACCESS_TOKEN")
-    if not token:
-        print("[Updates] No GitHub token, skipping.")
-        return
-    # Delay to ensure push completes and guild/channel cache is fully populated
-    await asyncio.sleep(30)
-    repo = "Deathxi/Grim"
-    branch = "main"
-    headers = {
-        "Authorization": f"token {token}",
-        "Accept": "application/vnd.github.v3+json",
-        "User-Agent": "GrimBot"
-    }
+LAST_ANNOUNCED_VERSION_FILE = _data_path("last_announced_version.txt")
+
+def _load_last_announced_version():
     try:
-        async with aiohttp.ClientSession() as session:
-            # Always pull channel config fresh from GitHub — never rely on local state
-            async with session.get(
-                f"https://api.github.com/repos/{repo}/contents/updates_data.json?ref={branch}",
-                headers=headers
-            ) as r:
-                cfg = await r.json()
-            if "content" not in cfg:
-                print(f"[Updates] Could not fetch updates_data.json: {cfg.get('message')}")
-                return
-            live_channels = json.loads(base64.b64decode(cfg["content"]).decode())
-            if not live_channels:
-                print("[Updates] No channels registered in GitHub config, skipping.")
-                return
-            print(f"[Updates] Loaded {len(live_channels)} channel(s) from GitHub")
-            async with session.get(
-                f"https://api.github.com/repos/{repo}/commits?ref={branch}&per_page=25",
-                headers=headers
-            ) as r:
-                all_commits = await r.json()
-            if not isinstance(all_commits, list) or not all_commits:
-                print(f"[Updates] GitHub returned unexpected response: {all_commits}")
-                return
-            latest_sha = all_commits[0]["sha"]
-            print(f"[Updates] Latest GitHub SHA: {latest_sha[:7]} — checking {len(live_channels)} channel(s)")
-            for guild_id, data in list(live_channels.items()):
-                last_sha = updates_sha.get(guild_id)
-                print(f"[Updates] Guild {guild_id} — last SHA: {last_sha[:7] if last_sha else 'None'}")
-                # Collect commits newer than last_sha (cap at 10)
-                new_commits = []
-                for commit in all_commits:
-                    if commit["sha"] == last_sha:
-                        break
-                    new_commits.append(commit)
-                    if len(new_commits) >= 10:
-                        break
-                if not new_commits:
-                    print(f"[Updates] No new commits for guild {guild_id}, skipping.")
-                    updates_sha[guild_id] = latest_sha
-                    save_updates_sha(updates_sha)
-                    continue
-                print(f"[Updates] {len(new_commits)} new commit(s) to post for guild {guild_id}")
-                # Fetch changed files across new commits
-                changed_files = {}
-                for commit in new_commits[:5]:
-                    async with session.get(
-                        f"https://api.github.com/repos/{repo}/commits/{commit['sha']}",
-                        headers=headers
-                    ) as r:
-                        detail = await r.json()
-                    for file in detail.get("files", []):
-                        changed_files[file["filename"]] = file["status"]
-                file_list = "\n".join(f"`{fname}`" for fname in list(changed_files.keys())[:10]) or "`main.py`"
-                embed = discord.Embed(
-                    title=f"Grim — {VERSION}",
-                    description=f"**{len(new_commits)} commit(s)** deployed\n\n{file_list}",
-                    color=discord.Color.from_rgb(18, 18, 18)
-                )
-                embed.add_field(name="Repository", value="[Deathxi/Grim](https://github.com/Deathxi/Grim)", inline=True)
-                embed.add_field(name="Changes", value=str(len(changed_files)), inline=True)
-                embed.set_footer(text=f"Powered by {BOT_NAME} • {VERSION}")
-                try:
-                    channel = await bot.fetch_channel(int(data["channel_id"]))
-                    await channel.send(embed=embed)
-                    print(f"[Updates] Posted to channel {data['channel_id']} in guild {guild_id}")
-                    # Only advance SHA if post succeeded
-                    updates_sha[guild_id] = latest_sha
-                    save_updates_sha(updates_sha)
-                except Exception as ce:
-                    print(f"[Updates] Could not post to channel {data['channel_id']}: {ce}")
-    except Exception as e:
-        print(f"[Updates] Failed to post update notification: {e}")
+        with open(LAST_ANNOUNCED_VERSION_FILE, "r") as f:
+            return f.read().strip()
+    except:
+        return None
+
+def _save_last_announced_version(version: str):
+    with open(LAST_ANNOUNCED_VERSION_FILE, "w") as f:
+        f.write(version)
+
+def _load_changelog_notes() -> str:
+    """Pull the most recent section from CHANGELOG.md if it exists."""
+    try:
+        with open("CHANGELOG.md", "r") as f:
+            lines = f.readlines()
+        notes = []
+        in_section = False
+        for line in lines:
+            if line.startswith("## ") and not in_section:
+                in_section = True
+                continue
+            if line.startswith("## ") and in_section:
+                break
+            if in_section and line.strip():
+                notes.append(line.rstrip())
+        return "\n".join(notes[:10]) if notes else ""
+    except:
+        return ""
+
+async def post_update_notification():
+    """Post an update embed to all registered channels when the version has changed.
+    Fully GitHub-independent — uses persistent disk to track last announced version."""
+    # Delay to ensure guild/channel cache is fully populated
+    await asyncio.sleep(30)
+
+    if not updates_channels:
+        print("[Updates] No channels registered, skipping.")
+        return
+
+    last_version = _load_last_announced_version()
+    if last_version == VERSION:
+        print(f"[Updates] Already announced {VERSION}, skipping.")
+        return
+
+    print(f"[Updates] New version detected: {last_version or 'none'} → {VERSION}. Posting to {len(updates_channels)} channel(s).")
+
+    changelog_notes = _load_changelog_notes()
+    description = changelog_notes if changelog_notes else "Grim has been updated and redeployed."
+
+    embed = discord.Embed(
+        title=f"Grim — {VERSION}",
+        description=description,
+        color=discord.Color.from_rgb(18, 18, 18)
+    )
+    embed.set_footer(text=f"Powered by {BOT_NAME} • {VERSION}")
+
+    posted = False
+    for guild_id, data in list(updates_channels.items()):
+        try:
+            channel = await bot.fetch_channel(int(data["channel_id"]))
+            await channel.send(embed=embed)
+            print(f"[Updates] Posted to channel {data['channel_id']} in guild {guild_id}")
+            posted = True
+        except Exception as e:
+            print(f"[Updates] Could not post to channel {data['channel_id']} in guild {guild_id}: {e}")
+
+    if posted:
+        _save_last_announced_version(VERSION)
+        print(f"[Updates] Saved last announced version as {VERSION}")
 
 @bot.tree.command(name="info", description="Get server status and info")
 async def info(interaction: discord.Interaction):
@@ -2623,6 +2617,84 @@ async def inspire(interaction: discord.Interaction):
     embed.set_footer(text=f"{interaction.user.name} · {VERSION}")
     
     await interaction.followup.send(embed=embed)
+
+@bot.tree.command(name="summarize", description="Get a private TLDR of recent channel conversation")
+@discord.app_commands.describe(messages="Number of recent messages to summarize (e.g. 50)")
+async def summarize(interaction: discord.Interaction, messages: int):
+    if messages < 5:
+        await interaction.response.send_message("Give me at least 5 messages to work with.", ephemeral=True)
+        return
+    if messages > 500:
+        await interaction.response.send_message("Cap is 500 messages — try a smaller number.", ephemeral=True)
+        return
+
+    await interaction.response.defer(ephemeral=True)
+
+    api_key = os.environ.get("XAI_API_KEY")
+    if not api_key:
+        await interaction.followup.send("XAI_API_KEY not configured.", ephemeral=True)
+        return
+
+    # Fetch messages directly from Discord channel history
+    try:
+        history = []
+        async for msg in interaction.channel.history(limit=messages):
+            if msg.author.bot and msg.author.id != bot.user.id:
+                continue
+            name = "Grim" if msg.author.id == bot.user.id else msg.author.display_name
+            if msg.content.strip():
+                history.append((name, msg.content.strip()))
+        history.reverse()  # oldest first
+    except Exception as e:
+        await interaction.followup.send("Couldn't fetch channel history.", ephemeral=True)
+        return
+
+    if len(history) < 3:
+        await interaction.followup.send("Not enough messages in this channel to summarize.", ephemeral=True)
+        return
+
+    convo_text = "\n".join(f"{name}: {content}" for name, content in history)
+
+    prompt = f"""Here are the last {len(history)} messages from #{getattr(interaction.channel, 'name', 'chat')}:
+
+{convo_text}
+
+Give a concise TLDR. Cover:
+- What was being discussed
+- Who was involved and what they said or contributed
+- Any conclusions, decisions, or notable moments
+
+Write it like a quick briefing — direct, no fluff. Natural prose, no bullet points."""
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            payload = {
+                "model": "grok-3",
+                "messages": [
+                    {"role": "system", "content": "You summarize Discord conversations accurately and concisely. Name the participants. No filler, no markdown headers."},
+                    {"role": "user", "content": prompt}
+                ],
+                "max_tokens": 500,
+                "temperature": 0.4,
+            }
+            headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+            async with session.post("https://api.x.ai/v1/chat/completions", json=payload, headers=headers) as r:
+                if r.status != 200:
+                    await interaction.followup.send("API error — try again.", ephemeral=True)
+                    return
+                data = await r.json()
+                summary = data["choices"][0]["message"]["content"].strip()
+    except Exception as e:
+        await interaction.followup.send("Something went wrong generating the summary.", ephemeral=True)
+        return
+
+    embed = discord.Embed(
+        title=f"Last {len(history)} messages · #{getattr(interaction.channel, 'name', 'chat')}",
+        description=summary,
+        color=discord.Color.from_rgb(18, 18, 18)
+    )
+    embed.set_footer(text=f"Only visible to you · {VERSION}")
+    await interaction.followup.send(embed=embed, ephemeral=True)
 
 @bot.tree.command(name="roast", description="Roast a member with chaotic, unhinged energy")
 async def roast(interaction: discord.Interaction, user: discord.Member):
@@ -3719,6 +3791,31 @@ async def on_message(message):
         if profile_needs_update(gid, mid, msg_count):
             asyncio.create_task(_synthesize_member_profile(gid, mid, name, msg_count))
 
+        # 5% chance to drop a comical surveillance warning
+        if random.random() < 0.05 and message.channel.type in (discord.ChannelType.text, discord.ChannelType.news):
+            _SURVEILLANCE_WARNINGS = [
+                "careful... Palantir is watching.",
+                "the NSA has eyes everywhere.",
+                "Blackrock is trying to tap this channel.",
+                "someone at the CIA just opened a new tab.",
+                "a Three Letter Agency has entered the chat.",
+                "GCHQ sends their regards.",
+                "this message has been logged by 7 government databases.",
+                "Echelon flagged that. just so you know.",
+                "a Pegasus spyware license just got renewed.",
+                "the Five Eyes are listening.",
+                "Palantir's sentiment analysis is running hot today.",
+                "somewhere, a contractor at Booz Allen Hamilton just got an alert.",
+                "your metadata has already been sold twice.",
+                "a dark pattern algorithm somewhere just learned something new.",
+                "the surveillance economy thanks you for your contribution.",
+                "Mark Zuckerberg's ears just perked up.",
+                "that message was routed through 14 data brokers.",
+                "a facial recognition server just cross-referenced this.",
+                "In-Q-Tel wants to know your location.",
+            ]
+            await message.channel.send(random.choice(_SURVEILLANCE_WARNINGS))
+
     if bot.user in message.mentions:
         # Reset counter — Grim is already responding, no need to also proactively chime
         _channel_msg_counter[str(message.channel.id)] = 0
@@ -3798,6 +3895,38 @@ async def help_grim(ctx):
     embed.add_field(name="/nftwatch_cancel", value="Stop NFT watch", inline=True)
     embed.set_footer(text=f"Grim · {VERSION}")
     await ctx.send(embed=embed)
+
+@bot.tree.command(name="grim_github_test", description="Test GitHub connection and token status (admin only)")
+async def grim_github_test(interaction: discord.Interaction):
+    if not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message("admins only.", ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True)
+    token = os.environ.get("GITHUB_PERSONAL_ACCESS_TOKEN", "")
+    if not token:
+        await interaction.followup.send("❌ `GITHUB_PERSONAL_ACCESS_TOKEN` is not set in secrets.", ephemeral=True)
+        return
+    try:
+        async with aiohttp.ClientSession() as session:
+            headers = {"Authorization": f"token {token}", "User-Agent": "GrimBot", "Accept": "application/vnd.github.v3+json"}
+            async with session.get("https://api.github.com/user", headers=headers) as r:
+                status = r.status
+                data = await r.json()
+                scopes = r.headers.get("X-OAuth-Scopes", "none")
+        if status == 200:
+            login = data.get("login", "unknown")
+            has_repo = "repo" in scopes
+            lines = [
+                f"✅ Token valid — authenticated as **{login}**",
+                f"Scopes: `{scopes}`",
+                f"Repo access: {'✅' if has_repo else '❌ missing `repo` scope'}",
+                f"Token prefix: `{token[:10]}...`",
+            ]
+            await interaction.followup.send("\n".join(lines), ephemeral=True)
+        else:
+            await interaction.followup.send(f"❌ GitHub returned `{status}`: {data.get('message', 'unknown error')}\nToken prefix: `{token[:10]}...`", ephemeral=True)
+    except Exception as e:
+        await interaction.followup.send(f"❌ Request failed: {e}", ephemeral=True)
 
 @bot.tree.command(name="grim_remember", description="Give Grim a permanent memory about this server")
 @discord.app_commands.describe(memory="The fact or detail you want Grim to remember")
