@@ -2464,14 +2464,57 @@ async def post_update_notification():
 
     print(f"[Updates] New version detected: {last_version or 'none'} → {VERSION}. Posting to {len(updates_channels)} channel(s).")
 
-    changelog_notes = _load_changelog_notes()
-    description = changelog_notes if changelog_notes else "Grim has been updated and redeployed."
+    # Try to pull commit data from GitHub for a richer embed
+    repo = "Deathxi/Grim"
+    branch = "main"
+    new_commits = []
+    changed_files = {}
+    token = os.environ.get("GITHUB_PERSONAL_ACCESS_TOKEN")
+    if token:
+        try:
+            headers = {"Authorization": f"token {token}", "Accept": "application/vnd.github.v3+json", "User-Agent": "GrimBot"}
+            async with aiohttp.ClientSession() as session:
+                async with session.get(f"https://api.github.com/repos/{repo}/commits?ref={branch}&per_page=25", headers=headers) as r:
+                    all_commits = await r.json()
+                if isinstance(all_commits, list) and all_commits:
+                    latest_sha = all_commits[0]["sha"]
+                    last_sha = updates_sha.get("_global")
+                    for commit in all_commits:
+                        if commit["sha"] == last_sha:
+                            break
+                        new_commits.append(commit)
+                        if len(new_commits) >= 10:
+                            break
+                    # Fetch changed files from the most recent commits
+                    for commit in new_commits[:5]:
+                        async with session.get(f"https://api.github.com/repos/{repo}/commits/{commit['sha']}", headers=headers) as r:
+                            detail = await r.json()
+                        for file in detail.get("files", []):
+                            changed_files[file["filename"]] = file["status"]
+                    updates_sha["_global"] = latest_sha
+                    save_updates_sha(updates_sha)
+        except Exception as e:
+            print(f"[Updates] Could not fetch GitHub commit data: {e}")
 
-    embed = discord.Embed(
-        title=f"Grim — {VERSION}",
-        description=description,
-        color=discord.Color.from_rgb(18, 18, 18)
-    )
+    # Build embed — rich if we have commit data, simple fallback if not
+    if new_commits and changed_files:
+        file_list = "\n".join(f"`{fname}`" for fname in list(changed_files.keys())[:10])
+        embed = discord.Embed(
+            title=f"Grim — {VERSION}",
+            description=f"**{len(new_commits)} commit(s)** deployed\n\n{file_list}",
+            color=discord.Color.from_rgb(18, 18, 18)
+        )
+        embed.add_field(name="Repository", value=f"[{repo}](https://github.com/{repo})", inline=True)
+        embed.add_field(name="Changes", value=str(len(changed_files)), inline=True)
+    else:
+        changelog_notes = _load_changelog_notes()
+        description = changelog_notes if changelog_notes else "Grim has been updated and redeployed."
+        embed = discord.Embed(
+            title=f"Grim — {VERSION}",
+            description=description,
+            color=discord.Color.from_rgb(18, 18, 18)
+        )
+        embed.add_field(name="Repository", value=f"[{repo}](https://github.com/{repo})", inline=True)
     embed.set_footer(text=f"Powered by {BOT_NAME} • {VERSION}")
 
     posted = False
