@@ -3724,6 +3724,8 @@ async def grim_updates(interaction: discord.Interaction):
     if not interaction.user.guild_permissions.manage_channels:
         await interaction.response.send_message("You need 'Manage Channels' permission to use this command.", ephemeral=True)
         return
+    # Defer immediately — GitHub push can take a few seconds
+    await interaction.response.defer()
     guild_id = str(interaction.guild_id)
     if guild_id in updates_channels:
         del updates_channels[guild_id]
@@ -3736,7 +3738,6 @@ async def grim_updates(interaction: discord.Interaction):
             color=discord.Color.from_rgb(18, 18, 18)
         )
         embed.set_footer(text=f"Powered by {BOT_NAME} • {VERSION}")
-        await interaction.response.send_message(embed=embed)
     else:
         updates_channels[guild_id] = {"channel_id": str(interaction.channel_id)}
         save_updates_data(updates_channels)
@@ -3746,7 +3747,6 @@ async def grim_updates(interaction: discord.Interaction):
             color=discord.Color.from_rgb(18, 18, 18)
         )
         embed.set_footer(text=f"Powered by {BOT_NAME} • {VERSION}")
-        await interaction.response.send_message(embed=embed)
     # Push config to GitHub immediately so it survives the next redeploy
     # NOTE: always push to "updates_data.json" (GitHub path), read from UPDATES_CONFIG_FILE (local persistent path)
     token = os.environ.get("GITHUB_PERSONAL_ACCESS_TOKEN")
@@ -3769,6 +3769,7 @@ async def grim_updates(interaction: discord.Interaction):
                     print(f"[Updates] GitHub push failed: {result.get('message')}")
         except Exception as e:
             print(f"[Updates] Could not push config to GitHub: {e}")
+    await interaction.followup.send(embed=embed)
 
 @bot.tree.command(name="welcome_on", description="Enable welcome messages for new members in this channel")
 async def welcome_on(interaction: discord.Interaction):
