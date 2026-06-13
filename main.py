@@ -6,11 +6,14 @@ import aiohttp
 import uuid
 import base64
 import sqlite3
+import psutil
 import discord
 from discord.ext import commands, tasks
 from discord import ui
 from openai import OpenAI
 import tweepy
+
+BOT_START_TIME = None
 
 BOT_NAME = "Grim"
 
@@ -2429,6 +2432,8 @@ async def sync_from_github():
 
 @bot.event
 async def on_ready():
+    global BOT_START_TIME
+    BOT_START_TIME = time.time()
     print(f"{bot.user} has connected to Discord!")
     print(f"Bot is in {len(bot.guilds)} server(s)")
     print(f"[Startup] Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S UTC')}")
@@ -3338,6 +3343,152 @@ async def newsfeed_status(interaction: discord.Interaction):
     embed.set_footer(text=f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} · {VERSION}")
     
     await interaction.response.send_message(embed=embed, ephemeral=True)
+
+@bot.tree.command(name="grim_status", description="Full system and API health dashboard")
+async def grim_status(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    now = time.time()
+
+    # ── System metrics ────────────────────────────────────
+    cpu_pct = psutil.cpu_percent(interval=0.5)
+    ram = psutil.virtual_memory()
+    disk = psutil.disk_usage('/')
+    ram_used = ram.used / (1024 ** 3)
+    ram_total = ram.total / (1024 ** 3)
+    disk_used = disk.used / (1024 ** 3)
+    disk_total = disk.total / (1024 ** 3)
+
+    # ── Bot stats ─────────────────────────────────────────
+    latency_ms = round(bot.latency * 1000)
+    uptime_secs = int(now - BOT_START_TIME) if BOT_START_TIME else 0
+    days = uptime_secs // 86400
+    hours = (uptime_secs % 86400) // 3600
+    mins = (uptime_secs % 3600) // 60
+    uptime_str = f"{days}d {hours}h {mins}m" if days else f"{hours}h {mins}m"
+    guild_count = len(bot.guilds)
+    total_members = sum(g.member_count or 0 for g in bot.guilds)
+
+    # ── API health checks (run concurrently) ─────────────
+    api_key = os.environ.get("XAI_API_KEY")
+    x_bearer = os.environ.get("X_BEARER_TOKEN")
+    opensea_key = os.environ.get("OPENSEA_API_KEY")
+
+    async def check_xai():
+        if not api_key:
+            return "No key", None
+        try:
+            t0 = time.time()
+            async with aiohttp.ClientSession() as s:
+                async with s.post(
+                    "https://api.x.ai/v1/chat/completions",
+                    headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                    json={"model": "grok-3", "messages": [{"role": "user", "content": "ping"}], "max_tokens": 1},
+                    timeout=aiohttp.ClientTimeout(total=8)
+                ) as r:
+                    lat = round((time.time() - t0) * 1000)
+                    return ("Online" if r.status == 200 else f"Error {r.status}"), lat
+        except:
+            return "Unreachable", None
+
+    async def check_x():
+        if not x_bearer:
+            return "No key", None
+        try:
+            t0 = time.time()
+            async with aiohttp.ClientSession() as s:
+                async with s.get(
+                    "https://api.twitter.com/2/users/by/username/twitter",
+                    headers={"Authorization": f"Bearer {x_bearer}"},
+                    timeout=aiohttp.ClientTimeout(total=8)
+                ) as r:
+                    lat = round((time.time() - t0) * 1000)
+                    return ("Online" if r.status in (200, 400) else f"Error {r.status}"), lat
+        except:
+            return "Unreachable", None
+
+    (xai_status, xai_lat), (x_status, x_lat) = await asyncio.gather(check_xai(), check_x())
+
+    # ── Background tasks ──────────────────────────────────
+    task_map = {
+        "Newsfeed": check_newsfeed,
+        "Livetweets": check_livetweets,
+        "Ghostwrite Live": check_ghostwrite_live,
+        "NFT Watch": check_nftwatch,
+        "Reminders": check_reminders,
+        "Digest": synthesize_server_digest,
+        "Health Monitor": health_monitor,
+        "VC Monitor": vc_empty_monitor,
+    }
+
+    # ── Active features (this server) ─────────────────────
+    guild_id_str = str(interaction.guild_id)
+    active_feeds = sum(1 for d in newsfeed_feeds.values() if d.get("guild_id") == guild_id_str)
+    active_tweets = sum(1 for d in livetweet_channels.values() if isinstance(d, dict) and d.get("guild_id") == guild_id_str)
+    active_nft = sum(1 for d in nftwatch_feeds.values() if isinstance(d, dict) and d.get("guild_id") == guild_id_str)
+    vc_session = vc_sessions.get(guild_id_str)
+    vc_str = f"In **{vc_session['vc'].channel.name}**" if vc_session and vc_session.get("vc") and vc_session["vc"].is_connected() else "Inactive"
+
+    # ── Build embed ───────────────────────────────────────
+    def tick(ok): return "✓" if ok else "✗"
+
+    embed = discord.Embed(
+        title="Grim — System Status",
+        color=discord.Color.from_rgb(18, 18, 18)
+    )
+
+    embed.add_field(
+        name="System",
+        value=(
+            f"**CPU:** {cpu_pct}%\n"
+            f"**RAM:** {ram_used:.1f} / {ram_total:.1f} GB ({ram.percent}%)\n"
+            f"**Disk:** {disk_used:.1f} / {disk_total:.1f} GB ({disk.percent}%)"
+        ),
+        inline=True
+    )
+
+    embed.add_field(
+        name="Bot",
+        value=(
+            f"**Uptime:** {uptime_str}\n"
+            f"**Ping:** {latency_ms}ms\n"
+            f"**Servers:** {guild_count}\n"
+            f"**Members:** {total_members}"
+        ),
+        inline=True
+    )
+
+    embed.add_field(name="\u200b", value="\u200b", inline=True)
+
+    xai_line = f"{tick(xai_status == 'Online')} xAI — {xai_status}" + (f" ({xai_lat}ms)" if xai_lat else "")
+    x_line = f"{tick(x_status == 'Online')} X/Twitter — {x_status}" + (f" ({x_lat}ms)" if x_lat else "")
+    discord_line = f"✓ Discord — Online ({latency_ms}ms)"
+    opensea_line = f"{tick(bool(opensea_key))} OpenSea — {'Key set' if opensea_key else 'No key'}"
+    embed.add_field(
+        name="APIs",
+        value=f"{discord_line}\n{xai_line}\n{x_line}\n{opensea_line}",
+        inline=True
+    )
+
+    task_lines = [f"{tick(t.is_running())} {n}" for n, t in task_map.items()]
+    embed.add_field(
+        name="Background Tasks",
+        value="\n".join(task_lines),
+        inline=True
+    )
+
+    embed.add_field(
+        name="Active (this server)",
+        value=(
+            f"**Newsfeeds:** {active_feeds}\n"
+            f"**Livetweets:** {active_tweets}\n"
+            f"**NFT Watches:** {active_nft}\n"
+            f"**Voice:** {vc_str}"
+        ),
+        inline=True
+    )
+
+    embed.set_footer(text=f"Grim · {VERSION} · {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    await interaction.followup.send(embed=embed, ephemeral=True)
 
 @bot.tree.command(name="newsfeed", description="Start a live news feed for a topic in this channel")
 async def newsfeed(interaction: discord.Interaction, interval: str, topic: str):
