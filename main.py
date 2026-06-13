@@ -3832,7 +3832,7 @@ async def nftwatch_cancel(interaction: discord.Interaction):
 # ── Reddit Feed ───────────────────────────────────────────────────────────────
 
 @bot.tree.command(name="redditfeed", description="Post images from Reddit subreddits on a schedule")
-@app_commands.describe(
+@discord.app_commands.describe(
     subreddits="Comma-separated subreddit names (e.g. DarkAesthetic,darkcore,GothicArt)",
     interval="How often to post in minutes (min 10)"
 )
