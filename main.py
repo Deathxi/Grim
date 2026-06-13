@@ -3857,9 +3857,21 @@ async def nftwatch_cancel(interaction: discord.Interaction):
 
 # ── Reddit Feed ───────────────────────────────────────────────────────────────
 
+def _parse_subreddit_name(raw: str) -> str:
+    """Extract subreddit name from a URL, r/name, or plain name."""
+    raw = raw.strip().rstrip("/")
+    # Handle full URLs: https://www.reddit.com/r/SubName or https://reddit.com/r/SubName
+    if "reddit.com/r/" in raw:
+        part = raw.split("reddit.com/r/")[-1]
+        return part.split("/")[0]
+    # Handle r/SubName
+    if raw.lower().startswith("r/"):
+        return raw[2:]
+    return raw
+
 @bot.tree.command(name="redditfeed", description="Post images from Reddit subreddits on a schedule")
 @discord.app_commands.describe(
-    subreddits="Comma-separated subreddit names (e.g. DarkAesthetic,darkcore,GothicArt)",
+    subreddits="Subreddit names or links, comma-separated (e.g. r/DarkAesthetic or reddit.com/r/darkcore)",
     interval="How often to post, e.g. 30m or 12h (min 10m)"
 )
 async def redditfeed(interaction: discord.Interaction, subreddits: str, interval: str):
@@ -3887,7 +3899,7 @@ async def redditfeed(interaction: discord.Interaction, subreddits: str, interval
         await interaction.response.send_message("Minimum interval is 10 minutes (`10m`).", ephemeral=True)
         return
 
-    sub_list = [s.strip().lstrip("r/") for s in subreddits.split(",") if s.strip()]
+    sub_list = [_parse_subreddit_name(s) for s in subreddits.split(",") if s.strip()]
     if not sub_list:
         await interaction.response.send_message("Please provide at least one subreddit.", ephemeral=True)
         return
