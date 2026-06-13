@@ -3834,17 +3834,31 @@ async def nftwatch_cancel(interaction: discord.Interaction):
 @bot.tree.command(name="redditfeed", description="Post images from Reddit subreddits on a schedule")
 @discord.app_commands.describe(
     subreddits="Comma-separated subreddit names (e.g. DarkAesthetic,darkcore,GothicArt)",
-    interval="How often to post in minutes (min 10)"
+    interval="How often to post, e.g. 30m or 12h (min 10m)"
 )
-async def redditfeed(interaction: discord.Interaction, subreddits: str, interval: int):
+async def redditfeed(interaction: discord.Interaction, subreddits: str, interval: str):
     global redditfeed_feeds
 
     if not interaction.user.guild_permissions.manage_channels:
         await interaction.response.send_message("You need 'Manage Channels' permission to use this command.", ephemeral=True)
         return
 
-    if interval < 10:
-        await interaction.response.send_message("Minimum interval is 10 minutes.", ephemeral=True)
+    interval = interval.strip().lower()
+    if interval.endswith("h") and interval[:-1].isdigit():
+        interval_minutes = int(interval[:-1]) * 60
+        interval_display = f"{interval[:-1]}h"
+    elif interval.endswith("m") and interval[:-1].isdigit():
+        interval_minutes = int(interval[:-1])
+        interval_display = f"{interval[:-1]}m"
+    elif interval.isdigit():
+        interval_minutes = int(interval)
+        interval_display = f"{interval}m"
+    else:
+        await interaction.response.send_message("Invalid interval. Use formats like `30m` or `12h`.", ephemeral=True)
+        return
+
+    if interval_minutes < 10:
+        await interaction.response.send_message("Minimum interval is 10 minutes (`10m`).", ephemeral=True)
         return
 
     sub_list = [s.strip().lstrip("r/") for s in subreddits.split(",") if s.strip()]
@@ -3881,7 +3895,7 @@ async def redditfeed(interaction: discord.Interaction, subreddits: str, interval
         "channel_id": str(interaction.channel_id),
         "guild_id": str(interaction.guild_id),
         "subreddits": valid_subs,
-        "interval_minutes": interval,
+        "interval_minutes": interval_minutes,
         "last_run": 0,
         "posted_urls": []
     }
@@ -3890,7 +3904,7 @@ async def redditfeed(interaction: discord.Interaction, subreddits: str, interval
     sub_display = ", ".join([f"r/{s}" for s in valid_subs])
     embed = discord.Embed(
         title="Reddit Feed Started",
-        description=f"Posting images every **{interval} min** from:\n{sub_display}",
+        description=f"Posting images every **{interval_display}** from:\n{sub_display}",
         color=discord.Color.from_rgb(18, 18, 18)
     )
     embed.add_field(name="\u200b", value=f"```{feed_id}```", inline=True)
