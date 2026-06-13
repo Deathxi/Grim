@@ -7,6 +7,7 @@ import uuid
 import base64
 import sqlite3
 import psutil
+import hashlib
 import discord
 from discord.ext import commands, tasks
 from discord import ui
@@ -18,6 +19,7 @@ BOT_START_TIME = None
 BOT_NAME = "Grim"
 
 VERSION_COUNT_FILE = os.path.expanduser("~/.grim_data/version_count.txt")
+MAIN_HASH_FILE = os.path.expanduser("~/.grim_data/main_hash.txt")
 
 def _format_version(count):
     return f"V{count // 100}.{count % 100:02d}"
@@ -34,8 +36,27 @@ def _load_version():
             pass
     return "V1.01"
 
+def _get_main_hash():
+    try:
+        with open(__file__, "rb") as f:
+            return hashlib.md5(f.read()).hexdigest()
+    except:
+        return None
+
 def _bump_version():
     global VERSION
+    # Only bump if main.py has changed since the last bump
+    current_hash = _get_main_hash()
+    try:
+        with open(MAIN_HASH_FILE, "r") as f:
+            stored_hash = f.read().strip()
+    except:
+        stored_hash = None
+
+    if current_hash and current_hash == stored_hash:
+        print(f"[Version] No code change detected — skipping bump, staying at {VERSION}")
+        return
+
     try:
         with open(VERSION_COUNT_FILE, "r") as f:
             count = int(f.read().strip())
@@ -53,6 +74,11 @@ def _bump_version():
     # Keep project-root version.txt in sync for GitHub visibility
     with open("version.txt", "w") as f:
         f.write(str(count))
+    # Store the hash so the next restart without code changes won't bump again
+    if current_hash:
+        os.makedirs(os.path.dirname(MAIN_HASH_FILE), exist_ok=True)
+        with open(MAIN_HASH_FILE, "w") as f:
+            f.write(current_hash)
     print(f"[Version] Deploy #{count} → {VERSION}")
 
 async def _push_version_to_github():
