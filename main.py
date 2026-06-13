@@ -3494,6 +3494,60 @@ async def newsfeed_status(interaction: discord.Interaction):
     
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
+@bot.tree.command(name="redditfeed_status", description="View active Reddit image feeds and their status")
+async def redditfeed_status(interaction: discord.Interaction):
+    global redditfeed_feeds
+
+    current_time = time.time()
+    guild_id_str = str(interaction.guild_id)
+
+    guild_feeds = {fid: d for fid, d in redditfeed_feeds.items() if d.get("guild_id") == guild_id_str}
+
+    task_ok = check_redditfeed.is_running()
+    embed = discord.Embed(
+        title="Reddit Feed Status",
+        description=f"**{'Operational' if task_ok else 'Attention needed'}**",
+        color=discord.Color.from_rgb(18, 18, 18)
+    )
+
+    embed.add_field(
+        name="Task",
+        value=f"**Reddit Feed:** {'Active' if task_ok else 'Stopped'}",
+        inline=False
+    )
+
+    if guild_feeds:
+        feed_lines = []
+        for feed_id, data in guild_feeds.items():
+            channel_id = data.get("channel_id")
+            subs = ", ".join([f"r/{s}" for s in data.get("subreddits", [])])
+            interval_minutes = data.get("interval_minutes", 60)
+            interval_display = f"{interval_minutes // 60}h" if interval_minutes % 60 == 0 else f"{interval_minutes}m"
+            last_run = data.get("last_run", 0)
+            interval_seconds = interval_minutes * 60
+            next_run = last_run + interval_seconds
+            time_until = next_run - current_time
+
+            if time_until <= 0:
+                next_str = "**Due now**"
+            elif time_until < 60:
+                next_str = f"in {int(time_until)}s"
+            elif time_until < 3600:
+                next_str = f"in {int(time_until / 60)}m"
+            else:
+                h = int(time_until / 3600)
+                m = int((time_until % 3600) / 60)
+                next_str = f"in {h}h {m}m"
+
+            feed_lines.append(f"**{subs}** ({interval_display})\n<#{channel_id}> · Next: {next_str} · `{feed_id}`")
+
+        embed.add_field(name=f"Feeds ({len(guild_feeds)})", value="\n".join(feed_lines), inline=False)
+    else:
+        embed.add_field(name="Feeds", value="No active Reddit feeds", inline=False)
+
+    embed.set_footer(text=f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} · {VERSION}")
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
 @bot.tree.command(name="status", description="Full system and API health dashboard")
 async def grim_status(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
@@ -3561,6 +3615,7 @@ async def grim_status(interaction: discord.Interaction):
     # ── Background tasks ──────────────────────────────────
     task_map = {
         "Newsfeed": check_newsfeed,
+        "Reddit Feed": check_redditfeed,
         "Livetweets": check_livetweets,
         "Ghostwrite Live": check_ghostwrite_live,
         "NFT Watch": check_nftwatch,
@@ -3573,6 +3628,7 @@ async def grim_status(interaction: discord.Interaction):
     # ── Active features (this server) ─────────────────────
     guild_id_str = str(interaction.guild_id)
     active_feeds = sum(1 for d in newsfeed_feeds.values() if d.get("guild_id") == guild_id_str)
+    active_reddit = sum(1 for d in redditfeed_feeds.values() if d.get("guild_id") == guild_id_str)
     active_tweets = sum(1 for d in livetweet_channels.values() if isinstance(d, dict) and d.get("guild_id") == guild_id_str)
     active_nft = sum(1 for d in nftwatch_feeds.values() if isinstance(d, dict) and d.get("guild_id") == guild_id_str)
     vc_session = vc_sessions.get(guild_id_str)
@@ -3630,6 +3686,7 @@ async def grim_status(interaction: discord.Interaction):
         name="Active (this server)",
         value=(
             f"**Newsfeeds:** {active_feeds}\n"
+            f"**Reddit Feeds:** {active_reddit}\n"
             f"**Livetweets:** {active_tweets}\n"
             f"**NFT Watches:** {active_nft}\n"
             f"**Voice:** {vc_str}"
@@ -4595,6 +4652,7 @@ async def help_grim(ctx):
     embed.add_field(name="/nftwatch_cancel", value="Stop NFT watch", inline=True)
     embed.add_field(name="/redditfeed", value="Reddit image feed", inline=True)
     embed.add_field(name="/redditfeed_cancel", value="Stop Reddit feed", inline=True)
+    embed.add_field(name="/redditfeed_status", value="Reddit feed status", inline=True)
     embed.set_footer(text=f"Grim · {VERSION}")
     await ctx.send(embed=embed)
 
