@@ -3927,7 +3927,7 @@ async def redditfeed(interaction: discord.Interaction, subreddits: str, interval
     embed.add_field(name="\u200b", value=f"```{feed_id}```", inline=True)
     embed.set_footer(text=f"Grim Reddit Feed · {VERSION}")
 
-    await interaction.response.send_message(embed=embed)
+    await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
 class RedditfeedCancelSelect(ui.Select):
