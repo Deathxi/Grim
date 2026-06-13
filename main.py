@@ -2585,7 +2585,7 @@ async def on_ready():
     print(f"[Startup] Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S UTC')}")
     await sync_from_github()
     
-    await bot.change_presence(activity=discord.Streaming(name="워킹 온 다잉", url="https://www.twitch.tv/deathfy"))
+    await bot.change_presence(activity=discord.Streaming(name="𝕹𝖎𝖍𝖎𝖑𝖎𝖘𝖙", url="https://www.twitch.tv/deathfy"))
     
     try:
         synced = await bot.tree.sync()
