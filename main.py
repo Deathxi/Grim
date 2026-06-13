@@ -3907,50 +3907,27 @@ async def redditfeed(interaction: discord.Interaction, subreddits: str, interval
         await interaction.response.send_message("Maximum of 10 subreddits per feed.", ephemeral=True)
         return
 
-    await interaction.response.defer()
-
-    # Validate subreddits exist
-    headers = {"User-Agent": "GrimBot/1.0 (Discord bot; github.com/Deathxi/Grim)"}
-    valid_subs = []
-    invalid_subs = []
-    async with aiohttp.ClientSession() as session:
-        for sub in sub_list:
-            try:
-                async with session.get(f"https://www.reddit.com/r/{sub}/about.json", headers=headers, timeout=aiohttp.ClientTimeout(total=8)) as resp:
-                    if resp.status == 200:
-                        valid_subs.append(sub)
-                    else:
-                        invalid_subs.append(sub)
-            except:
-                invalid_subs.append(sub)
-
-    if not valid_subs:
-        await interaction.followup.send("None of those subreddits could be found. Check the names and try again.", ephemeral=True)
-        return
-
     feed_id = str(uuid.uuid4())[:8]
     redditfeed_feeds[feed_id] = {
         "channel_id": str(interaction.channel_id),
         "guild_id": str(interaction.guild_id),
-        "subreddits": valid_subs,
+        "subreddits": sub_list,
         "interval_minutes": interval_minutes,
         "last_run": 0,
         "posted_urls": []
     }
     save_redditfeed_data(redditfeed_feeds)
 
-    sub_display = ", ".join([f"r/{s}" for s in valid_subs])
+    sub_display = ", ".join([f"r/{s}" for s in sub_list])
     embed = discord.Embed(
         title="Reddit Feed Started",
         description=f"Posting images every **{interval_display}** from:\n{sub_display}",
         color=discord.Color.from_rgb(18, 18, 18)
     )
     embed.add_field(name="\u200b", value=f"```{feed_id}```", inline=True)
-    if invalid_subs:
-        embed.add_field(name="Skipped (not found)", value=", ".join(invalid_subs), inline=False)
     embed.set_footer(text=f"Grim Reddit Feed · {VERSION}")
 
-    await interaction.followup.send(embed=embed)
+    await interaction.response.send_message(embed=embed)
 
 
 class RedditfeedCancelSelect(ui.Select):
