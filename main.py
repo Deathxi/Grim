@@ -2270,9 +2270,9 @@ async def vc_empty_monitor():
         if human_count == 0:
             if session["empty_since"] is None:
                 session["empty_since"] = now
-                print(f"[VC] Channel empty in guild {guild_id}, starting 30-min timer")
-            elif now - session["empty_since"] >= 1800:
-                print(f"[VC] 30 min empty, disconnecting from guild {guild_id}")
+                print(f"[VC] Channel empty in guild {guild_id}, starting 60-min timer")
+            elif now - session["empty_since"] >= 3600:
+                print(f"[VC] 60 min empty, disconnecting from guild {guild_id}")
                 await vc.disconnect()
                 to_disconnect.append(guild_id)
         else:
@@ -3946,7 +3946,7 @@ async def vc_join(interaction: discord.Interaction):
         vc = await channel.connect()
         vc_sessions[guild_id] = {"vc": vc, "empty_since": None}
         embed = discord.Embed(
-            description=f"Joined **{channel.name}**. I'll leave automatically if the channel stays empty for 30 minutes.",
+            description=f"Joined **{channel.name}**. I'll leave automatically if the channel stays empty for 60 minutes.",
             color=discord.Color.from_rgb(18, 18, 18)
         )
         embed.set_footer(text=f"Grim · {VERSION}")
