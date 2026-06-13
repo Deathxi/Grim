@@ -422,6 +422,24 @@ def save_nftwatch_data(data):
 
 nftwatch_feeds = load_nftwatch_data()
 
+# Storage for redditfeed: {feed_id: {"channel_id": str, "guild_id": str, "subreddits": list, "interval_minutes": int, "last_run": float, "posted_urls": list}}
+REDDITFEED_FILE = _data_path("redditfeed_data.json")
+
+def load_redditfeed_data():
+    try:
+        if os.path.exists(REDDITFEED_FILE):
+            with open(REDDITFEED_FILE, 'r') as f:
+                return json.load(f)
+    except:
+        pass
+    return {}
+
+def save_redditfeed_data(data):
+    with open(REDDITFEED_FILE, 'w') as f:
+        json.dump(data, f)
+
+redditfeed_feeds = load_redditfeed_data()
+
 MODERATION_FILE = _data_path("moderation_data.json")
 
 def load_moderation_data():
@@ -2088,6 +2106,98 @@ async def after_check_nftwatch():
     else:
         print("[NFTWatch] Task stopped unexpectedly, will restart on next health check")
 
+_REDDIT_IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".gif", ".webp")
+
+@tasks.loop(minutes=1)
+async def check_redditfeed():
+    global redditfeed_feeds
+    if not redditfeed_feeds:
+        return
+
+    current_time = time.time()
+
+    for feed_id, data in list(redditfeed_feeds.items()):
+        try:
+            interval_seconds = data.get("interval_minutes", 60) * 60
+            last_run = data.get("last_run", 0)
+            if current_time - last_run < interval_seconds:
+                continue
+
+            channel = bot.get_channel(int(data["channel_id"]))
+            if not channel:
+                continue
+
+            subreddits = data.get("subreddits", [])
+            if not subreddits:
+                continue
+
+            posted_urls = set(data.get("posted_urls", []))
+
+            # Pick a random subreddit from the list for variety
+            import random
+            subreddit = random.choice(subreddits)
+            url = f"https://www.reddit.com/r/{subreddit}/hot.json?limit=50"
+            headers = {"User-Agent": "GrimBot/1.0 (Discord bot; github.com/Deathxi/Grim)"}
+
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                    if resp.status != 200:
+                        print(f"[RedditFeed] r/{subreddit} returned {resp.status}")
+                        continue
+                    raw = await resp.json()
+
+            posts = raw.get("data", {}).get("children", [])
+            image_posts = [
+                p["data"] for p in posts
+                if not p["data"].get("is_self", True)
+                and p["data"].get("url", "").lower().endswith(_REDDIT_IMAGE_EXTS)
+                and p["data"].get("url") not in posted_urls
+                and not p["data"].get("over_18", False)
+            ]
+
+            if not image_posts:
+                print(f"[RedditFeed] No new image posts in r/{subreddit}")
+                continue
+
+            post = random.choice(image_posts)
+            img_url = post.get("url", "")
+            title = post.get("title", "")[:250]
+            permalink = "https://reddit.com" + post.get("permalink", "")
+            score = post.get("score", 0)
+
+            embed = discord.Embed(
+                description=f"[{title}]({permalink})",
+                color=discord.Color.from_rgb(18, 18, 18)
+            )
+            embed.set_image(url=img_url)
+            embed.set_footer(text=f"r/{subreddit}  ·  ↑{score:,}  ·  Grim Reddit Feed")
+
+            await channel.send(embed=embed)
+
+            # Keep posted_urls list bounded to last 500 entries
+            posted_urls.add(img_url)
+            if len(posted_urls) > 500:
+                posted_urls = set(list(posted_urls)[-500:])
+
+            redditfeed_feeds[feed_id]["posted_urls"] = list(posted_urls)
+            redditfeed_feeds[feed_id]["last_run"] = current_time
+            save_redditfeed_data(redditfeed_feeds)
+            print(f"[RedditFeed] Posted from r/{subreddit} to channel {data['channel_id']}")
+
+        except Exception as e:
+            print(f"[RedditFeed] Error for feed {feed_id}: {e}")
+
+@check_redditfeed.before_loop
+async def before_check_redditfeed():
+    await bot.wait_until_ready()
+
+@check_redditfeed.after_loop
+async def after_check_redditfeed():
+    if check_redditfeed.is_being_cancelled():
+        print("[RedditFeed] Task was cancelled")
+    else:
+        print("[RedditFeed] Task stopped unexpectedly, will restart on next health check")
+
 @tasks.loop(minutes=1)
 async def check_reminders():
     global reminders_store
@@ -2248,6 +2358,16 @@ async def health_monitor():
                 tasks_status.append(f"vc_monitor: FAILED ({e})")
         else:
             tasks_status.append("vc_monitor: OK")
+
+        if not check_redditfeed.is_running():
+            print("[Health Monitor] Reddit feed task not running, restarting...")
+            try:
+                check_redditfeed.start()
+                tasks_status.append("redditfeed: RESTARTED")
+            except Exception as e:
+                tasks_status.append(f"redditfeed: FAILED ({e})")
+        else:
+            tasks_status.append("redditfeed: OK")
 
         print(f"[Health Monitor] Status: {', '.join(tasks_status)}")
     except Exception as e:
@@ -2478,6 +2598,10 @@ async def on_ready():
     if not vc_empty_monitor.is_running():
         vc_empty_monitor.start()
         print("Started VC empty-channel monitor (checks every 2 minutes)")
+
+    if not check_redditfeed.is_running():
+        check_redditfeed.start()
+        print("Started Reddit feed checker")
     
     _bump_version()
     await _push_version_to_github()   # atomic — must succeed before notification fires
@@ -3705,6 +3829,164 @@ async def nftwatch_cancel(interaction: discord.Interaction):
     
     await interaction.response.send_message("Select which NFT watch(es) to cancel:", view=NFTWatchCancelView(), ephemeral=True)
 
+# ── Reddit Feed ───────────────────────────────────────────────────────────────
+
+@bot.tree.command(name="redditfeed", description="Post images from Reddit subreddits on a schedule")
+@app_commands.describe(
+    subreddits="Comma-separated subreddit names (e.g. DarkAesthetic,darkcore,GothicArt)",
+    interval="How often to post in minutes (min 10)"
+)
+async def redditfeed(interaction: discord.Interaction, subreddits: str, interval: int):
+    global redditfeed_feeds
+
+    if not interaction.user.guild_permissions.manage_channels:
+        await interaction.response.send_message("You need 'Manage Channels' permission to use this command.", ephemeral=True)
+        return
+
+    if interval < 10:
+        await interaction.response.send_message("Minimum interval is 10 minutes.", ephemeral=True)
+        return
+
+    sub_list = [s.strip().lstrip("r/") for s in subreddits.split(",") if s.strip()]
+    if not sub_list:
+        await interaction.response.send_message("Please provide at least one subreddit.", ephemeral=True)
+        return
+    if len(sub_list) > 10:
+        await interaction.response.send_message("Maximum of 10 subreddits per feed.", ephemeral=True)
+        return
+
+    await interaction.response.defer()
+
+    # Validate subreddits exist
+    headers = {"User-Agent": "GrimBot/1.0 (Discord bot; github.com/Deathxi/Grim)"}
+    valid_subs = []
+    invalid_subs = []
+    async with aiohttp.ClientSession() as session:
+        for sub in sub_list:
+            try:
+                async with session.get(f"https://www.reddit.com/r/{sub}/about.json", headers=headers, timeout=aiohttp.ClientTimeout(total=8)) as resp:
+                    if resp.status == 200:
+                        valid_subs.append(sub)
+                    else:
+                        invalid_subs.append(sub)
+            except:
+                invalid_subs.append(sub)
+
+    if not valid_subs:
+        await interaction.followup.send("None of those subreddits could be found. Check the names and try again.", ephemeral=True)
+        return
+
+    feed_id = str(uuid.uuid4())[:8]
+    redditfeed_feeds[feed_id] = {
+        "channel_id": str(interaction.channel_id),
+        "guild_id": str(interaction.guild_id),
+        "subreddits": valid_subs,
+        "interval_minutes": interval,
+        "last_run": 0,
+        "posted_urls": []
+    }
+    save_redditfeed_data(redditfeed_feeds)
+
+    sub_display = ", ".join([f"r/{s}" for s in valid_subs])
+    embed = discord.Embed(
+        title="Reddit Feed Started",
+        description=f"Posting images every **{interval} min** from:\n{sub_display}",
+        color=discord.Color.from_rgb(18, 18, 18)
+    )
+    embed.add_field(name="\u200b", value=f"```{feed_id}```", inline=True)
+    if invalid_subs:
+        embed.add_field(name="Skipped (not found)", value=", ".join(invalid_subs), inline=False)
+    embed.set_footer(text=f"Grim Reddit Feed · {VERSION}")
+
+    await interaction.followup.send(embed=embed)
+
+
+class RedditfeedCancelSelect(ui.Select):
+    def __init__(self, feeds: dict):
+        options = []
+        for feed_id, data in feeds.items():
+            subs = ", ".join([f"r/{s}" for s in data.get("subreddits", [])])[:100]
+            channel = bot.get_channel(int(data.get("channel_id", 0)))
+            ch_name = f"#{channel.name}" if channel else "unknown channel"
+            options.append(discord.SelectOption(
+                label=subs,
+                value=feed_id,
+                description=f"{ch_name} · every {data.get('interval_minutes', '?')} min"
+            ))
+        super().__init__(
+            placeholder="Select a Reddit feed to cancel...",
+            min_values=1,
+            max_values=1,
+            options=options
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        global redditfeed_feeds
+        feed_id = self.values[0]
+        if feed_id in redditfeed_feeds:
+            data = redditfeed_feeds[feed_id]
+            subs = ", ".join([f"r/{s}" for s in data.get("subreddits", [])])
+            del redditfeed_feeds[feed_id]
+            save_redditfeed_data(redditfeed_feeds)
+            embed = discord.Embed(
+                title="Cancelled",
+                description=f"Stopped Reddit feed for **{subs}**",
+                color=discord.Color.from_rgb(18, 18, 18)
+            )
+            embed.add_field(name="\u200b", value=f"```{feed_id}```", inline=True)
+            await interaction.response.edit_message(embed=embed, view=None)
+        else:
+            embed = discord.Embed(
+                title="Already Cancelled",
+                description="This feed was already cancelled or no longer exists.",
+                color=discord.Color.from_rgb(40, 40, 40)
+            )
+            await interaction.response.edit_message(embed=embed, view=None)
+
+
+class RedditfeedCancelView(ui.View):
+    def __init__(self, feeds: dict):
+        super().__init__(timeout=120)
+        self.add_item(RedditfeedCancelSelect(feeds))
+        self.message = None
+
+    async def on_timeout(self):
+        if self.message:
+            try:
+                embed = discord.Embed(
+                    title="Expired",
+                    description="This menu has expired. Use `/redditfeed_cancel` again.",
+                    color=discord.Color.from_rgb(40, 40, 40)
+                )
+                await self.message.edit(embed=embed, view=None)
+            except:
+                pass
+
+
+@bot.tree.command(name="redditfeed_cancel", description="Cancel an active Reddit image feed")
+async def redditfeed_cancel(interaction: discord.Interaction):
+    global redditfeed_feeds
+
+    if not interaction.user.guild_permissions.manage_channels:
+        await interaction.response.send_message("You need 'Manage Channels' permission to use this command.", ephemeral=True)
+        return
+
+    guild_id_str = str(interaction.guild_id)
+    guild_feeds = {fid: d for fid, d in redditfeed_feeds.items() if d.get("guild_id") == guild_id_str}
+
+    if not guild_feeds:
+        await interaction.response.send_message("No active Reddit feeds in this server.", ephemeral=True)
+        return
+
+    view = RedditfeedCancelView(guild_feeds)
+    embed = discord.Embed(
+        title="Cancel Reddit Feed",
+        description=f"Select a feed to cancel.\n\n**Active:** {len(guild_feeds)}",
+        color=discord.Color.from_rgb(18, 18, 18)
+    )
+    await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+    view.message = await interaction.original_response()
+
 @bot.tree.command(name="mod_add", description="Add a word to the auto-delete list")
 async def mod_add(interaction: discord.Interaction, word: str):
     global moderation_data
@@ -4282,6 +4564,8 @@ async def help_grim(ctx):
     embed.add_field(name="/ghostwrite", value="Ghostwrite", inline=True)
     embed.add_field(name="/nftwatch", value="NFT tracker", inline=True)
     embed.add_field(name="/nftwatch_cancel", value="Stop NFT watch", inline=True)
+    embed.add_field(name="/redditfeed", value="Reddit image feed", inline=True)
+    embed.add_field(name="/redditfeed_cancel", value="Stop Reddit feed", inline=True)
     embed.set_footer(text=f"Grim · {VERSION}")
     await ctx.send(embed=embed)
 
