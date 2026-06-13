@@ -470,6 +470,9 @@ def save_welcome_data(data):
 
 welcome_channels = load_welcome_data()
 
+# VC session tracking: guild_id -> {"vc": VoiceClient, "empty_since": float|None}
+vc_sessions = {}
+
 # Channel config lives in project root — pushed to GitHub so it survives redeploys
 UPDATES_CONFIG_FILE = _data_path("updates_data.json")  # persistent disk — survives deploys
 UPDATES_CONFIG_FALLBACK = "updates_data.json"           # project-root snapshot (migration fallback)
@@ -2233,12 +2236,54 @@ async def health_monitor():
         else:
             tasks_status.append("digest: OK")
 
+        if not vc_empty_monitor.is_running():
+            print("[Health Monitor] VC monitor not running, restarting...")
+            try:
+                vc_empty_monitor.start()
+                tasks_status.append("vc_monitor: RESTARTED")
+            except Exception as e:
+                tasks_status.append(f"vc_monitor: FAILED ({e})")
+        else:
+            tasks_status.append("vc_monitor: OK")
+
         print(f"[Health Monitor] Status: {', '.join(tasks_status)}")
     except Exception as e:
         print(f"[Health Monitor] Error in health check: {e}")
 
 @health_monitor.before_loop
 async def before_health_monitor():
+    await bot.wait_until_ready()
+
+# ── VC empty-channel auto-disconnect ─────────────────────────────────────────
+@tasks.loop(minutes=2)
+async def vc_empty_monitor():
+    """Leave any VC that has had no human members for 30 minutes."""
+    now = time.time()
+    to_disconnect = []
+    for guild_id, session in list(vc_sessions.items()):
+        vc = session.get("vc")
+        if not vc or not vc.is_connected():
+            to_disconnect.append(guild_id)
+            continue
+        # Count non-bot members in the channel
+        human_count = sum(1 for m in vc.channel.members if not m.bot)
+        if human_count == 0:
+            if session["empty_since"] is None:
+                session["empty_since"] = now
+                print(f"[VC] Channel empty in guild {guild_id}, starting 30-min timer")
+            elif now - session["empty_since"] >= 1800:
+                print(f"[VC] 30 min empty, disconnecting from guild {guild_id}")
+                await vc.disconnect()
+                to_disconnect.append(guild_id)
+        else:
+            if session["empty_since"] is not None:
+                print(f"[VC] Members returned in guild {guild_id}, resetting timer")
+            session["empty_since"] = None
+    for gid in to_disconnect:
+        vc_sessions.pop(gid, None)
+
+@vc_empty_monitor.before_loop
+async def before_vc_empty_monitor():
     await bot.wait_until_ready()
 
 @tasks.loop(hours=4)
@@ -2424,6 +2469,10 @@ async def on_ready():
     if not health_monitor.is_running():
         health_monitor.start()
         print("Started health monitor (checks every 5 minutes)")
+
+    if not vc_empty_monitor.is_running():
+        vc_empty_monitor.start()
+        print("Started VC empty-channel monitor (checks every 2 minutes)")
     
     _bump_version()
     await _push_version_to_github()   # atomic — must succeed before notification fires
@@ -3868,6 +3917,67 @@ async def welcome_off(interaction: discord.Interaction):
         await interaction.response.send_message(embed=embed)
     else:
         await interaction.response.send_message("Welcome messages are not enabled in this server.", ephemeral=True)
+
+# ── Voice Channel Commands ────────────────────────────────────────────────────
+@bot.tree.command(name="vc_join", description="Have Grim join your voice channel")
+async def vc_join(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    guild_id = str(interaction.guild_id)
+
+    # Must be in a voice channel
+    if not interaction.user.voice or not interaction.user.voice.channel:
+        await interaction.followup.send("You need to be in a voice channel first.", ephemeral=True)
+        return
+
+    channel = interaction.user.voice.channel
+
+    # Already connected in this guild — move if needed
+    existing = vc_sessions.get(guild_id)
+    if existing and existing["vc"] and existing["vc"].is_connected():
+        if existing["vc"].channel.id == channel.id:
+            await interaction.followup.send(f"Already in **{channel.name}**.", ephemeral=True)
+            return
+        await existing["vc"].move_to(channel)
+        existing["empty_since"] = None
+        await interaction.followup.send(f"Moved to **{channel.name}**.", ephemeral=True)
+        return
+
+    try:
+        vc = await channel.connect()
+        vc_sessions[guild_id] = {"vc": vc, "empty_since": None}
+        embed = discord.Embed(
+            description=f"Joined **{channel.name}**. I'll leave automatically if the channel stays empty for 30 minutes.",
+            color=discord.Color.from_rgb(18, 18, 18)
+        )
+        embed.set_footer(text=f"Grim · {VERSION}")
+        await interaction.followup.send(embed=embed, ephemeral=True)
+        print(f"[VC] Joined {channel.name} in guild {guild_id}")
+    except discord.ClientException as e:
+        await interaction.followup.send(f"Couldn't join: {e}", ephemeral=True)
+    except Exception as e:
+        await interaction.followup.send("Something went wrong joining the channel.", ephemeral=True)
+        print(f"[VC] Join error: {e}")
+
+@bot.tree.command(name="vc_leave", description="Have Grim leave the voice channel")
+async def vc_leave(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    guild_id = str(interaction.guild_id)
+
+    session = vc_sessions.get(guild_id)
+    if not session or not session["vc"] or not session["vc"].is_connected():
+        await interaction.followup.send("Not in a voice channel right now.", ephemeral=True)
+        return
+
+    channel_name = session["vc"].channel.name
+    await session["vc"].disconnect()
+    vc_sessions.pop(guild_id, None)
+    embed = discord.Embed(
+        description=f"Left **{channel_name}**.",
+        color=discord.Color.from_rgb(18, 18, 18)
+    )
+    embed.set_footer(text=f"Grim · {VERSION}")
+    await interaction.followup.send(embed=embed, ephemeral=True)
+    print(f"[VC] Left {channel_name} in guild {guild_id}")
 
 @bot.event
 async def on_member_join(member):
