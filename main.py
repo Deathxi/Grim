@@ -3946,7 +3946,7 @@ async def vc_join(interaction: discord.Interaction):
         vc = await channel.connect()
         vc_sessions[guild_id] = {"vc": vc, "empty_since": None}
         embed = discord.Embed(
-            description=f"Joined **{channel.name}**. I'll leave automatically if the channel stays empty for 60 minutes.",
+            description=f"Joined **{channel.name}**.\nI'll leave automatically if the channel stays empty for 1 hour.",
             color=discord.Color.from_rgb(18, 18, 18)
         )
         embed.set_footer(text=f"Grim · {VERSION}")
