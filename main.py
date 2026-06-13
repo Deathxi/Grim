@@ -3494,7 +3494,7 @@ async def newsfeed_status(interaction: discord.Interaction):
     
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
-@bot.tree.command(name="grim_status", description="Full system and API health dashboard")
+@bot.tree.command(name="status", description="Full system and API health dashboard")
 async def grim_status(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
     now = time.time()
