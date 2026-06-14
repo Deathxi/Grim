@@ -3590,7 +3590,7 @@ async def grim_status(interaction: discord.Interaction):
                     timeout=aiohttp.ClientTimeout(total=8)
                 ) as r:
                     lat = round((time.time() - t0) * 1000)
-                    return ("Online" if r.status == 200 else f"Error {r.status}"), lat
+                    return ("Online" if r.status in (200, 400) else f"Error {r.status}"), lat
         except:
             return "Unreachable", None
 
