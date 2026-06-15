@@ -4573,6 +4573,27 @@ async def on_message(message):
             ]
             await message.channel.send(random.choice(_SURVEILLANCE_WARNINGS))
 
+        # 0.5% chance to drop a joke
+        elif random.random() < 0.005 and message.channel.type in (discord.ChannelType.text, discord.ChannelType.news):
+            _JOKES = [
+                "why don't scientists trust atoms? because they make up everything.",
+                "i told my computer i needed a break. now it won't stop sending me Kit-Kat ads.",
+                "why do programmers prefer dark mode? because light attracts bugs.",
+                "a SQL query walks into a bar, walks up to two tables and asks... can i join you?",
+                "why did the scarecrow win an award? because he was outstanding in his field.",
+                "i asked my dog what 2 minus 2 is. he said nothing.",
+                "why can't you give Elsa a balloon? because she'll let it go.",
+                "i'm reading a book about anti-gravity. it's impossible to put down.",
+                "why did the bicycle fall over? because it was two-tired.",
+                "my wife told me i had to stop acting like a flamingo. i had to put my foot down.",
+                "i used to hate facial hair but then it grew on me.",
+                "i'm on a seafood diet. i see food and i eat it.",
+                "what do you call a fake noodle? an impasta.",
+                "why did the math book look so sad? it had too many problems.",
+                "i told a joke about construction. i'm still working on it.",
+            ]
+            await message.channel.send(random.choice(_JOKES))
+
     if bot.user in message.mentions:
         # Reset counter — Grim is already responding, no need to also proactively chime
         _channel_msg_counter[str(message.channel.id)] = 0
