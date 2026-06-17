@@ -1100,10 +1100,54 @@ async def generate_contextual_reply(message: discord.Message) -> str | None:
 
     # Append the current message (clean of the @mention)
     current_text = message.content.replace(f"<@{bot.user.id}>", "").replace(f"<@!{bot.user.id}>", "").strip()
-    if current_text:
-        chat_messages.append({"role": "user", "content": f"[#{getattr(channel, 'name', 'chat')}] {author.display_name}: {current_text}"})
+
+    # Collect image and video URLs from attachments, embeds, and referenced message
+    IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
+    VIDEO_EXTS = {".mp4", ".mov", ".webm", ".avi", ".mkv"}
+
+    image_urls = []
+    video_urls = []
+
+    def _collect_media(msg):
+        for att in msg.attachments:
+            url_lower = att.url.lower().split("?")[0]
+            if any(url_lower.endswith(ext) for ext in IMAGE_EXTS):
+                image_urls.append(att.url)
+            elif any(url_lower.endswith(ext) for ext in VIDEO_EXTS):
+                video_urls.append(att.url)
+        for embed in msg.embeds:
+            if embed.image and embed.image.url:
+                image_urls.append(embed.image.url)
+            if embed.thumbnail and embed.thumbnail.url:
+                image_urls.append(embed.thumbnail.url)
+
+    _collect_media(message)
+
+    # Also check the message being replied to (user may ask "what does this show?")
+    ref_context = ""
+    if message.reference and message.reference.resolved and isinstance(message.reference.resolved, discord.Message):
+        ref_msg = message.reference.resolved
+        _collect_media(ref_msg)
+        ref_text = ref_msg.content.strip()
+        if ref_text:
+            ref_context = f"\n\n[Replying to {ref_msg.author.display_name}: \"{ref_text}\"]"
+
+    # Build the final user content block
+    video_note = ""
+    if video_urls:
+        video_note = f"\n\n[{author.display_name} posted a video: {video_urls[0]}. You cannot watch video — acknowledge it and respond to any text context.]"
+
+    full_text = f"[#{getattr(channel, 'name', 'chat')}] {author.display_name}: {current_text or '(no text)'}{ref_context}{video_note}"
+
+    if image_urls:
+        # Vision-capable message: multi-part content with images
+        vision_content = []
+        for img_url in image_urls[:4]:  # cap at 4 images
+            vision_content.append({"type": "image_url", "image_url": {"url": img_url}})
+        vision_content.append({"type": "text", "text": full_text})
+        chat_messages.append({"role": "user", "content": vision_content})
     else:
-        chat_messages.append({"role": "user", "content": f"[#{getattr(channel, 'name', 'chat')}] {author.display_name}: (just mentioned you with no text)"})
+        chat_messages.append({"role": "user", "content": full_text})
 
     # Member profile — inject what Grim knows about the person talking to it
     member_profile = get_member_profile(guild_id, str(author.id))
@@ -1203,8 +1247,9 @@ Match what the moment calls for. Short message, short reply. Real conversation, 
 
     try:
         async with aiohttp.ClientSession() as session:
+            model = "grok-2-vision-1212" if image_urls else "grok-3"
             payload = {
-                "model": "grok-3",
+                "model": model,
                 "messages": [{"role": "system", "content": system_prompt}] + chat_messages,
                 "max_tokens": 600,
                 "temperature": 0.85,
