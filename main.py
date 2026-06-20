@@ -2675,8 +2675,9 @@ async def on_ready():
         print("Started Reddit feed checker")
     
     _bump_version()
-    await _push_version_to_github()   # atomic — must succeed before notification fires
-    asyncio.create_task(push_to_github_on_startup())
+    if os.environ.get("REPL_ID"):
+        await _push_version_to_github()   # atomic — must succeed before notification fires
+        asyncio.create_task(push_to_github_on_startup())
     asyncio.create_task(post_update_notification())
 
 async def push_to_github_on_startup():
