@@ -18,5 +18,7 @@ jobs:
           script: |
             cd /root/grim
             git pull origin main
+            systemctl reset-failed grim
             systemctl restart grim
-            echo "Grim redeployed successfully"
+            sleep 5
+            systemctl is-active grim && echo "Grim redeployed successfully" || echo "WARNING: Grim failed to start"
