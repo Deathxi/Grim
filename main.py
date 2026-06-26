@@ -1288,8 +1288,8 @@ _channel_msg_counter: dict[str, int] = {}    # channel_id -> msgs since last Gri
 _channel_last_grim_post: dict[str, float] = {}  # channel_id -> timestamp
 _channels_evaluating: set = set()           # prevent concurrent evaluations
 
-PROACTIVE_TRIGGER_EVERY = 7    # evaluate after this many messages
-PROACTIVE_COOLDOWN_SEC  = 1800  # 30-minute minimum gap per channel
+PROACTIVE_TRIGGER_EVERY = 25   # evaluate after this many messages
+PROACTIVE_COOLDOWN_SEC  = 3600  # 60-minute minimum gap per channel
 
 async def maybe_chime_in(message: discord.Message):
     """Called on every human message. Schedules an evaluation every N messages."""
