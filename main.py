@@ -4327,6 +4327,18 @@ async def support(interaction: discord.Interaction):
     embed.set_footer(text=f"Grim · {VERSION}")
     await interaction.response.send_message(embed=embed)
 
+@bot.tree.context_menu(name="Quote")
+async def quote_message(interaction: discord.Interaction, message: discord.Message):
+    content = message.content or "(no text)"
+    date_str = message.created_at.strftime("%B / %Y")
+    embed = discord.Embed(
+        description=f'*" {content} "*',
+        color=discord.Color.from_rgb(18, 18, 18)
+    )
+    embed.set_author(name=f"— {message.author.display_name}  ·  {date_str}")
+    embed.set_thumbnail(url=message.author.display_avatar.url)
+    await interaction.response.send_message(embed=embed)
+
 @bot.tree.command(name="creator", description="Meet the creator of Grim")
 async def creator(interaction: discord.Interaction):
     creator_id = 235194449573969920
@@ -4625,6 +4637,17 @@ async def on_message(message):
                 "Interpol's digital crimes unit sends their regards.",
             ]
             await message.channel.send(random.choice(_SURVEILLANCE_WARNINGS))
+
+        # 0.01% chance to immortalize the message as a fancy quote embed
+        elif random.random() < 0.0001 and message.channel.type in (discord.ChannelType.text, discord.ChannelType.news) and len(message.content) > 10:
+            date_str = message.created_at.strftime("%B / %Y")
+            quote_embed = discord.Embed(
+                description=f'*" {message.content} "*',
+                color=discord.Color.from_rgb(18, 18, 18)
+            )
+            quote_embed.set_author(name=f"— {message.author.display_name}  ·  {date_str}")
+            quote_embed.set_thumbnail(url=message.author.display_avatar.url)
+            await message.channel.send(embed=quote_embed)
 
         # 0.5% chance to drop a joke
         elif random.random() < 0.005 and message.channel.type in (discord.ChannelType.text, discord.ChannelType.news):
