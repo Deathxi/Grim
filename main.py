@@ -3815,34 +3815,6 @@ async def newsfeed(interaction: discord.Interaction, interval: str, topic: str):
     
     await interaction.followup.send(embed=embed)
 
-@bot.tree.context_menu(name="Quote")
-async def quote_message(interaction: discord.Interaction, message: discord.Message):
-    target = message.author
-    content = message.content.strip()
-    
-    if not content:
-        await interaction.response.send_message("That message has no text to quote.", ephemeral=True)
-        return
-    
-    if len(content) > 900:
-        content = content[:897] + "..."
-    
-    avatar_url = target.display_avatar.replace(size=512).url
-    
-    display_name = target.display_name if hasattr(target, 'display_name') else target.name
-    
-    quoted_text = f"\u201c{content}\u201d"
-    
-    embed = discord.Embed(
-        description=f"### {quoted_text}\n\u200b",
-        color=discord.Color.from_rgb(18, 18, 18)
-    )
-    embed.set_author(name=display_name, icon_url=avatar_url)
-    embed.set_image(url=avatar_url)
-    embed.set_footer(text=f"@{target.name} · {VERSION}")
-    
-    await interaction.response.send_message(embed=embed)
-
 @bot.tree.command(name="nftwatch", description="Watch an OpenSea collection for live new listings")
 async def nftwatch(interaction: discord.Interaction, link: str):
     global nftwatch_feeds
