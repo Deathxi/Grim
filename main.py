@@ -4305,8 +4305,8 @@ def _build_quote_embed(content: str, author_name: str, avatar_url: str, created_
         description=f'*" {content} "*',
         color=discord.Color.from_rgb(18, 18, 18)
     )
-    embed.set_author(name=f"— {author_name}  ·  {date_str}")
     embed.set_thumbnail(url=avatar_url)
+    embed.set_footer(text=f"— {author_name}  ·  {date_str}", icon_url=avatar_url)
     return embed
 
 @bot.tree.context_menu(name="Quote")
