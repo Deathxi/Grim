@@ -4327,17 +4327,39 @@ async def support(interaction: discord.Interaction):
     embed.set_footer(text=f"Grim · {VERSION}")
     await interaction.response.send_message(embed=embed)
 
-@bot.tree.context_menu(name="Quote")
-async def quote_message(interaction: discord.Interaction, message: discord.Message):
-    content = message.content or "(no text)"
-    date_str = message.created_at.strftime("%B / %Y")
+def _build_quote_embed(content: str, author_name: str, avatar_url: str, created_at) -> discord.Embed:
+    date_str = created_at.strftime("%B / %Y")
     embed = discord.Embed(
         description=f'*" {content} "*',
         color=discord.Color.from_rgb(18, 18, 18)
     )
-    embed.set_author(name=f"— {message.author.display_name}  ·  {date_str}")
-    embed.set_thumbnail(url=message.author.display_avatar.url)
-    await interaction.response.send_message(embed=embed)
+    embed.set_author(name=f"— {author_name}  ·  {date_str}")
+    embed.set_thumbnail(url=avatar_url)
+    return embed
+
+@bot.tree.context_menu(name="Quote")
+async def quote_message(interaction: discord.Interaction, message: discord.Message):
+    content = message.content or "(no text)"
+    embed = _build_quote_embed(content, message.author.display_name, message.author.display_avatar.url, message.created_at)
+    await interaction.response.defer(ephemeral=True)
+    await interaction.channel.send(embed=embed)
+    await interaction.delete_original_response()
+
+@bot.tree.command(name="quote", description="Quote the last message in this channel")
+async def quote_last(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    target = None
+    async for msg in interaction.channel.history(limit=10):
+        if msg.author.id != bot.user.id:
+            target = msg
+            break
+    if not target:
+        await interaction.followup.send("no quotable message found.", ephemeral=True)
+        return
+    content = target.content or "(no text)"
+    embed = _build_quote_embed(content, target.author.display_name, target.author.display_avatar.url, target.created_at)
+    await interaction.channel.send(embed=embed)
+    await interaction.delete_original_response()
 
 @bot.tree.command(name="creator", description="Meet the creator of Grim")
 async def creator(interaction: discord.Interaction):
