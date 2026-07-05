@@ -267,10 +267,69 @@ def init_chat_db():
             PRIMARY KEY (guild_id, member_id)
         )
     """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS vc_time_totals (
+            guild_id TEXT,
+            member_id TEXT,
+            total_seconds REAL DEFAULT 0,
+            PRIMARY KEY (guild_id, member_id)
+        )
+    """)
     conn.commit()
     conn.close()
 
 init_chat_db()
+
+# In-memory tracker for members currently in a voice channel: {"guild_id:member_id": join_timestamp}
+_vc_active_sessions: dict[str, float] = {}
+
+def add_vc_seconds(guild_id: str, member_id: str, seconds: float):
+    if seconds <= 0:
+        return
+    try:
+        conn = sqlite3.connect(CHAT_DB_FILE)
+        conn.execute("""
+            INSERT INTO vc_time_totals (guild_id, member_id, total_seconds)
+            VALUES (?, ?, ?)
+            ON CONFLICT(guild_id, member_id) DO UPDATE SET
+                total_seconds = total_seconds + excluded.total_seconds
+        """, (guild_id, member_id, seconds))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"[DB] VC time save error: {e}")
+
+def get_vc_seconds(guild_id: str, member_id: str) -> float:
+    """Returns total banked VC seconds, plus any time from the member's current live session."""
+    total = 0.0
+    try:
+        conn = sqlite3.connect(CHAT_DB_FILE)
+        row = conn.execute("""
+            SELECT total_seconds FROM vc_time_totals WHERE guild_id = ? AND member_id = ?
+        """, (guild_id, member_id)).fetchone()
+        conn.close()
+        total = row[0] if row else 0.0
+    except Exception as e:
+        print(f"[DB] VC time fetch error: {e}")
+    session_key = f"{guild_id}:{member_id}"
+    join_ts = _vc_active_sessions.get(session_key)
+    if join_ts:
+        total += max(0.0, time.time() - join_ts)
+    return total
+
+def _format_duration(total_seconds: float) -> str:
+    total_seconds = int(total_seconds)
+    days, rem = divmod(total_seconds, 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes, _ = divmod(rem, 60)
+    parts = []
+    if days:
+        parts.append(f"{days}d")
+    if hours:
+        parts.append(f"{hours}h")
+    if minutes or not parts:
+        parts.append(f"{minutes}m")
+    return " ".join(parts)
 
 def save_message_to_db(guild_id: str, channel_id: str, message_id: str,
                         author_name: str, content: str, timestamp: float, is_grim: bool = False):
@@ -2680,7 +2739,16 @@ async def on_ready():
     if not check_redditfeed.is_running():
         check_redditfeed.start()
         print("Started Reddit feed checker")
-    
+
+    # Re-establish VC session tracking for anyone already in a voice channel across a restart
+    for guild in bot.guilds:
+        for vc_channel in guild.voice_channels:
+            for vc_member in vc_channel.members:
+                if not vc_member.bot:
+                    _vc_active_sessions[f"{guild.id}:{vc_member.id}"] = time.time()
+    if _vc_active_sessions:
+        print(f"[VC] Resumed tracking for {len(_vc_active_sessions)} member(s) already in voice")
+
     _bump_version()
     if os.environ.get("REPL_ID"):
         await _push_version_to_github()   # atomic — must succeed before notification fires
@@ -4286,6 +4354,37 @@ async def remind_cancel(interaction: discord.Interaction, reminder_id: str):
 
 SECLUDE_ICON_URL = "https://cdn.discordapp.com/icons/1101443658953261076/a_7df56c851d8a26e198d706cc3c640426.webp?size=1024&animated=true"
 
+@bot.tree.command(name="stats", description="View a member's all-time stats on this server")
+async def stats(interaction: discord.Interaction, user: discord.Member | None = None):
+    guild = interaction.guild
+    if guild is None:
+        await interaction.response.send_message("This command can only be used in a server!", ephemeral=True)
+        return
+
+    target = user or interaction.user
+    guild_id = str(guild.id)
+    member_id = str(target.id)
+
+    msg_count = get_member_message_count(guild_id, target.display_name)
+    vc_seconds = get_vc_seconds(guild_id, member_id)
+    bot_latency = round(bot.latency * 1000)
+    in_vc_now = f"{guild_id}:{member_id}" in _vc_active_sessions
+
+    embed = discord.Embed(
+        title=f"{target.display_name}'s Stats",
+        color=discord.Color.from_rgb(18, 18, 18)
+    )
+    embed.set_thumbnail(url=target.display_avatar.url)
+    embed.add_field(name="Messages Sent", value=f"```{msg_count:,}```", inline=True)
+    embed.add_field(name="Time in VC", value=f"```{_format_duration(vc_seconds)}{' (live)' if in_vc_now else ''}```", inline=True)
+    embed.add_field(name="Ping", value=f"```{bot_latency}ms```", inline=True)
+    embed.add_field(name="Joined Server", value=f"```{target.joined_at.strftime('%b %d, %Y') if target.joined_at else 'Unknown'}```", inline=True)
+    embed.add_field(name="Account Created", value=f"```{target.created_at.strftime('%b %d, %Y')}```", inline=True)
+    embed.add_field(name="Roles", value=f"```{len(target.roles) - 1}```", inline=True)
+
+    embed.set_footer(text=f"{interaction.user.name} · {VERSION}")
+    await interaction.response.send_message(embed=embed)
+
 @bot.tree.command(name="support", description="Get support or connect with the Seclude community")
 async def support(interaction: discord.Interaction):
     embed = discord.Embed(
@@ -4686,6 +4785,24 @@ async def on_message(message):
         await maybe_chime_in(message)
 
     await bot.process_commands(message)
+
+@bot.event
+async def on_voice_state_update(member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
+    if member.bot:
+        return
+    guild_id = str(member.guild.id)
+    member_id = str(member.id)
+    session_key = f"{guild_id}:{member_id}"
+
+    was_in_vc = before.channel is not None
+    now_in_vc = after.channel is not None
+
+    if not was_in_vc and now_in_vc:
+        _vc_active_sessions[session_key] = time.time()
+    elif was_in_vc and not now_in_vc:
+        join_ts = _vc_active_sessions.pop(session_key, None)
+        if join_ts:
+            add_vc_seconds(guild_id, member_id, time.time() - join_ts)
 
 @bot.command(name="ping")
 async def ping(ctx):
