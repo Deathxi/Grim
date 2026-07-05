@@ -638,6 +638,35 @@ updates_sha = load_updates_sha()
 def is_url(text):
     return text.strip().startswith(("http://", "https://"))
 
+REMINDME_FILE = _data_path("remindme_data.json")
+
+def load_remindme_data():
+    try:
+        if os.path.exists(REMINDME_FILE):
+            with open(REMINDME_FILE, 'r') as f:
+                return json.load(f)
+    except:
+        pass
+    return {}
+
+def save_remindme_data(data):
+    with open(REMINDME_FILE, 'w') as f:
+        json.dump(data, f)
+
+remindme_store = load_remindme_data()
+
+def parse_remindme_duration(time_str):
+    """Parses relative durations like '10m', '2h', '1d3h30m'. Returns seconds, or None."""
+    time_str = time_str.strip().lower().replace(" ", "")
+    if not time_str:
+        return None
+    pattern = re.findall(r'(\d+)([dhms])', time_str)
+    if not pattern or "".join(f"{n}{u}" for n, u in pattern) != time_str:
+        return None
+    unit_seconds = {"d": 86400, "h": 3600, "m": 60, "s": 1}
+    total = sum(int(n) * unit_seconds[u] for n, u in pattern)
+    return total if total > 0 else None
+
 def parse_reminder_datetime(when_str):
     when_str = when_str.strip()
     formats = ["%m/%d %H:%M", "%m/%d %I:%M%p", "%m/%d"]
@@ -2414,6 +2443,58 @@ async def after_check_reminders():
     else:
         print("[Reminders] Task stopped unexpectedly, will restart on next health check")
 
+@tasks.loop(seconds=30)
+async def check_remindme():
+    global remindme_store
+    if not remindme_store:
+        return
+
+    current_time = time.time()
+    to_remove = []
+
+    for rid, data in list(remindme_store.items()):
+        try:
+            if current_time < data["target_timestamp"]:
+                continue
+
+            user_id = data["user_id"]
+            text = data["text"]
+
+            try:
+                user = bot.get_user(int(user_id)) or await bot.fetch_user(int(user_id))
+                embed = discord.Embed(
+                    title="**A Reminder From The Other Side**",
+                    description=text,
+                    color=discord.Color.from_rgb(18, 18, 18)
+                )
+                embed.set_footer(text=f"Grim · {VERSION}")
+                await user.send(embed=embed)
+                print(f"[RemindMe] Sent reminder {rid} to {user_id}")
+            except discord.Forbidden:
+                print(f"[RemindMe] Could not DM {user_id} (DMs closed) — dropping reminder {rid}")
+            except Exception as e:
+                print(f"[RemindMe] Failed to send reminder {rid}: {e}")
+
+            to_remove.append(rid)
+        except Exception as e:
+            print(f"[RemindMe] Error processing reminder {rid}: {e}")
+
+    for rid in to_remove:
+        del remindme_store[rid]
+    if to_remove:
+        save_remindme_data(remindme_store)
+
+@check_remindme.before_loop
+async def before_check_remindme():
+    await bot.wait_until_ready()
+
+@check_remindme.after_loop
+async def after_check_remindme():
+    if check_remindme.is_being_cancelled():
+        print("[RemindMe] Task was cancelled")
+    else:
+        print("[RemindMe] Task stopped unexpectedly, will restart on next health check")
+
 @tasks.loop(minutes=5)
 async def health_monitor():
     """Monitor and restart background tasks if they stop"""
@@ -2475,6 +2556,16 @@ async def health_monitor():
                 tasks_status.append(f"reminders: FAILED ({e})")
         else:
             tasks_status.append("reminders: OK")
+
+        if not check_remindme.is_running():
+            print("[Health Monitor] RemindMe task not running, restarting...")
+            try:
+                check_remindme.start()
+                tasks_status.append("remindme: RESTARTED")
+            except Exception as e:
+                tasks_status.append(f"remindme: FAILED ({e})")
+        else:
+            tasks_status.append("remindme: OK")
         
         if not synthesize_server_digest.is_running():
             print("[Health Monitor] Digest task not running, restarting...")
@@ -2723,6 +2814,10 @@ async def on_ready():
     if not check_reminders.is_running():
         check_reminders.start()
         print("Started reminders checker")
+
+    if not check_remindme.is_running():
+        check_remindme.start()
+        print("Started remindme checker")
     
     if not synthesize_server_digest.is_running():
         synthesize_server_digest.start()
@@ -3741,6 +3836,7 @@ async def grim_status(interaction: discord.Interaction):
         "Ghostwrite Live": check_ghostwrite_live,
         "NFT Watch": check_nftwatch,
         "Reminders": check_reminders,
+        "RemindMe": check_remindme,
         "Digest": synthesize_server_digest,
         "Health Monitor": health_monitor,
         "VC Monitor": vc_empty_monitor,
@@ -4350,6 +4446,42 @@ async def remind_cancel(interaction: discord.Interaction, reminder_id: str):
         color=discord.Color.from_rgb(18, 18, 18)
     )
     embed.set_footer(text=f"Grim Reminder · {VERSION}")
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+@bot.tree.command(name="remindme", description="Get a personal DM reminder after a set amount of time")
+@discord.app_commands.describe(when="Duration until the reminder, e.g. 10m, 2h, 1d, 1d3h30m", text="What Grim should remind you about")
+async def remindme(interaction: discord.Interaction, when: str, text: str):
+    global remindme_store
+
+    seconds = parse_remindme_duration(when)
+    if seconds is None:
+        await interaction.response.send_message(
+            "Couldn't parse that time. Use a duration like `10m`, `2h`, `1d`, or `1d3h30m`.",
+            ephemeral=True
+        )
+        return
+
+    if seconds > 30 * 86400:
+        await interaction.response.send_message("That's too far out — 30 days max.", ephemeral=True)
+        return
+
+    now_ts = time.time()
+    rid = str(uuid.uuid4())[:8]
+    remindme_store[rid] = {
+        "user_id": str(interaction.user.id),
+        "text": text,
+        "target_timestamp": now_ts + seconds,
+        "created_ts": now_ts
+    }
+    save_remindme_data(remindme_store)
+
+    embed = discord.Embed(
+        title="**Noted**",
+        description=text,
+        color=discord.Color.from_rgb(18, 18, 18)
+    )
+    embed.add_field(name="I'll remind you in", value=f"```{_format_duration(seconds)}```", inline=True)
+    embed.set_footer(text=f"Grim · {VERSION}")
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 SECLUDE_ICON_URL = "https://cdn.discordapp.com/icons/1101443658953261076/a_7df56c851d8a26e198d706cc3c640426.webp?size=1024&animated=true"
