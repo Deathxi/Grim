@@ -667,6 +667,37 @@ def parse_remindme_duration(time_str):
     total = sum(int(n) * unit_seconds[u] for n, u in pattern)
     return total if total > 0 else None
 
+def parse_remindme_target(when_str: str):
+    """Accepts either a relative duration ('10m', '2h', '1d3h30m') or an absolute
+    date/time treated as UTC/GMT (e.g. '07/06/2026 17:00', '07/06 17:00', optionally
+    with a trailing GMT/UTC label). Returns the target unix timestamp, or None."""
+    when_str = when_str.strip()
+
+    seconds = parse_remindme_duration(when_str)
+    if seconds is not None:
+        return time.time() + seconds
+
+    cleaned = re.sub(r'\s*(gmt|utc|gmk)\s*$', '', when_str, flags=re.IGNORECASE).strip()
+    formats = ["%m/%d/%Y %H:%M", "%m/%d/%Y %I:%M%p", "%m/%d %H:%M", "%m/%d %I:%M%p"]
+    now_utc = datetime.now(timezone.utc)
+
+    for fmt in formats:
+        try:
+            parsed = datetime.strptime(cleaned, fmt)
+        except ValueError:
+            continue
+        has_year = "%Y" in fmt
+        if not has_year:
+            parsed = parsed.replace(year=now_utc.year)
+        parsed = parsed.replace(tzinfo=timezone.utc)
+        if parsed < now_utc:
+            if has_year:
+                return None  # explicit past date — reject rather than silently reinterpret
+            parsed = parsed.replace(year=parsed.year + 1)
+        return parsed.timestamp()
+
+    return None
+
 def parse_reminder_datetime(when_str):
     when_str = when_str.strip()
     formats = ["%m/%d %H:%M", "%m/%d %I:%M%p", "%m/%d"]
@@ -4449,38 +4480,97 @@ async def remind_cancel(interaction: discord.Interaction, reminder_id: str):
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 @bot.tree.command(name="remindme", description="Get a personal DM reminder after a set amount of time")
-@discord.app_commands.describe(when="Duration until the reminder, e.g. 10m, 2h, 1d, 1d3h30m", text="What Grim should remind you about")
+@discord.app_commands.describe(when="A duration (10m, 2h, 1d3h30m) or exact GMT date/time (07/06/2026 17:00)", text="What Grim should remind you about")
 async def remindme(interaction: discord.Interaction, when: str, text: str):
     global remindme_store
 
-    seconds = parse_remindme_duration(when)
-    if seconds is None:
+    target_ts = parse_remindme_target(when)
+    if target_ts is None:
         await interaction.response.send_message(
-            "Couldn't parse that time. Use a duration like `10m`, `2h`, `1d`, or `1d3h30m`.",
+            "Couldn't parse that. Use a duration like `10m`, `2h`, `1d3h30m`, "
+            "or an exact date/time in GMT like `07/06/2026 17:00`.",
             ephemeral=True
         )
         return
 
-    if seconds > 30 * 86400:
-        await interaction.response.send_message("That's too far out — 30 days max.", ephemeral=True)
+    now_ts = time.time()
+    seconds = target_ts - now_ts
+    if seconds <= 0:
+        await interaction.response.send_message("That time is in the past.", ephemeral=True)
+        return
+    if seconds > 400 * 86400:
+        await interaction.response.send_message("That's too far out — a little over a year max.", ephemeral=True)
         return
 
-    now_ts = time.time()
     rid = str(uuid.uuid4())[:8]
     remindme_store[rid] = {
         "user_id": str(interaction.user.id),
         "text": text,
-        "target_timestamp": now_ts + seconds,
+        "target_timestamp": target_ts,
         "created_ts": now_ts
     }
     save_remindme_data(remindme_store)
 
+    due_str = datetime.fromtimestamp(target_ts, tz=timezone.utc).strftime("%m/%d/%Y %H:%M GMT")
     embed = discord.Embed(
         title="**Noted**",
         description=text,
         color=discord.Color.from_rgb(18, 18, 18)
     )
-    embed.add_field(name="I'll remind you in", value=f"```{_format_duration(seconds)}```", inline=True)
+    embed.add_field(name="I'll remind you on", value=f"```{due_str}```", inline=True)
+    embed.add_field(name="Time from now", value=f"```{_format_duration(seconds)}```", inline=True)
+    embed.add_field(name="ID", value=f"```{rid}```", inline=True)
+    embed.set_footer(text=f"Use /remindme_cancel to cancel · {VERSION}")
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+@bot.tree.command(name="remindmes", description="View and cancel your active personal reminders")
+async def remindmes_cmd(interaction: discord.Interaction):
+    global remindme_store
+
+    user_id_str = str(interaction.user.id)
+    user_reminders = {rid: d for rid, d in remindme_store.items() if d.get("user_id") == user_id_str}
+
+    if not user_reminders:
+        await interaction.response.send_message("No active reminders.", ephemeral=True)
+        return
+
+    embed = discord.Embed(
+        title="Your Active Reminders",
+        color=discord.Color.from_rgb(18, 18, 18)
+    )
+
+    for rid, data in sorted(user_reminders.items(), key=lambda kv: kv[1]["target_timestamp"]):
+        text = data["text"]
+        label = text if len(text) <= 50 else text[:47] + "..."
+        due_str = datetime.fromtimestamp(data["target_timestamp"], tz=timezone.utc).strftime("%m/%d/%Y %H:%M GMT")
+        embed.add_field(name=label, value=f"Due: `{due_str}`\nID: `{rid}`", inline=False)
+
+    embed.set_footer(text=f"Use /remindme_cancel <id> to remove one · {VERSION}")
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+@bot.tree.command(name="remindme_cancel", description="Cancel an active personal reminder by its ID")
+async def remindme_cancel(interaction: discord.Interaction, reminder_id: str):
+    global remindme_store
+
+    rid = reminder_id.strip()
+    if rid not in remindme_store:
+        await interaction.response.send_message("Reminder not found. Use `/remindmes` to see your IDs.", ephemeral=True)
+        return
+
+    data = remindme_store[rid]
+    if data.get("user_id") != str(interaction.user.id):
+        await interaction.response.send_message("You can only cancel your own reminders.", ephemeral=True)
+        return
+
+    text = data["text"]
+    del remindme_store[rid]
+    save_remindme_data(remindme_store)
+
+    embed = discord.Embed(
+        title="Reminder Cancelled",
+        description=text if len(text) <= 100 else text[:97] + "...",
+        color=discord.Color.from_rgb(18, 18, 18)
+    )
     embed.set_footer(text=f"Grim · {VERSION}")
     await interaction.response.send_message(embed=embed, ephemeral=True)
 

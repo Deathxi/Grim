@@ -26,7 +26,9 @@ Grim is a Discord bot for Seclude & Affiliates. Built with Python and discord.py
 - `/nftwatch <link>` - Watch an OpenSea collection for live new listings
 - `/nftwatch_cancel` - Cancel active NFT watches via dropdown selector
 - `/stats [user]` - View a member's all-time stats: messages sent, time in voice channels, ping, join date
-- `/remindme <when> <text>` - Get a personal DM reminder after a duration (e.g. `10m`, `2h`, `1d3h30m`), max 30 days out
+- `/remindme <when> <text>` - Get a personal DM reminder; accepts a duration (e.g. `10m`, `2h`, `1d3h30m`) or an exact GMT date/time (e.g. `07/06/2026 17:00`)
+- `/remindmes` - View your active personal reminders and their IDs
+- `/remindme_cancel <id>` - Cancel one of your active personal reminders
 - `/welcome_on` - Enable new member welcome messages in the current channel
 - `/welcome_off` - Disable new member welcome messages
 - `/creator` - Meet the creator of Grim
