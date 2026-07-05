@@ -542,23 +542,6 @@ def save_moderation_data(data):
 
 moderation_data = load_moderation_data()
 
-REMINDERS_FILE = _data_path("reminders_data.json")
-
-def load_reminders_data():
-    try:
-        if os.path.exists(REMINDERS_FILE):
-            with open(REMINDERS_FILE, 'r') as f:
-                return json.load(f)
-    except:
-        pass
-    return {}
-
-def save_reminders_data(data):
-    with open(REMINDERS_FILE, 'w') as f:
-        json.dump(data, f)
-
-reminders_store = load_reminders_data()
-
 WELCOME_FILE = _data_path("welcome_data.json")
 
 def load_welcome_data():
@@ -696,21 +679,6 @@ def parse_remindme_target(when_str: str):
             parsed = parsed.replace(year=parsed.year + 1)
         return parsed.timestamp()
 
-    return None
-
-def parse_reminder_datetime(when_str):
-    when_str = when_str.strip()
-    formats = ["%m/%d %H:%M", "%m/%d %I:%M%p", "%m/%d"]
-    now = datetime.now()
-    for fmt in formats:
-        try:
-            parsed = datetime.strptime(when_str, fmt)
-            dt = parsed.replace(year=now.year)
-            if dt < now:
-                dt = dt.replace(year=now.year + 1)
-            return dt
-        except:
-            continue
     return None
 
 def parse_opensea_url(url):
@@ -2395,85 +2363,6 @@ async def after_check_redditfeed():
     else:
         print("[RedditFeed] Task stopped unexpectedly, will restart on next health check")
 
-@tasks.loop(minutes=1)
-async def check_reminders():
-    global reminders_store
-    if not reminders_store:
-        return
-    
-    current_time = time.time()
-    to_remove = []
-    
-    for rid, data in list(reminders_store.items()):
-        try:
-            channel = bot.get_channel(int(data["channel_id"]))
-            if not channel:
-                continue
-            
-            target_ts = data["target_timestamp"]
-            day_before_ts = target_ts - 86400
-            user_id = data["user_id"]
-            subject = data["subject"]
-            drop_str = data["drop_display"]
-            day_before_str = data["day_before_display"]
-            
-            if not data.get("day_before_sent") and current_time >= day_before_ts:
-                embed = discord.Embed(
-                    title="**Time Is Of The Essence**",
-                    color=discord.Color.from_rgb(18, 18, 18)
-                )
-                embed.description = subject if not is_url(subject) else f"[Open Link]({subject})"
-                embed.add_field(name="Reminder", value=f"```Tomorrow```", inline=True)
-                embed.add_field(name="Drop Date", value=f"```{drop_str}```", inline=True)
-                embed.set_footer(text=f"Grim Reminder — Day Before · {VERSION}")
-                
-                content = f"<@{user_id}>"
-                if is_url(subject):
-                    content += f"\n{subject}"
-                await channel.send(content=content, embed=embed)
-                reminders_store[rid]["day_before_sent"] = True
-                save_reminders_data(reminders_store)
-            
-            if not data.get("day_of_sent") and current_time >= target_ts:
-                embed = discord.Embed(
-                    title="**Time Is Of The Essence**",
-                    color=discord.Color.from_rgb(18, 18, 18)
-                )
-                embed.description = subject if not is_url(subject) else f"[Open Link]({subject})"
-                embed.add_field(name="Reminder", value=f"```Today — Now```", inline=True)
-                embed.add_field(name="Drop Date", value=f"```{drop_str}```", inline=True)
-                embed.set_footer(text=f"Grim Reminder — Day Of · {VERSION}")
-                
-                content = f"<@{user_id}>"
-                if is_url(subject):
-                    content += f"\n{subject}"
-                await channel.send(content=content, embed=embed)
-                reminders_store[rid]["day_of_sent"] = True
-                save_reminders_data(reminders_store)
-            
-            if data.get("day_before_sent") and data.get("day_of_sent"):
-                to_remove.append(rid)
-        
-        except Exception as e:
-            print(f"[Reminders] Error processing reminder {rid}: {e}")
-    
-    for rid in to_remove:
-        del reminders_store[rid]
-    if to_remove:
-        save_reminders_data(reminders_store)
-        print(f"[Reminders] Cleaned up {len(to_remove)} completed reminder(s)")
-
-@check_reminders.before_loop
-async def before_check_reminders():
-    await bot.wait_until_ready()
-
-@check_reminders.after_loop
-async def after_check_reminders():
-    if check_reminders.is_being_cancelled():
-        print("[Reminders] Task was cancelled")
-    else:
-        print("[Reminders] Task stopped unexpectedly, will restart on next health check")
-
 @tasks.loop(seconds=30)
 async def check_remindme():
     global remindme_store
@@ -2577,16 +2466,6 @@ async def health_monitor():
                 tasks_status.append(f"nftwatch: FAILED ({e})")
         else:
             tasks_status.append("nftwatch: OK")
-
-        if not check_reminders.is_running():
-            print("[Health Monitor] Reminders task not running, restarting...")
-            try:
-                check_reminders.start()
-                tasks_status.append("reminders: RESTARTED")
-            except Exception as e:
-                tasks_status.append(f"reminders: FAILED ({e})")
-        else:
-            tasks_status.append("reminders: OK")
 
         if not check_remindme.is_running():
             print("[Health Monitor] RemindMe task not running, restarting...")
@@ -2842,10 +2721,6 @@ async def on_ready():
         check_nftwatch.start()
         print("Started NFT watch checker")
     
-    if not check_reminders.is_running():
-        check_reminders.start()
-        print("Started reminders checker")
-
     if not check_remindme.is_running():
         check_remindme.start()
         print("Started remindme checker")
@@ -3866,7 +3741,6 @@ async def grim_status(interaction: discord.Interaction):
         "Livetweets": check_livetweets,
         "Ghostwrite Live": check_ghostwrite_live,
         "NFT Watch": check_nftwatch,
-        "Reminders": check_reminders,
         "RemindMe": check_remindme,
         "Digest": synthesize_server_digest,
         "Health Monitor": health_monitor,
@@ -4365,118 +4239,6 @@ async def mod_list(interaction: discord.Interaction):
         embed.description = "```empty```"
     
     embed.set_footer(text=f"{len(words)} word(s) · {VERSION}")
-    await interaction.response.send_message(embed=embed, ephemeral=True)
-
-@bot.tree.command(name="remind", description="Set a reminder for a product drop or event")
-async def remind(interaction: discord.Interaction, subject: str, when: str):
-    global reminders_store
-    
-    target_dt = parse_reminder_datetime(when)
-    if not target_dt:
-        await interaction.response.send_message(
-            "Couldn't parse that date. Use format like `06/19 0:00` or `06/19 14:30`",
-            ephemeral=True
-        )
-        return
-    
-    target_ts = target_dt.timestamp()
-    if target_ts <= time.time():
-        await interaction.response.send_message("That date is in the past.", ephemeral=True)
-        return
-    
-    day_before_dt = target_dt - timedelta(days=1)
-    drop_display = target_dt.strftime("%m/%d %H:%M")
-    day_before_display = day_before_dt.strftime("%m/%d")
-    
-    rid = str(uuid.uuid4())[:8]
-    reminders_store[rid] = {
-        "channel_id": str(interaction.channel_id),
-        "guild_id": str(interaction.guild_id),
-        "user_id": str(interaction.user.id),
-        "subject": subject,
-        "target_timestamp": target_ts,
-        "day_before_sent": target_ts - time.time() < 86400,
-        "day_of_sent": False,
-        "drop_display": drop_display,
-        "day_before_display": day_before_display
-    }
-    save_reminders_data(reminders_store)
-    
-    embed = discord.Embed(
-        title="**Time Is Of The Essence**",
-        color=discord.Color.from_rgb(18, 18, 18)
-    )
-    embed.description = subject if not is_url(subject) else f"[Open Link]({subject})"
-    embed.add_field(name="Day Before", value=f"```{day_before_display}```", inline=True)
-    embed.add_field(name="Drop", value=f"```{drop_display}```", inline=True)
-    embed.set_footer(text=f"Grim Reminder — Set · {VERSION}")
-    
-    content = None
-    if is_url(subject):
-        content = subject
-    
-    await interaction.response.send_message(content=content, embed=embed)
-
-@bot.tree.command(name="reminders", description="View and cancel your active reminders")
-async def reminders_cmd(interaction: discord.Interaction):
-    global reminders_store
-    
-    guild_id_str = str(interaction.guild_id)
-    user_id_str = str(interaction.user.id)
-    is_admin = interaction.user.guild_permissions.administrator
-    
-    if is_admin:
-        user_reminders = {rid: d for rid, d in reminders_store.items() if d.get("guild_id") == guild_id_str}
-    else:
-        user_reminders = {rid: d for rid, d in reminders_store.items() if d.get("user_id") == user_id_str and d.get("guild_id") == guild_id_str}
-    
-    if not user_reminders:
-        await interaction.response.send_message("No active reminders.", ephemeral=True)
-        return
-    
-    embed = discord.Embed(
-        title="Active Reminders",
-        color=discord.Color.from_rgb(18, 18, 18)
-    )
-    
-    for rid, data in user_reminders.items():
-        subj = data["subject"]
-        label = subj if len(subj) <= 50 else subj[:47] + "..."
-        day_before_status = "✓" if data.get("day_before_sent") else "pending"
-        drop_status = "pending"
-        field_val = f"Drop: `{data['drop_display']}` • Day before: {day_before_status}\nID: `{rid}`"
-        embed.add_field(name=label, value=field_val, inline=False)
-    
-    embed.set_footer(text=f"Use /remind_cancel <id> to remove one · {VERSION}")
-    await interaction.response.send_message(embed=embed, ephemeral=True)
-
-@bot.tree.command(name="remind_cancel", description="Cancel an active reminder by its ID")
-async def remind_cancel(interaction: discord.Interaction, reminder_id: str):
-    global reminders_store
-    
-    rid = reminder_id.strip()
-    if rid not in reminders_store:
-        await interaction.response.send_message("Reminder not found. Use `/reminders` to see your IDs.", ephemeral=True)
-        return
-    
-    data = reminders_store[rid]
-    is_owner = data.get("user_id") == str(interaction.user.id)
-    is_admin = interaction.user.guild_permissions.administrator
-    
-    if not is_owner and not is_admin:
-        await interaction.response.send_message("You can only cancel your own reminders.", ephemeral=True)
-        return
-    
-    subj = data["subject"]
-    del reminders_store[rid]
-    save_reminders_data(reminders_store)
-    
-    embed = discord.Embed(
-        title="Reminder Cancelled",
-        description=subj if len(subj) <= 100 else subj[:97] + "...",
-        color=discord.Color.from_rgb(18, 18, 18)
-    )
-    embed.set_footer(text=f"Grim Reminder · {VERSION}")
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 @bot.tree.command(name="remindme", description="Get a personal DM reminder after a set amount of time")
