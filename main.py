@@ -4383,7 +4383,7 @@ async def stats(interaction: discord.Interaction, user: discord.Member | None = 
     embed.add_field(name="Roles", value=f"```{len(target.roles) - 1}```", inline=True)
 
     embed.set_footer(text=f"{interaction.user.name} · {VERSION}")
-    await interaction.response.send_message(embed=embed)
+    await interaction.response.send_message(embed=embed, ephemeral=True)
 
 @bot.tree.command(name="support", description="Get support or connect with the Seclude community")
 async def support(interaction: discord.Interaction):
