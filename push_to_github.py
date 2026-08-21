@@ -15,6 +15,8 @@ FILES = [
     ".replit",
     "replit.md",
     "requirements.txt",
+    "pyproject.toml",
+    "uv.lock",
     "push_to_github.py",
     "backup_grim_data.py",
     "run_grim_backup.sh",
@@ -111,6 +113,10 @@ else:
             "base_tree": base_tree_sha,
             "tree": tree
         })
+        if "sha" not in new_tree:
+            raise SystemExit(
+                f"GitHub tree creation failed: {new_tree.get('message', 'unknown GitHub error')}"
+            )
 
         # Create commit
         new_commit = api("POST", f"/repos/{REPO}/git/commits", {
