@@ -42,6 +42,7 @@ Grim is a Discord bot for Seclude & Affiliates. Built with Python and discord.py
 - Auto-recovery: Health monitor restarts crashed background tasks every 5 minutes
 - Status dashboard showing all background task health and feed schedules
 - Live NFT listing monitor with image, price, token ID, and rarity data from OpenSea API
+- VPS-only weekly encrypted backups of `~/.grim_data` to a separate private GitHub repository; see `BACKUP_RESTORE.md`
 
 ## Setup
 1. Add your `DISCORD_TOKEN` as a secret
@@ -62,6 +63,13 @@ Grim is a Discord bot for Seclude & Affiliates. Built with Python and discord.py
 1. Add the task to `health_monitor()` function to enable auto-restart if it crashes
 2. Add an `after_loop` handler to log unexpected stops
 3. Update `/newsfeed_status` command to display the new task's status
+
+## VPS backups
+`backup_grim_data.py` is intentionally separate from the bot and reads only
+`~/.grim_data`. `setup_vps.sh` can install its root-only systemd timer when
+given a dedicated fine-grained GitHub token and an offline recovery
+passphrase. It never stores backup credentials in the repository or Grim's
+`.env`; see `BACKUP_RESTORE.md` for setup and restore steps.
 
 ## Recent Changes
 - February 2026: /nftwatch command for live OpenSea listing monitoring with image/price/rarity embeds

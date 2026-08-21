@@ -1,0 +1,18 @@
+modules = ["python-3.11"]
+[agent]
+expertMode = true
+integrations = ["python_openai:1.0.0", "python_xai:1.0.0"]
+
+[nix]
+channel = "stable-25_05"
+
+[workflows]
+
+[deployment]
+deploymentTarget = "gce"
+run = ["python", "main.py"]
+ignorePorts = true
+
+[postMerge]
+path = "scripts/post-merge.sh"
+timeoutMs = 30000

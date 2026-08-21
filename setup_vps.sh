@@ -7,13 +7,13 @@ echo "======================================"
 
 # ── System packages ────────────────────────────────────
 echo ""
-echo "[1/6] Updating system and installing dependencies..."
+echo "[1/7] Updating system and installing dependencies..."
 apt-get update -q
-apt-get install -y -q python3 python3-pip python3-venv git ffmpeg libopus-dev
+apt-get install -y -q python3 python3-pip python3-venv git ffmpeg libopus-dev openssl
 
 # ── Clone repo ─────────────────────────────────────────
 echo ""
-echo "[2/6] Cloning Grim from GitHub..."
+echo "[2/7] Cloning Grim from GitHub..."
 if [ -d "/root/grim" ]; then
     echo "  /root/grim already exists — pulling latest..."
     cd /root/grim && git pull origin main
@@ -24,12 +24,12 @@ fi
 
 # ── Python dependencies ────────────────────────────────
 echo ""
-echo "[3/6] Installing Python packages..."
+echo "[3/7] Installing Python packages..."
 pip3 install -q -r /root/grim/requirements.txt
 
 # ── Secrets / environment file ─────────────────────────
 echo ""
-echo "[4/6] Setting up environment secrets..."
+echo "[4/7] Setting up environment secrets..."
 echo "  Enter each secret when prompted. Press Enter to skip optional ones."
 echo ""
 
@@ -53,9 +53,54 @@ fi
 chmod 600 /root/grim/.env
 echo "  Secrets saved to /root/grim/.env"
 
+# ── Weekly encrypted backup configuration ───────────────
+echo ""
+echo "[5/7] Setting up optional weekly encrypted backups..."
+echo "  Leave the repository blank to skip backup setup for now."
+read -p "  Private backup repository (owner/repo): " BACKUP_REPO
+
+if [ -n "$BACKUP_REPO" ]; then
+    if [[ ! "$BACKUP_REPO" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
+        echo "  Backup repository must use the owner/repository format; aborting."
+        exit 1
+    fi
+    read -r -s -p "  Fine-grained backup token (this repo only): " BACKUP_TOKEN
+    echo ""
+    read -r -s -p "  Offline backup recovery passphrase: " BACKUP_PASSPHRASE
+    echo ""
+    if [ -z "$BACKUP_TOKEN" ] || [ -z "$BACKUP_PASSPHRASE" ]; then
+        echo "  Backup repository, token, and passphrase are all required; aborting."
+        exit 1
+    fi
+
+    install -d -m 700 /root/.config/grim-backup
+    printf '%s' "$BACKUP_PASSPHRASE" > /root/.config/grim-backup/passphrase
+    chmod 600 /root/.config/grim-backup/passphrase
+    unset BACKUP_PASSPHRASE
+
+    cat > /etc/grim-backup.env <<EOF
+GRIM_BACKUP_GITHUB_REPO=$BACKUP_REPO
+GRIM_BACKUP_GITHUB_TOKEN=$BACKUP_TOKEN
+GRIM_BACKUP_PASSPHRASE_FILE=/root/.config/grim-backup/passphrase
+GRIM_BACKUP_RETENTION=8
+EOF
+    chmod 600 /etc/grim-backup.env
+    unset BACKUP_TOKEN
+
+    install -m 644 /root/grim/systemd/grim-backup.service \
+        /etc/systemd/system/grim-backup.service
+    install -m 644 /root/grim/systemd/grim-backup.timer \
+        /etc/systemd/system/grim-backup.timer
+    systemctl daemon-reload
+    systemctl enable --now grim-backup.timer
+    echo "  Weekly backup timer enabled for Sundays at 03:00 UTC (+ up to 30 minutes)."
+else
+    echo "  Backup setup skipped. Re-run this section with a private repo before relying on backups."
+fi
+
 # ── Systemd service ────────────────────────────────────
 echo ""
-echo "[5/6] Creating systemd service..."
+echo "[6/7] Creating systemd service..."
 
 cat > /etc/systemd/system/grim.service <<EOF
 [Unit]
@@ -84,7 +129,7 @@ echo "  Grim service created and started."
 
 # ── GitHub Actions deploy key ──────────────────────────
 echo ""
-echo "[6/6] Generating SSH deploy key for GitHub Actions..."
+echo "[7/7] Generating SSH deploy key for GitHub Actions..."
 ssh-keygen -t ed25519 -f /root/.ssh/github_deploy -N "" -q
 cat /root/.ssh/github_deploy.pub >> /root/.ssh/authorized_keys
 chmod 600 /root/.ssh/authorized_keys

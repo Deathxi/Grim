@@ -1,0 +1,11 @@
+[Unit]
+Description=Weekly encrypted Grim runtime-data backup
+
+[Timer]
+OnCalendar=Sun 03:00:00 UTC
+Persistent=true
+RandomizedDelaySec=30min
+Unit=grim-backup.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,16 @@
+[Unit]
+Description=Encrypted weekly backup of Grim runtime data
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/root/grim
+EnvironmentFile=/etc/grim-backup.env
+Environment=PYTHONUNBUFFERED=1
+UMask=0077
+ExecStart=/bin/bash /root/grim/run_grim_backup.sh
+TimeoutStartSec=15min
+StandardOutput=journal
+StandardError=journal
