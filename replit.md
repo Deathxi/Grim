@@ -31,6 +31,8 @@ Grim is a Discord bot for Seclude & Affiliates. Built with Python and discord.py
 - `/remindme_cancel <id>` - Cancel one of your active personal reminders
 - `/welcome_on` - Enable new member welcome messages in the current channel
 - `/welcome_off` - Disable new member welcome messages
+- `/grim_language [language]` - View or set your personal reply language; choose Auto to match each message
+- `/grim_translate <language> <text>` - Translate text into English, Japanese, Spanish, Korean, Chinese, French, or Latin
 - `/creator` - Meet the creator of Grim
 - `/help_grim` - Show available commands
 
@@ -42,6 +44,8 @@ Grim is a Discord bot for Seclude & Affiliates. Built with Python and discord.py
 - Auto-recovery: Health monitor restarts crashed background tasks every 5 minutes
 - Status dashboard showing all background task health and feed schedules
 - Live NFT listing monitor with image, price, token ID, and rarity data from OpenSea API
+- Multilingual text replies with automatic detection or a per-member language preference (English, Japanese, Spanish, Korean, Chinese, French, and Latin)
+- Explicit text translation for the same supported languages; no voice or speech features are included
 - VPS-only weekly encrypted backups of `~/.grim_data` to a separate private GitHub repository; see `BACKUP_RESTORE.md`
 
 ## Setup
