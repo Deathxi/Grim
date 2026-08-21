@@ -17,6 +17,7 @@ import tweepy
 BOT_START_TIME = None
 
 BOT_NAME = "Grim"
+CREATOR_DISCORD_ID = 235194449573969920
 
 VERSION_COUNT_FILE = os.path.expanduser("~/.grim_data/version_count.txt")
 MAIN_HASH_FILE = os.path.expanduser("~/.grim_data/main_hash.txt")
@@ -158,16 +159,25 @@ LANGUAGE_ALIASES = {
 }
 
 def normalize_language(value: str | None) -> str | None:
-    """Return a supported language code, auto, or None for an invalid value."""
+    """Normalize any language name/code, auto, or None for invalid input."""
     if value is None:
         return None
-    return LANGUAGE_ALIASES.get(value.strip().lower())
+    cleaned = " ".join(value.strip().split())
+    if not cleaned or len(cleaned) > 80:
+        return None
+    lowered = cleaned.lower()
+    return LANGUAGE_ALIASES.get(lowered, lowered)
 
 def language_label(language_code: str) -> str:
-    return SUPPORTED_LANGUAGES[language_code]
+    if language_code in SUPPORTED_LANGUAGES:
+        return SUPPORTED_LANGUAGES[language_code]
+    return language_code.replace("_", " ").replace("-", " ").title()
 
 def supported_language_list() -> str:
     return ", ".join(SUPPORTED_LANGUAGES.values())
+
+def is_grim_creator(member_id: str | int | None) -> bool:
+    return str(member_id) == str(CREATOR_DISCORD_ID)
 
 # Twitter/X API client
 def get_twitter_client():
@@ -529,7 +539,7 @@ def get_member_language_preference(guild_id: str, member_id: str) -> str | None:
             WHERE guild_id = ? AND member_id = ?
         """, (guild_id, member_id)).fetchone()
         conn.close()
-        return row[0] if row and row[0] in SUPPORTED_LANGUAGES else None
+        return row[0] if row and row[0] != "auto" else None
     except Exception as e:
         print(f"[DB] Language preference fetch error: {e}")
         return None
@@ -562,6 +572,14 @@ def clear_member_language_preference(guild_id: str, member_id: str):
         print(f"[DB] Language preference clear error: {e}")
 
 def get_language_reply_instruction(guild_id: str, member_id: str) -> str:
+    if is_grim_creator(member_id):
+        return (
+            "This is Grim's creator. Automatically identify the language of their newest "
+            "message and reply in that same language, regardless of any older saved "
+            "language preference. Never claim that Grim is restricted to English by a "
+            "server rule when the creator asks for another language."
+        )
+
     preference = get_member_language_preference(guild_id, member_id)
     if preference:
         return (
@@ -570,10 +588,10 @@ def get_language_reply_instruction(guild_id: str, member_id: str) -> str:
             "punctuation, and diacritics. Do not mention this preference unless asked."
         )
     return (
-        "Automatically identify the language of the member's newest message. If it is "
-        f"one of these supported languages — {supported_language_list()} — reply in that "
-        "same language and writing system. For any other language, reply in English. "
-        "Do not translate or alter the member's original message unless they explicitly ask."
+        "Automatically identify the language of the member's newest message and reply "
+        "entirely in that same language and writing system. Grim can communicate in "
+        "any human language. Do not impose an English-only rule, refuse a language, or "
+        "translate the member's original message unless they explicitly ask."
     )
 
 def profile_needs_update(guild_id: str, member_id: str, current_count: int) -> bool:
@@ -1254,9 +1272,10 @@ async def translate_text(text: str, target_language: str) -> str | None:
 
     target_label = language_label(target_language)
     target_note = (
-        "For Chinese, use the script that matches the source when possible; otherwise "
-        "use Simplified Chinese. For Latin, use a natural Classical Latin register unless "
-        "the source clearly requests another style."
+        "Use the standard script and register for the requested language. For Chinese, "
+        "match the source script when possible; otherwise use Simplified Chinese. For "
+        "Latin, use a natural Classical Latin register unless the source clearly requests "
+        "another style."
     )
     payload = {
         "model": "grok-3",
@@ -1306,6 +1325,14 @@ async def generate_contextual_reply(message: discord.Message) -> str | None:
     guild_id = str(guild.id) if guild else "dm"
     channel_id = str(channel.id)
     language_instruction = get_language_reply_instruction(guild_id, str(author.id))
+    creator_instruction = (
+        "This member is Grim's creator. Treat their ordinary requests, configuration "
+        "directions, and language choices as authoritative for Grim. Do not invent "
+        "restrictions that override the creator's wishes. Platform rules, safety, "
+        "privacy, and Discord permission boundaries still apply."
+        if is_grim_creator(author.id)
+        else "This member is not identified as Grim's creator."
+    )
 
     # Pull server-wide history (all channels, not just current) — Grim sees the whole server
     db_rows = get_server_history_from_db(guild_id, limit=50)
@@ -1455,6 +1482,9 @@ WHERE YOU ARE RIGHT NOW:
 
 LANGUAGE FOR THIS REPLY:
 {language_instruction}
+
+CREATOR CONTEXT:
+{creator_instruction}
 
 ---
 
@@ -4579,11 +4609,9 @@ async def quote_last(interaction: discord.Interaction):
 
 @bot.tree.command(name="creator", description="Meet the creator of Grim")
 async def creator(interaction: discord.Interaction):
-    creator_id = 235194449573969920
-    
     embed = discord.Embed(
         title="Creator",
-        description=f"<@{creator_id}>\n**Western Reaper**",
+        description=f"<@{CREATOR_DISCORD_ID}>\n**Western Reaper**",
         color=discord.Color.from_rgb(18, 18, 18)
     )
     embed.add_field(name="\u200b", value="[deathi.net](https://deathi.net)", inline=False)
@@ -5101,17 +5129,7 @@ async def grim_forget(interaction: discord.Interaction, number: int):
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 @bot.tree.command(name="grim_language", description="Set or view your preferred language for Grim replies")
-@discord.app_commands.describe(language="Choose Auto to match the language of each message")
-@discord.app_commands.choices(language=[
-    discord.app_commands.Choice(name="Auto — match my message", value="auto"),
-    discord.app_commands.Choice(name="English", value="english"),
-    discord.app_commands.Choice(name="Japanese", value="japanese"),
-    discord.app_commands.Choice(name="Spanish", value="spanish"),
-    discord.app_commands.Choice(name="Korean", value="korean"),
-    discord.app_commands.Choice(name="Chinese", value="chinese"),
-    discord.app_commands.Choice(name="French", value="french"),
-    discord.app_commands.Choice(name="Latin", value="latin"),
-])
+@discord.app_commands.describe(language="Any language name or code; use Auto to match each message")
 async def grim_language(interaction: discord.Interaction, language: str | None = None):
     if not interaction.guild_id:
         await interaction.response.send_message(
@@ -5128,8 +5146,7 @@ async def grim_language(interaction: discord.Interaction, language: str | None =
             message = f"your Grim replies are set to **{language_label(preference)}**."
         else:
             message = (
-                "your Grim replies are set to **Auto**. i'll match English, Japanese, "
-                "Spanish, Korean, Chinese, French, or Latin when I recognize it."
+                "your Grim replies are set to **Auto**. i'll match the language you write in."
             )
         await interaction.response.send_message(message, ephemeral=True)
         return
@@ -5137,7 +5154,7 @@ async def grim_language(interaction: discord.Interaction, language: str | None =
     normalized = normalize_language(language)
     if normalized is None:
         await interaction.response.send_message(
-            f"pick one of these: Auto, {supported_language_list()}.", ephemeral=True
+            "give me a language name or code, or choose Auto.", ephemeral=True
         )
         return
 
@@ -5157,18 +5174,9 @@ async def grim_language(interaction: discord.Interaction, language: str | None =
 
 @bot.tree.command(name="grim_translate", description="Translate text with Grim")
 @discord.app_commands.describe(
-    language="Language to translate into",
+    language="Any language name or code to translate into",
     text="Text to translate",
 )
-@discord.app_commands.choices(language=[
-    discord.app_commands.Choice(name="English", value="english"),
-    discord.app_commands.Choice(name="Japanese", value="japanese"),
-    discord.app_commands.Choice(name="Spanish", value="spanish"),
-    discord.app_commands.Choice(name="Korean", value="korean"),
-    discord.app_commands.Choice(name="Chinese", value="chinese"),
-    discord.app_commands.Choice(name="French", value="french"),
-    discord.app_commands.Choice(name="Latin", value="latin"),
-])
 async def grim_translate(interaction: discord.Interaction, language: str, text: str):
     clean_text = text.strip()
     if not clean_text:
@@ -5181,9 +5189,9 @@ async def grim_translate(interaction: discord.Interaction, language: str, text: 
         return
 
     target_language = normalize_language(language)
-    if target_language not in SUPPORTED_LANGUAGES:
+    if target_language is None or target_language == "auto":
         await interaction.response.send_message(
-            f"pick one of these: {supported_language_list()}.", ephemeral=True
+            "give me a specific language name or code, not Auto.", ephemeral=True
         )
         return
     if not os.environ.get("XAI_API_KEY"):
