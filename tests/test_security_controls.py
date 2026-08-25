@@ -266,6 +266,9 @@ class SecurityControlsTests(unittest.TestCase):
         self.assertIn("Noct", embed.description)
         self.assertIn("Test Server", embed.description)
         self.assertIn("departure reason not provided by Discord", embed.footer.text)
+        fields = {field.name: field.value for field in embed.fields}
+        self.assertIn("Display name: `Noct`", fields["Identity"])
+        self.assertIn("Username: `@Noct`", fields["Identity"])
 
         async def create_view():
             return main.MemberDirectoryView("50", "99", [record])

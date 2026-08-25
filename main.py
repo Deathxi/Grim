@@ -888,9 +888,12 @@ def is_private_member_log_channel(channel, guild):
 
 def build_member_departure_embed(guild_name, record, membership_periods=None):
     display_name = record.get("display_name") or record.get("username") or "Unknown member"
+    username = record.get("username") or "Unknown username"
+    safe_display_name = discord.utils.escape_markdown(str(display_name))
+    safe_username = discord.utils.escape_markdown(str(username))
     embed = discord.Embed(
         title="Member Departed",
-        description=f"**{display_name}** has left **{guild_name}**.",
+        description=f"**{safe_display_name}** has left **{guild_name}**.",
         color=discord.Color.from_rgb(18, 18, 18),
     )
     if record.get("avatar_url"):
@@ -903,6 +906,11 @@ def build_member_departure_embed(guild_name, record, membership_periods=None):
     embed.add_field(name="Status", value=f"{status} · no longer in server", inline=True)
     embed.add_field(name="Member ID", value=f"`{record.get('member_id', 'unknown')}`", inline=True)
     embed.add_field(name="Joined", value=_discord_time(record.get("joined_at")), inline=True)
+    embed.add_field(
+        name="Identity",
+        value=f"Display name: `{safe_display_name}`\nUsername: `@{safe_username}`",
+        inline=False,
+    )
     membership_periods = membership_periods or [
         f"{_discord_time(record.get('joined_at'))} → "
         f"{'present' if record.get('is_present') else _discord_time(record.get('left_at'))}"
