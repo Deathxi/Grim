@@ -48,8 +48,12 @@ class SecurityControlsTests(unittest.TestCase):
         self.original_db = main.CHAT_DB_FILE
         self.original_moderation_file = main.MODERATION_FILE
         self.original_moderation_data = main.moderation_data
+        self.original_member_log_file = main.MEMBER_LOG_CHANNELS_FILE
+        self.original_member_log_channels = main.member_log_channels
         main.CHAT_DB_FILE = str(Path(self.temp_dir.name) / "chat_history.db")
         main.MODERATION_FILE = str(Path(self.temp_dir.name) / "moderation_data.json")
+        main.MEMBER_LOG_CHANNELS_FILE = str(Path(self.temp_dir.name) / "member_log_channels.json")
+        main.member_log_channels = {}
         main.moderation_data = {"guilds": {}, "legacy_unassigned_words": []}
         main._COMMAND_RATE_LIMITS.clear()
         main.init_chat_db()
@@ -76,6 +80,8 @@ class SecurityControlsTests(unittest.TestCase):
         main.CHAT_DB_FILE = self.original_db
         main.MODERATION_FILE = self.original_moderation_file
         main.moderation_data = self.original_moderation_data
+        main.MEMBER_LOG_CHANNELS_FILE = self.original_member_log_file
+        main.member_log_channels = self.original_member_log_channels
         main._COMMAND_RATE_LIMITS.clear()
         self.temp_dir.cleanup()
 
@@ -318,6 +324,37 @@ class SecurityControlsTests(unittest.TestCase):
         self.assertTrue(worker_threads)
         self.assertNotEqual(worker_threads[0], event_loop_thread)
         self.assertTrue(edits)
+
+    def test_departure_log_is_disabled_when_channel_becomes_public(self):
+        member = self.fake_member()
+        member.guild.default_role = object()
+        main.record_member_snapshot(member, "join")
+        main.member_log_channels["50"] = "777"
+        sent_embeds = []
+        visibility = {"public": False}
+        channel = SimpleNamespace(
+            guild=SimpleNamespace(id=50),
+            permissions_for=lambda role: SimpleNamespace(view_channel=visibility["public"]),
+        )
+        self.assertTrue(main.is_private_member_log_channel(channel, member.guild))
+        visibility["public"] = True
+
+        async def send(*, embed):
+            sent_embeds.append(embed)
+
+        channel.send = send
+        original_bot = main.bot
+        main.bot = SimpleNamespace(
+            get_channel=lambda channel_id: channel,
+            fetch_channel=lambda channel_id: channel,
+        )
+        try:
+            asyncio.run(main.send_member_departure_notification(member))
+        finally:
+            main.bot = original_bot
+
+        self.assertEqual(sent_embeds, [])
+        self.assertNotIn("50", main.member_log_channels)
 
 
 if __name__ == "__main__":

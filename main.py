@@ -927,6 +927,18 @@ async def send_member_departure_notification(member):
         if not channel:
             print(f"[Members] Staff log channel {channel_id} not found in guild {guild_id}")
             return
+        channel_guild_id = getattr(getattr(channel, "guild", None), "id", None)
+        if (
+            str(channel_guild_id) != guild_id
+            or not is_private_member_log_channel(channel, member.guild)
+        ):
+            member_log_channels.pop(guild_id, None)
+            save_member_log_channels()
+            print(
+                f"[Members] Disabled unsafe staff log channel {channel_id} in guild "
+                f"{guild_id}: wrong guild or visible to @everyone"
+            )
+            return
         membership_periods = await asyncio.to_thread(
             _member_membership_summary, guild_id, member.id, record
         )
