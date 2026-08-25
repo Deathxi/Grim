@@ -11,7 +11,7 @@ Grim is a Discord bot for Seclude & Affiliates. Built with Python and discord.py
 - `nftwatch_data.json` - Persistent storage for NFT collection watches
 
 ## Commands
-- `/server` - Display server status and information
+- `/server` - View Grim's server dossier: identity, structure, language signals, emblems, and banner
 - `/haiku` - Generate an inspirational haiku
 - `/meme` - Generate creative meme captions
 - `/rizz` - Get pickup lines for the brave

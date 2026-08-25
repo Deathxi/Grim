@@ -307,6 +307,53 @@ class SecurityControlsTests(unittest.TestCase):
         self.assertIn("server", prefix_names)
         self.assertNotIn("info", prefix_names)
 
+    def test_server_dossier_uses_grim_layout_and_aggregate_language_data(self):
+        main.save_member_language_preference("50", "10", "english")
+        main.save_member_language_preference("50", "11", "english")
+        main.save_member_language_preference("50", "12", "spanish")
+        preferences = main.get_guild_language_preferences("50")
+        self.assertEqual(preferences, [("english", 2), ("spanish", 1)])
+
+        created = main.datetime(2023, 4, 18, 2, 43, tzinfo=main.timezone.utc)
+        guild = SimpleNamespace(
+            id=1101443658953261076,
+            name="𝕾𝖊𝖈𝖑𝖚𝖉𝖊",
+            description="A quiet place for the strange and unguarded.",
+            owner=SimpleNamespace(mention="<@235194449573969920>"),
+            owner_id=235194449573969920,
+            verification_level=SimpleNamespace(name="medium"),
+            created_at=created,
+            member_count=50,
+            members=[
+                SimpleNamespace(status=main.discord.Status.online),
+                SimpleNamespace(status=main.discord.Status.offline),
+            ],
+            text_channels=[object()] * 22,
+            voice_channels=[object()] * 4,
+            roles=[object()] * 24,
+            premium_subscription_count=3,
+            preferred_locale="en-US",
+            emojis=["🕯️", "🦇", "☾"],
+            icon=SimpleNamespace(url="https://cdn.example/icon.png"),
+            banner=SimpleNamespace(url="https://cdn.example/banner.png"),
+        )
+        embed = main.build_server_dossier_embed(
+            guild, language_preferences=preferences, bot_latency=42
+        )
+        fields = {field.name: field for field in embed.fields}
+
+        self.assertEqual(embed.title, "⛧ 𝕾𝖊𝖈𝖑𝖚𝖉𝖊")
+        self.assertEqual(embed.author.name, "GRIM // SERVER DOSSIER")
+        self.assertEqual(embed.thumbnail.url, "https://cdn.example/icon.png")
+        self.assertEqual(embed.image.url, "https://cdn.example/banner.png")
+        self.assertFalse(fields["◇ Server ID"].inline)
+        self.assertEqual(fields["◇ Text Channels"].value, "`22`")
+        self.assertEqual(fields["◇ Voice Channels"].value, "`4`")
+        self.assertIn("English 🇺🇸 · `2`", fields["◇ Language Signal"].value)
+        self.assertIn("Spanish 🇪🇸 · `1`", fields["◇ Language Signal"].value)
+        self.assertEqual(fields["◇ Server Emblems · 3"].value, "🕯️ 🦇 ☾")
+        self.assertIn("PST", fields["◇ Established"].value)
+
     def test_member_directory_database_read_runs_off_the_interaction_loop(self):
         member = self.fake_member()
         main.record_member_snapshot(member, "join")

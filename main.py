@@ -350,6 +350,32 @@ def language_label(language_code: str) -> str:
         return SUPPORTED_LANGUAGES[language_code]
     return language_code
 
+LANGUAGE_FLAGS = {
+    "english": "🇺🇸",
+    "spanish": "🇪🇸",
+    "portuguese": "🇵🇹",
+    "french": "🇫🇷",
+    "german": "🇩🇪",
+    "italian": "🇮🇹",
+    "romanian": "🇷🇴",
+    "dutch": "🇳🇱",
+    "polish": "🇵🇱",
+    "russian": "🇷🇺",
+    "ukrainian": "🇺🇦",
+    "greek": "🇬🇷",
+    "japanese": "🇯🇵",
+    "korean": "🇰🇷",
+    "arabic": "🇸🇦",
+    "hindi": "🇮🇳",
+    "chinese": "🇨🇳",
+}
+
+def format_language_preference(language_code: str) -> str:
+    """Return a compact, display-safe language label for the server dossier."""
+    normalized = normalize_language(language_code) or language_code
+    flag = LANGUAGE_FLAGS.get(normalized, "")
+    return f"{language_label(normalized)} {flag}".strip()
+
 def supported_language_list() -> str:
     return ", ".join(SUPPORTED_LANGUAGES.values())
 
@@ -878,6 +904,8 @@ def save_member_log_channels():
     _atomic_json_write(MEMBER_LOG_CHANNELS_FILE, member_log_channels)
 
 member_log_channels = load_member_log_channels()
+SERVER_DOSSIER_PREVIEW_ON_STARTUP = True
+_server_dossier_preview_posted = False
 
 def is_private_member_log_channel(channel, guild):
     """Departure cards may only target a channel hidden from the guild default role."""
@@ -1323,6 +1351,31 @@ def clear_member_language_preference(guild_id: str, member_id: str):
         conn.close()
     except Exception as e:
         print(f"[DB] Language preference clear error: {e}")
+
+def get_guild_language_preferences(guild_id: str, limit: int = 4) -> list[tuple[str, int]]:
+    """Return aggregate opt-in language preferences without exposing member identities."""
+    conn = None
+    try:
+        conn = sqlite3.connect(CHAT_DB_FILE)
+        rows = conn.execute("""
+            SELECT language_code, COUNT(*) AS preference_count
+            FROM member_language_preferences
+            WHERE guild_id = ?
+            GROUP BY language_code
+            ORDER BY preference_count DESC, language_code ASC
+            LIMIT ?
+        """, (str(guild_id), limit)).fetchall()
+        return [
+            (language_code, int(preference_count))
+            for language_code, preference_count in rows
+            if normalize_language(language_code)
+        ]
+    except Exception as e:
+        print(f"[DB] Guild language preference summary error: {e}")
+        return []
+    finally:
+        if conn:
+            conn.close()
 
 def get_language_reply_instruction(guild_id: str, member_id: str) -> str:
     if is_grim_creator(member_id):
@@ -4034,6 +4087,8 @@ async def on_ready():
         print(f"[VC] Resumed tracking for {len(_vc_active_sessions)} member(s) already in voice")
 
     _bump_version()
+    if SERVER_DOSSIER_PREVIEW_ON_STARTUP:
+        asyncio.create_task(post_server_dossier_preview_to_staff())
     if os.environ.get("REPL_ID"):
         await _push_version_to_github()   # atomic — must succeed before notification fires
         asyncio.create_task(push_to_github_on_startup())
@@ -4221,39 +4276,142 @@ async def post_update_notification():
         _save_last_announced_version(VERSION)
         print(f"[Updates] Saved last announced version as {VERSION}")
 
-@bot.tree.command(name="server", description="Get server status and info")
+def _server_owner_label(guild) -> str:
+    owner = getattr(guild, "owner", None)
+    if owner:
+        mention = getattr(owner, "mention", None)
+        if mention:
+            return mention
+        owner_id = getattr(owner, "id", None)
+        if owner_id:
+            return f"<@{owner_id}>"
+    owner_id = getattr(guild, "owner_id", None)
+    return f"<@{owner_id}>" if owner_id else "Unknown"
+
+def _server_verification_label(guild) -> str:
+    verification = getattr(guild, "verification_level", None)
+    name = getattr(verification, "name", str(verification or "Unknown"))
+    return name.replace("_", " ").replace("VerificationLevel.", "").title()
+
+def _server_creation_label(created_at) -> str:
+    if not created_at:
+        return "Unknown"
+    return f"{created_at.astimezone(GRIM_TIMEZONE).strftime('%B %d, %Y · %I:%M %p')} {GRIM_TIMEZONE_LABEL}"
+
+def build_server_dossier_embed(guild, language_preferences=None, bot_latency=None):
+    """Build Grim's privacy-aware server dossier from public guild metadata."""
+    members = list(getattr(guild, "members", []) or [])
+    member_count = getattr(guild, "member_count", None) or len(members)
+    online_count = sum(
+        1 for member in members
+        if getattr(member, "status", discord.Status.offline) != discord.Status.offline
+    )
+    text_channels = len(getattr(guild, "text_channels", []) or [])
+    voice_channels = len(getattr(guild, "voice_channels", []) or [])
+    role_count = max(0, len(getattr(guild, "roles", []) or []) - 1)
+    boost_count = getattr(guild, "premium_subscription_count", 0) or 0
+    description = (getattr(guild, "description", None) or "").strip()
+    if not description:
+        description = "*No description has been written. The archive remains quiet.*"
+
+    embed = discord.Embed(
+        title=f"⛧ {guild.name}",
+        description=description[:4096],
+        color=discord.Color.from_rgb(27, 26, 30),
+    )
+    icon = getattr(guild, "icon", None)
+    if icon and getattr(icon, "url", None):
+        embed.set_thumbnail(url=icon.url)
+    banner = getattr(guild, "banner", None)
+    if banner and getattr(banner, "url", None):
+        embed.set_image(url=banner.url)
+
+    embed.set_author(name="GRIM // SERVER DOSSIER")
+    embed.add_field(name="◇ Server ID", value=f"`{guild.id}`", inline=False)
+    embed.add_field(name="◇ Owner", value=_server_owner_label(guild), inline=True)
+    embed.add_field(name="◇ Verification", value=_server_verification_label(guild), inline=True)
+    embed.add_field(
+        name="◇ Established",
+        value=_server_creation_label(getattr(guild, "created_at", None)),
+        inline=True,
+    )
+    embed.add_field(name="◇ Members", value=f"`{member_count:,}` total\n`{online_count:,}` online", inline=True)
+    embed.add_field(name="◇ Text Channels", value=f"`{text_channels:,}`", inline=True)
+    embed.add_field(name="◇ Voice Channels", value=f"`{voice_channels:,}`", inline=True)
+    embed.add_field(name="◇ Roles", value=f"`{role_count:,}`", inline=True)
+    embed.add_field(name="◇ Boosts", value=f"`{boost_count:,}`", inline=True)
+    if bot_latency is not None:
+        embed.add_field(name="◇ Grim Link", value=f"`{bot_latency:,} ms`", inline=True)
+
+    locale = str(getattr(guild, "preferred_locale", "") or "Not set").replace("-", " ")
+    preferences = language_preferences or []
+    if preferences:
+        language_lines = "\n".join(
+            f"{format_language_preference(language_code)} · `{count}`"
+            for language_code, count in preferences[:4]
+        )
+    else:
+        language_lines = "No explicit preferences recorded — Grim matches the conversation."
+    embed.add_field(
+        name="◇ Language Signal",
+        value=f"Server locale · `{locale}`\n{language_lines}",
+        inline=False,
+    )
+
+    emoji_values = [str(emoji) for emoji in getattr(guild, "emojis", []) or []]
+    emoji_preview = " ".join(emoji_values[:40])
+    if len(emoji_values) > 40:
+        emoji_preview += f"\n+{len(emoji_values) - 40} more"
+    embed.add_field(
+        name=f"◇ Server Emblems · {len(emoji_values)}",
+        value=emoji_preview[:1024] or "No custom emblems recorded.",
+        inline=False,
+    )
+    embed.set_footer(text=f"Grim · server dossier · {get_current_version()}")
+    return embed
+
+async def post_server_dossier_preview_to_staff():
+    """Temporary one-off production-layout preview for the configured private staff log."""
+    global _server_dossier_preview_posted
+    if _server_dossier_preview_posted:
+        return
+    _server_dossier_preview_posted = True
+    for guild_id, channel_id in list(member_log_channels.items()):
+        guild = bot.get_guild(int(guild_id))
+        if not guild:
+            continue
+        try:
+            channel = bot.get_channel(int(channel_id)) or await bot.fetch_channel(int(channel_id))
+            if (
+                str(getattr(getattr(channel, "guild", None), "id", None)) != str(guild.id)
+                or not is_private_member_log_channel(channel, guild)
+            ):
+                continue
+            language_preferences = await asyncio.to_thread(get_guild_language_preferences, guild.id)
+            await channel.send(embed=build_server_dossier_embed(
+                guild,
+                language_preferences=language_preferences,
+                bot_latency=round(bot.latency * 1000),
+            ))
+            print(f"[Server Dossier] Posted one-off staff preview in channel {channel_id}")
+            return
+        except Exception as error:
+            print(f"[Server Dossier] Could not post staff preview in channel {channel_id}: {error}")
+
+@bot.tree.command(name="server", description="View Grim's server dossier")
 async def server_info(interaction: discord.Interaction):
     guild = interaction.guild
-    
     if guild is None:
         await interaction.response.send_message("This command can only be used in a server!", ephemeral=True)
         return
-    
-    member_count = guild.member_count
-    online_count = sum(1 for m in guild.members if m.status != discord.Status.offline)
-    bot_latency = round(bot.latency * 1000)
-    
-    embed = discord.Embed(
-        title=guild.name,
-        color=discord.Color.from_rgb(18, 18, 18)
+    await interaction.response.defer()
+    language_preferences = await asyncio.to_thread(get_guild_language_preferences, guild.id)
+    embed = build_server_dossier_embed(
+        guild,
+        language_preferences=language_preferences,
+        bot_latency=round(bot.latency * 1000),
     )
-    
-    if guild.icon:
-        embed.set_thumbnail(url=guild.icon.url)
-    
-    embed.add_field(name="Members", value=f"```{member_count:,}```", inline=True)
-    embed.add_field(name="Online", value=f"```{online_count:,}```", inline=True)
-    embed.add_field(name="Ping", value=f"```{bot_latency}ms```", inline=True)
-    embed.add_field(name="ID", value=f"```{guild.id}```", inline=True)
-    embed.add_field(name="Owner", value=f"{guild.owner.mention if guild.owner else 'Unknown'}", inline=True)
-    embed.add_field(name="Created", value=f"```{guild.created_at.strftime('%b %d, %Y')}```", inline=True)
-    embed.add_field(name="Channels", value=f"```{len(guild.channels)}```", inline=True)
-    embed.add_field(name="Roles", value=f"```{len(guild.roles)}```", inline=True)
-    embed.add_field(name="Boosts", value=f"```{guild.premium_subscription_count}```", inline=True)
-    
-    embed.set_footer(text=f"{interaction.user.name} · {get_current_version()}")
-    
-    await interaction.response.send_message(embed=embed)
+    await interaction.followup.send(embed=embed)
 
 @bot.tree.command(name="howdie", description="How will someone meet their dramatic end?")
 async def howdie(interaction: discord.Interaction, user: discord.Member):
@@ -6266,13 +6424,15 @@ async def ping(ctx):
 
 @bot.command(name="server")
 async def server_info_prefix(ctx):
-    embed = discord.Embed(
-        title="Grim",
-        description="Seclude & Affiliates",
-        color=discord.Color.from_rgb(18, 18, 18)
+    if not ctx.guild:
+        await ctx.send("This command can only be used in a server!")
+        return
+    language_preferences = await asyncio.to_thread(get_guild_language_preferences, ctx.guild.id)
+    embed = build_server_dossier_embed(
+        ctx.guild,
+        language_preferences=language_preferences,
+        bot_latency=round(bot.latency * 1000),
     )
-    embed.add_field(name="\u200b", value=f"```!```", inline=True)
-    embed.add_field(name="\u200b", value=f"```{len(bot.guilds)}```", inline=True)
     await ctx.send(embed=embed)
 
 @bot.command(name="haiku")
