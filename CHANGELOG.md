@@ -12,6 +12,7 @@ Version 2.0 begins Grim's security-first operations phase.
 - Explicit 2.0 release baseline with automatic migration from any older 1.xx runtime counter.
 - Server-scoped moderation controls, shared authorization checks, redacted security audit events, and abuse limits.
 - Atomic runtime-state writes and the `OPERATIONS_SECURITY.md` operations and incident-response SOP.
+- Staff-only member history directory with stable Discord-ID tracking, join/leave/rejoin and identity events, compact profile review, and configurable staff-channel departure cards.
 
 ---
 

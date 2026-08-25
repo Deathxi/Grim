@@ -52,6 +52,24 @@ class SecurityControlsTests(unittest.TestCase):
         main._COMMAND_RATE_LIMITS.clear()
         main.init_chat_db()
 
+    def fake_member(self, *, guild_id=50, member_id=10, name="Noct", display_name="Noct", roles=None):
+        created = main.datetime(2025, 1, 1, tzinfo=main.timezone.utc)
+        joined = main.datetime(2026, 1, 1, tzinfo=main.timezone.utc)
+        return SimpleNamespace(
+            id=member_id,
+            guild=SimpleNamespace(id=guild_id, name="Test Server"),
+            name=name,
+            display_name=display_name,
+            display_avatar=SimpleNamespace(url=f"https://cdn.example/{member_id}.png"),
+            created_at=created,
+            joined_at=joined,
+            roles=roles or [
+                SimpleNamespace(id=50, name="@everyone"),
+                SimpleNamespace(id=51, name="Staff"),
+            ],
+            bot=False,
+        )
+
     def tearDown(self):
         main.CHAT_DB_FILE = self.original_db
         main.MODERATION_FILE = self.original_moderation_file
@@ -194,6 +212,63 @@ class SecurityControlsTests(unittest.TestCase):
             )
         finally:
             main.CREATOR_DISCORD_ID = original_creator_id
+
+    def test_member_history_tracks_identity_departure_and_activity(self):
+        member = self.fake_member()
+        main.record_member_snapshot(member, "join")
+        main.increment_member_message_count("50", "10")
+        renamed = self.fake_member(name="noct", display_name="Noct Updated")
+        main.record_member_snapshot(renamed, "identity_update", {"changes": ["username", "display_name"]})
+        main.record_member_snapshot(renamed, "leave", present=False)
+
+        record = main.get_member_record("50", "10")
+        self.assertEqual(record["username"], "noct")
+        self.assertEqual(record["display_name"], "Noct Updated")
+        self.assertFalse(record["is_present"])
+        self.assertEqual(record["message_count"], 1)
+        self.assertEqual(record["role_names"], ["Staff"])
+        self.assertIsNotNone(record["left_at"])
+        self.assertEqual(
+            [event["event_type"] for event in main.get_member_history_events("50", "10")],
+            ["leave", "identity_update", "join"],
+        )
+
+    def test_member_directory_is_server_scoped_and_safe_reconciliation_does_not_infer_leaves(self):
+        departed = self.fake_member(member_id=10)
+        other_guild_member = self.fake_member(guild_id=51, member_id=10, display_name="Other Server")
+        current = self.fake_member(member_id=11, display_name="Current")
+        main.record_member_snapshot(departed, "join")
+        main.record_member_snapshot(departed, "leave", present=False)
+        main.record_member_snapshot(other_guild_member, "join")
+
+        main.sync_member_directory([SimpleNamespace(id=50, members=[current])])
+
+        self.assertFalse(main.get_member_record("50", "10")["is_present"])
+        self.assertTrue(main.get_member_record("50", "11")["is_present"])
+        self.assertEqual(len(main.get_member_directory_records("51")), 1)
+        self.assertEqual(main.get_member_directory_records("51")[0]["display_name"], "Other Server")
+
+    def test_member_departure_card_and_directory_view_are_minimal_and_navigable(self):
+        member = self.fake_member()
+        main.record_member_snapshot(member, "join")
+        main.record_member_snapshot(member, "leave", present=False)
+        record = main.get_member_record("50", "10")
+        embed = main.build_member_departure_embed("Test Server", record)
+        self.assertEqual(embed.title, "Member Departed")
+        self.assertIn("Noct", embed.description)
+        self.assertIn("Test Server", embed.description)
+        self.assertIn("departure reason not provided by Discord", embed.footer.text)
+
+        async def create_view():
+            return main.MemberDirectoryView("50", "99", [record])
+
+        view = asyncio.run(create_view())
+        self.assertTrue(any(isinstance(child, main.MemberDirectorySelect) for child in view.children))
+        view.selected_member_id = "10"
+        view.refresh_items()
+        labels = [getattr(child, "label", None) for child in view.children]
+        self.assertIn("Back to members", labels)
+        self.assertIn("Next member", labels)
 
 
 if __name__ == "__main__":

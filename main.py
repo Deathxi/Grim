@@ -10,6 +10,7 @@ import tempfile
 import psutil
 import hashlib
 import re
+import threading
 import discord
 from discord.ext import commands, tasks
 from discord import ui
@@ -480,7 +481,9 @@ grim_digests = load_grim_digests()
 CHAT_DB_FILE = _data_path("chat_history.db")
 
 def init_chat_db():
-    conn = sqlite3.connect(CHAT_DB_FILE)
+    conn = sqlite3.connect(CHAT_DB_FILE, timeout=10)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=10000")
     conn.execute("""
         CREATE TABLE IF NOT EXISTS messages (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -532,11 +535,375 @@ def init_chat_db():
             metadata_json TEXT NOT NULL
         )
     """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS member_directory (
+            guild_id TEXT NOT NULL,
+            member_id TEXT NOT NULL,
+            username TEXT NOT NULL,
+            display_name TEXT NOT NULL,
+            avatar_url TEXT,
+            account_created_at REAL,
+            first_seen_at REAL NOT NULL,
+            joined_at REAL,
+            last_seen_at REAL NOT NULL,
+            left_at REAL,
+            is_present INTEGER NOT NULL DEFAULT 1,
+            is_bot INTEGER NOT NULL DEFAULT 0,
+            role_names_json TEXT NOT NULL DEFAULT '[]',
+            message_count INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (guild_id, member_id)
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS member_history_events (
+            event_id TEXT PRIMARY KEY,
+            guild_id TEXT NOT NULL,
+            member_id TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            occurred_at REAL NOT NULL,
+            username TEXT NOT NULL,
+            display_name TEXT NOT NULL,
+            avatar_url TEXT,
+            details_json TEXT NOT NULL DEFAULT '{}'
+        )
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_member_history_lookup
+        ON member_history_events (guild_id, member_id, occurred_at DESC)
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_member_history_retention
+        ON member_history_events (occurred_at)
+    """)
     conn.commit()
     conn.close()
 
 init_chat_db()
 
+MEMBER_EVENT_RETENTION_DAYS = 730
+MEMBER_EVENT_PRUNE_INTERVAL_SECONDS = 86400
+_member_db_lock = threading.Lock()
+_member_event_last_pruned = 0.0
+
+def _member_db_connection():
+    conn = sqlite3.connect(CHAT_DB_FILE, timeout=10)
+    conn.execute("PRAGMA busy_timeout=10000")
+    return conn
+
+def _member_timestamp(value):
+    return value.timestamp() if value else None
+
+def _member_snapshot(member):
+    role_names = [
+        role.name for role in getattr(member, "roles", [])
+        if getattr(role, "name", "") != "@everyone"
+    ]
+    avatar = getattr(getattr(member, "display_avatar", None), "url", None)
+    return {
+        "guild_id": str(member.guild.id),
+        "member_id": str(member.id),
+        "username": str(getattr(member, "name", "Unknown")),
+        "display_name": str(getattr(member, "display_name", getattr(member, "name", "Unknown"))),
+        "avatar_url": str(avatar) if avatar else None,
+        "account_created_at": _member_timestamp(getattr(member, "created_at", None)),
+        "joined_at": _member_timestamp(getattr(member, "joined_at", None)),
+        "role_names_json": json.dumps(role_names[:50]),
+        "is_bot": 1 if getattr(member, "bot", False) else 0,
+    }
+
+def collect_member_snapshots(guilds):
+    """Copy Discord cache fields on the event loop before database work moves to a thread."""
+    return [
+        _member_snapshot(member)
+        for guild in guilds
+        for member in getattr(guild, "members", [])
+    ]
+
+def _upsert_member_snapshot(conn, snapshot, *, present=True, now=None):
+    now = now or time.time()
+    existing = conn.execute("""
+        SELECT first_seen_at, message_count
+        FROM member_directory
+        WHERE guild_id = ? AND member_id = ?
+    """, (snapshot["guild_id"], snapshot["member_id"])).fetchone()
+    first_seen_at = existing[0] if existing else now
+    message_count = existing[1] if existing else 0
+    conn.execute("""
+        INSERT INTO member_directory (
+            guild_id, member_id, username, display_name, avatar_url,
+            account_created_at, first_seen_at, joined_at, last_seen_at,
+            left_at, is_present, is_bot, role_names_json, message_count
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(guild_id, member_id) DO UPDATE SET
+            username=excluded.username,
+            display_name=excluded.display_name,
+            avatar_url=excluded.avatar_url,
+            account_created_at=COALESCE(excluded.account_created_at, member_directory.account_created_at),
+            joined_at=COALESCE(excluded.joined_at, member_directory.joined_at),
+            last_seen_at=excluded.last_seen_at,
+            left_at=excluded.left_at,
+            is_present=excluded.is_present,
+            is_bot=excluded.is_bot,
+            role_names_json=excluded.role_names_json,
+            message_count=member_directory.message_count
+    """, (
+        snapshot["guild_id"], snapshot["member_id"], snapshot["username"],
+        snapshot["display_name"], snapshot["avatar_url"],
+        snapshot["account_created_at"], first_seen_at, snapshot["joined_at"],
+        now, None if present else now, 1 if present else 0,
+        snapshot["is_bot"], snapshot["role_names_json"], message_count,
+    ))
+
+def record_member_snapshot_data(snapshot, event_type=None, details=None, *, present=True):
+    """Thread-safe member write for a pre-copied Discord member snapshot."""
+    global _member_event_last_pruned
+    now = time.time()
+    conn = None
+    try:
+        with _member_db_lock:
+            conn = _member_db_connection()
+            _upsert_member_snapshot(conn, snapshot, present=present, now=now)
+            if event_type:
+                conn.execute("""
+                    INSERT INTO member_history_events (
+                        event_id, guild_id, member_id, event_type, occurred_at,
+                        username, display_name, avatar_url, details_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    str(uuid.uuid4()), snapshot["guild_id"], snapshot["member_id"],
+                    event_type, now, snapshot["username"], snapshot["display_name"],
+                    snapshot["avatar_url"], json.dumps(details or {}, sort_keys=True),
+                ))
+            if now - _member_event_last_pruned >= MEMBER_EVENT_PRUNE_INTERVAL_SECONDS:
+                conn.execute("""
+                    DELETE FROM member_history_events
+                    WHERE occurred_at < ?
+                """, (now - MEMBER_EVENT_RETENTION_DAYS * 86400,))
+                _member_event_last_pruned = now
+            conn.commit()
+    except Exception as e:
+        print(f"[Members] Could not record member snapshot: {e}")
+    finally:
+        if conn:
+            conn.close()
+
+def record_member_snapshot(member, event_type=None, details=None, *, present=True):
+    record_member_snapshot_data(
+        _member_snapshot(member), event_type, details, present=present
+    )
+
+def sync_member_directory(guilds_or_snapshots):
+    """Refresh cached member identity without inferring departures from omissions."""
+    entries = list(guilds_or_snapshots)
+    snapshots = (
+        entries if not entries or isinstance(entries[0], dict)
+        else collect_member_snapshots(entries)
+    )
+    now = time.time()
+    conn = None
+    try:
+        with _member_db_lock:
+            conn = _member_db_connection()
+            for snapshot in snapshots:
+                _upsert_member_snapshot(conn, snapshot, now=now)
+            conn.commit()
+        print(f"[Members] Reconciled {len(snapshots)} cached member(s) without inferring departures")
+    except Exception as e:
+        print(f"[Members] Reconciliation failed: {e}")
+    finally:
+        if conn:
+            conn.close()
+
+def increment_member_message_count(guild_id, member_id, snapshot=None):
+    """Increment activity, creating a safe identity row if a join was missed."""
+    conn = None
+    try:
+        with _member_db_lock:
+            conn = _member_db_connection()
+            now = time.time()
+            result = conn.execute("""
+                UPDATE member_directory
+                SET message_count = message_count + 1, last_seen_at = ?
+                WHERE guild_id = ? AND member_id = ?
+            """, (now, str(guild_id), str(member_id)))
+            if result.rowcount == 0 and snapshot:
+                _upsert_member_snapshot(conn, snapshot, now=now)
+                conn.execute("""
+                    UPDATE member_directory
+                    SET message_count = message_count + 1, last_seen_at = ?
+                    WHERE guild_id = ? AND member_id = ?
+                """, (now, str(guild_id), str(member_id)))
+            conn.commit()
+    except Exception as e:
+        print(f"[Members] Could not update message count: {e}")
+    finally:
+        if conn:
+            conn.close()
+
+def get_member_directory_records(guild_id):
+    try:
+        conn = sqlite3.connect(CHAT_DB_FILE)
+        rows = conn.execute("""
+            SELECT guild_id, member_id, username, display_name, avatar_url,
+                   account_created_at, first_seen_at, joined_at, last_seen_at,
+                   left_at, is_present, is_bot, role_names_json, message_count
+            FROM member_directory
+            WHERE guild_id = ?
+            ORDER BY is_present DESC, lower(display_name), lower(username)
+        """, (str(guild_id),)).fetchall()
+        conn.close()
+        records = []
+        for row in rows:
+            record = dict(zip((
+                "guild_id", "member_id", "username", "display_name", "avatar_url",
+                "account_created_at", "first_seen_at", "joined_at", "last_seen_at",
+                "left_at", "is_present", "is_bot", "role_names_json", "message_count",
+            ), row))
+            try:
+                record["role_names"] = json.loads(record.pop("role_names_json") or "[]")
+            except:
+                record["role_names"] = []
+                record.pop("role_names_json", None)
+            records.append(record)
+        return records
+    except Exception as e:
+        print(f"[Members] Could not load directory: {e}")
+        return []
+
+def get_member_history_events(guild_id, member_id, limit=12):
+    try:
+        conn = sqlite3.connect(CHAT_DB_FILE)
+        rows = conn.execute("""
+            SELECT event_type, occurred_at, username, display_name, details_json
+            FROM member_history_events
+            WHERE guild_id = ? AND member_id = ?
+            ORDER BY occurred_at DESC
+            LIMIT ?
+        """, (str(guild_id), str(member_id), limit)).fetchall()
+        conn.close()
+        events = []
+        for event_type, occurred_at, username, display_name, details_json in rows:
+            try:
+                details = json.loads(details_json or "{}")
+            except:
+                details = {}
+            events.append({
+                "event_type": event_type,
+                "occurred_at": occurred_at,
+                "username": username,
+                "display_name": display_name,
+                "details": details,
+            })
+        return events
+    except Exception as e:
+        print(f"[Members] Could not load history: {e}")
+        return []
+
+def get_member_record(guild_id, member_id):
+    try:
+        conn = sqlite3.connect(CHAT_DB_FILE)
+        row = conn.execute("""
+            SELECT guild_id, member_id, username, display_name, avatar_url,
+                   account_created_at, first_seen_at, joined_at, last_seen_at,
+                   left_at, is_present, is_bot, role_names_json, message_count
+            FROM member_directory
+            WHERE guild_id = ? AND member_id = ?
+        """, (str(guild_id), str(member_id))).fetchone()
+        conn.close()
+        if not row:
+            return None
+        record = dict(zip((
+            "guild_id", "member_id", "username", "display_name", "avatar_url",
+            "account_created_at", "first_seen_at", "joined_at", "last_seen_at",
+            "left_at", "is_present", "is_bot", "role_names_json", "message_count",
+        ), row))
+        record["role_names"] = json.loads(record.pop("role_names_json") or "[]")
+        return record
+    except Exception as e:
+        print(f"[Members] Could not load member record: {e}")
+        return None
+
+def _discord_time(value):
+    if not value:
+        return "Unknown"
+    return f"<t:{int(value)}:f>"
+
+def _member_membership_summary(guild_id, member_id, record):
+    events = list(reversed(get_member_history_events(guild_id, member_id, limit=50)))
+    periods = []
+    started = None
+    for event in events:
+        if event["event_type"] in ("join", "rejoin", "initial_seen"):
+            started = event["occurred_at"]
+        elif event["event_type"] == "leave" and started:
+            periods.append(f"{_discord_time(started)} → {_discord_time(event['occurred_at'])}")
+            started = None
+    if started:
+        periods.append(f"{_discord_time(started)} → present")
+    if not periods and record.get("joined_at"):
+        periods.append(f"{_discord_time(record['joined_at'])} → {'present' if record['is_present'] else _discord_time(record.get('left_at'))}")
+    return periods[-4:] or ["No membership event history yet."]
+
+MEMBER_LOG_CHANNELS_FILE = _data_path("member_log_channels.json")
+
+def load_member_log_channels():
+    try:
+        if os.path.exists(MEMBER_LOG_CHANNELS_FILE):
+            with open(MEMBER_LOG_CHANNELS_FILE, "r") as f:
+                data = json.load(f)
+            return data if isinstance(data, dict) else {}
+    except:
+        pass
+    return {}
+
+def save_member_log_channels():
+    _atomic_json_write(MEMBER_LOG_CHANNELS_FILE, member_log_channels)
+
+member_log_channels = load_member_log_channels()
+
+def build_member_departure_embed(guild_name, record):
+    display_name = record.get("display_name") or record.get("username") or "Unknown member"
+    embed = discord.Embed(
+        title="Member Departed",
+        description=f"**{display_name}** has left **{guild_name}**.",
+        color=discord.Color.from_rgb(18, 18, 18),
+    )
+    if record.get("avatar_url"):
+        embed.set_thumbnail(url=record["avatar_url"])
+    status = "Bot" if record.get("is_bot") else "Member"
+    roles = record.get("role_names") or []
+    roles_text = ", ".join(roles[:8]) if roles else "No roles recorded"
+    if len(roles) > 8:
+        roles_text += f" +{len(roles) - 8} more"
+    embed.add_field(name="Status", value=f"{status} · no longer in server", inline=True)
+    embed.add_field(name="Member ID", value=f"`{record.get('member_id', 'unknown')}`", inline=True)
+    embed.add_field(name="Joined", value=_discord_time(record.get("joined_at")), inline=True)
+    embed.add_field(name="Membership", value="\n".join(
+        _member_membership_summary(record["guild_id"], record["member_id"], record)
+    ), inline=False)
+    embed.add_field(name="Tracked messages", value=f"`{record.get('message_count', 0):,}`", inline=True)
+    embed.add_field(name="Last known roles", value=roles_text[:1024], inline=False)
+    embed.set_footer(text=f"Member history · Grim · departure reason not provided by Discord")
+    return embed
+
+async def send_member_departure_notification(member):
+    guild_id = str(member.guild.id)
+    channel_id = member_log_channels.get(guild_id)
+    if not channel_id:
+        return
+    record = await asyncio.to_thread(get_member_record, guild_id, member.id)
+    if not record:
+        print(f"[Members] No record available for departed member {member.id} in guild {guild_id}")
+        return
+    try:
+        channel = bot.get_channel(int(channel_id)) or await bot.fetch_channel(int(channel_id))
+        if not channel:
+            print(f"[Members] Staff log channel {channel_id} not found in guild {guild_id}")
+            return
+        await channel.send(embed=build_member_departure_embed(member.guild.name, record))
+        print(f"[Members] Posted departure notification for {member.id} in channel {channel_id}")
+    except Exception as e:
+        print(f"[Members] Could not post departure notification for {member.id}: {e}")
 _COMMAND_RATE_LIMITS: dict[tuple[str, str, str], list[float]] = {}
 RATE_LIMIT_WINDOW_SECONDS = 60
 RATE_LIMIT_MAX_REQUESTS = 8
@@ -2938,6 +3305,229 @@ async def after_check_redditfeed():
     else:
         print("[RedditFeed] Task stopped unexpectedly, will restart on next health check")
 
+# ── Member directory UI ─────────────────────────────────────────────────────
+MEMBER_DIRECTORY_PAGE_SIZE = 20
+
+def _member_status_text(record):
+    return "In server" if record.get("is_present") else "Left server"
+
+def build_member_directory_embed(records, page, total_pages):
+    current_count = sum(1 for record in records if record.get("is_present"))
+    left_count = len(records) - current_count
+    embed = discord.Embed(
+        title="Member Directory",
+        description=(
+            f"**{current_count}** currently in server · **{left_count}** left\n"
+            "Select a member to open their history."
+        ),
+        color=discord.Color.from_rgb(18, 18, 18),
+    )
+    embed.add_field(
+        name="Directory",
+        value=f"Page `{page + 1}/{total_pages}` · `{len(records)}` tracked member(s)",
+        inline=False,
+    )
+    embed.set_footer(text="Staff view · member history · expires in 5 minutes")
+    return embed
+
+def build_member_profile_embed(guild_id, record):
+    display_name = record.get("display_name") or record.get("username") or "Unknown member"
+    embed = discord.Embed(
+        title=display_name[:256],
+        description=f"<@{record['member_id']}> · `{record['member_id']}`",
+        color=discord.Color.from_rgb(18, 18, 18),
+    )
+    if record.get("avatar_url"):
+        embed.set_thumbnail(url=record["avatar_url"])
+    embed.add_field(name="Status", value=_member_status_text(record), inline=True)
+    embed.add_field(name="Type", value="Bot" if record.get("is_bot") else "Member", inline=True)
+    embed.add_field(name="Username", value=f"`{record.get('username', 'Unknown')}`", inline=True)
+    embed.add_field(name="Account created", value=_discord_time(record.get("account_created_at")), inline=True)
+    embed.add_field(name="First tracked", value=_discord_time(record.get("first_seen_at")), inline=True)
+    embed.add_field(name="Joined server", value=_discord_time(record.get("joined_at")), inline=True)
+    embed.add_field(name="Last seen", value=_discord_time(record.get("last_seen_at")), inline=True)
+    if not record.get("is_present"):
+        embed.add_field(name="Left server", value=_discord_time(record.get("left_at")), inline=True)
+    embed.add_field(name="Tracked messages", value=f"`{record.get('message_count', 0):,}`", inline=True)
+    roles = record.get("role_names") or []
+    role_text = ", ".join(roles[:12]) if roles else "No roles recorded"
+    if len(roles) > 12:
+        role_text += f" +{len(roles) - 12} more"
+    embed.add_field(name="Current / last known roles", value=role_text[:1024], inline=False)
+    periods = _member_membership_summary(guild_id, record["member_id"], record)
+    embed.add_field(name="Membership periods", value="\n".join(periods)[:1024], inline=False)
+    events = get_member_history_events(guild_id, record["member_id"], limit=8)
+    if events:
+        event_lines = []
+        for event in events:
+            label = event["event_type"].replace("_", " ").title()
+            event_lines.append(f"**{label}** · <t:{int(event['occurred_at'])}:R>")
+        embed.add_field(name="Recent history", value="\n".join(event_lines)[:1024], inline=False)
+    else:
+        embed.add_field(name="Recent history", value="No lifecycle events recorded yet.", inline=False)
+    embed.set_footer(text="Staff view · member history · no message content shown")
+    return embed
+
+class MemberDirectorySelect(ui.Select):
+    def __init__(self, directory_view):
+        self.directory_view = directory_view
+        options = []
+        for record in directory_view.page_records():
+            display_name = record.get("display_name") or record.get("username") or "Unknown"
+            username = record.get("username") or "Unknown"
+            options.append(discord.SelectOption(
+                label=display_name[:100],
+                value=record["member_id"],
+                description=f"{_member_status_text(record)} · @{username}"[:100],
+            ))
+        super().__init__(
+            placeholder="Select a member to review...",
+            min_values=1,
+            max_values=1,
+            options=options,
+        )
+
+    async def callback(self, interaction):
+        await self.directory_view.show_profile(interaction, self.values[0])
+
+class MemberDirectoryPageButton(ui.Button):
+    def __init__(self, directory_view, direction):
+        self.directory_view = directory_view
+        self.direction = direction
+        super().__init__(
+            label="Previous" if direction < 0 else "Next",
+            style=discord.ButtonStyle.secondary,
+            disabled=(
+                directory_view.page == 0 if direction < 0
+                else directory_view.page >= directory_view.total_pages() - 1
+            ),
+        )
+
+    async def callback(self, interaction):
+        self.directory_view.page += self.direction
+        await self.directory_view.show_directory(interaction)
+
+class MemberDirectoryBackButton(ui.Button):
+    def __init__(self, directory_view):
+        self.directory_view = directory_view
+        super().__init__(label="Back to members", style=discord.ButtonStyle.secondary)
+
+    async def callback(self, interaction):
+        await self.directory_view.show_directory(interaction)
+
+class MemberDirectoryMemberButton(ui.Button):
+    def __init__(self, directory_view, direction):
+        self.directory_view = directory_view
+        self.direction = direction
+        selected_index = directory_view.selected_index()
+        super().__init__(
+            label="Previous member" if direction < 0 else "Next member",
+            style=discord.ButtonStyle.secondary,
+            disabled=(
+                selected_index <= 0 if direction < 0
+                else selected_index >= len(directory_view.records) - 1
+            ),
+        )
+
+    async def callback(self, interaction):
+        selected_index = self.directory_view.selected_index()
+        next_record = self.directory_view.records[selected_index + self.direction]
+        await self.directory_view.show_profile(interaction, next_record["member_id"])
+
+class MemberDirectoryCloseButton(ui.Button):
+    def __init__(self, directory_view):
+        self.directory_view = directory_view
+        super().__init__(label="Close", style=discord.ButtonStyle.danger)
+
+    async def callback(self, interaction):
+        self.directory_view.stop()
+        await interaction.response.edit_message(
+            content="Member directory closed.",
+            embed=None,
+            view=None,
+        )
+
+class MemberDirectoryView(ui.View):
+    def __init__(self, guild_id, actor_id, records):
+        super().__init__(timeout=300)
+        self.guild_id = str(guild_id)
+        self.actor_id = str(actor_id)
+        self.records = records
+        self.page = 0
+        self.selected_member_id = None
+        self.message = None
+        self.refresh_items()
+
+    def total_pages(self):
+        return max(1, (len(self.records) + MEMBER_DIRECTORY_PAGE_SIZE - 1) // MEMBER_DIRECTORY_PAGE_SIZE)
+
+    def page_records(self):
+        start = self.page * MEMBER_DIRECTORY_PAGE_SIZE
+        return self.records[start:start + MEMBER_DIRECTORY_PAGE_SIZE]
+
+    def selected_index(self):
+        return next(
+            (index for index, record in enumerate(self.records)
+             if record["member_id"] == self.selected_member_id),
+            0,
+        )
+
+    def refresh_items(self):
+        self.clear_items()
+        if self.selected_member_id:
+            self.add_item(MemberDirectoryBackButton(self))
+            self.add_item(MemberDirectoryMemberButton(self, -1))
+            self.add_item(MemberDirectoryMemberButton(self, 1))
+        else:
+            self.add_item(MemberDirectorySelect(self))
+            self.add_item(MemberDirectoryPageButton(self, -1))
+            self.add_item(MemberDirectoryPageButton(self, 1))
+        self.add_item(MemberDirectoryCloseButton(self))
+
+    async def interaction_check(self, interaction):
+        if str(interaction.user.id) != self.actor_id or str(interaction.guild_id) != self.guild_id:
+            await interaction.response.send_message(
+                "This staff member directory belongs to someone else.", ephemeral=True
+            )
+            return False
+        return True
+
+    async def show_directory(self, interaction):
+        self.records = get_member_directory_records(self.guild_id)
+        self.selected_member_id = None
+        self.page = min(self.page, self.total_pages() - 1)
+        self.refresh_items()
+        await interaction.response.edit_message(
+            embed=build_member_directory_embed(self.records, self.page, self.total_pages()),
+            view=self,
+        )
+
+    async def show_profile(self, interaction, member_id):
+        record = get_member_record(self.guild_id, member_id)
+        if not record:
+            await interaction.response.send_message(
+                "That member record is no longer available.", ephemeral=True
+            )
+            return
+        self.selected_member_id = str(member_id)
+        self.records = get_member_directory_records(self.guild_id)
+        self.refresh_items()
+        await interaction.response.edit_message(
+            embed=build_member_profile_embed(self.guild_id, record),
+            view=self,
+        )
+
+    async def on_timeout(self):
+        if self.message:
+            try:
+                await self.message.edit(
+                    content="Member directory expired. Run `/grim_members` again.",
+                    embed=None,
+                    view=None,
+                )
+            except:
+                pass
+
 @tasks.loop(seconds=30)
 async def check_remindme():
     global remindme_store
@@ -3319,6 +3909,8 @@ async def on_ready():
     print(f"Bot is in {len(bot.guilds)} server(s)")
     print(f"[Startup] Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S UTC')}")
     await sync_from_github()
+    member_snapshots = collect_member_snapshots(bot.guilds)
+    await asyncio.to_thread(sync_member_directory, member_snapshots)
     
     await bot.change_presence(activity=discord.Streaming(name="𝕹𝖎𝖍𝖎𝖑𝖎𝖘𝖙", url="https://www.twitch.tv/deathfy"))
     
@@ -5234,6 +5826,64 @@ async def grim_updates(interaction: discord.Interaction):
         embed.set_footer(text=f"Powered by {BOT_NAME} • {VERSION}")
     await interaction.followup.send(embed=embed)
 
+@bot.tree.command(name="grim_memberlog", description="Configure member departure notifications in this channel")
+@discord.app_commands.describe(enabled="Turn staff departure notifications on or off for this server")
+async def grim_memberlog(interaction: discord.Interaction, enabled: bool = True):
+    if not await require_permission(interaction, "manage_channels", "member_log_manage"):
+        return
+    guild_id = str(interaction.guild_id)
+    if enabled:
+        member_log_channels[guild_id] = str(interaction.channel_id)
+        save_member_log_channels()
+        record_security_event(
+            interaction, "member_log_manage", "enabled",
+            {"channel_id": str(interaction.channel_id)},
+        )
+        embed = discord.Embed(
+            title="Member Log Enabled",
+            description=(
+                f"Grim will post member departure cards in <#{interaction.channel_id}>."
+            ),
+            color=discord.Color.from_rgb(18, 18, 18),
+        )
+    else:
+        member_log_channels.pop(guild_id, None)
+        save_member_log_channels()
+        record_security_event(interaction, "member_log_manage", "disabled")
+        embed = discord.Embed(
+            title="Member Log Disabled",
+            description="Grim will no longer post member departure cards in this server.",
+            color=discord.Color.from_rgb(18, 18, 18),
+        )
+    embed.set_footer(text=f"Grim · {VERSION}")
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+@bot.tree.command(name="grim_members", description="Open the staff member history directory")
+async def grim_members(interaction: discord.Interaction):
+    if not await require_permission(interaction, "manage_channels", "member_directory_open"):
+        return
+    await interaction.response.defer(ephemeral=True)
+    member_snapshots = collect_member_snapshots([interaction.guild])
+    await asyncio.to_thread(sync_member_directory, member_snapshots)
+    records = await asyncio.to_thread(get_member_directory_records, interaction.guild_id)
+    if not records:
+        await interaction.followup.send(
+            "No member records are available yet. Grim will begin tracking from the next server sync.",
+            ephemeral=True,
+        )
+        return
+    view = MemberDirectoryView(interaction.guild_id, interaction.user.id, records)
+    view.message = await interaction.followup.send(
+        embed=build_member_directory_embed(records, 0, view.total_pages()),
+        view=view,
+        ephemeral=True,
+        wait=True,
+    )
+    record_security_event(
+        interaction, "member_directory_open", "success",
+        {"tracked_members": len(records)},
+    )
+
 @bot.tree.command(name="welcome_on", description="Enable welcome messages for new members in this channel")
 async def welcome_on(interaction: discord.Interaction):
     if not await require_permission(interaction, "manage_channels", "welcome_manage"):
@@ -5339,6 +5989,13 @@ async def vc_leave(interaction: discord.Interaction):
 @bot.event
 async def on_member_join(member):
     print(f"{member.name} has joined {member.guild.name}")
+    snapshot = _member_snapshot(member)
+    existing = await asyncio.to_thread(get_member_record, str(member.guild.id), member.id)
+    await asyncio.to_thread(
+        record_member_snapshot_data,
+        snapshot,
+        "rejoin" if existing and not existing.get("is_present") else "join",
+    )
     guild_id = str(member.guild.id)
     if guild_id not in welcome_channels:
         return
@@ -5354,6 +6011,36 @@ async def on_member_join(member):
     embed.set_thumbnail(url=avatar_url)
     embed.set_footer(text=f"Powered by {BOT_NAME} • {VERSION}")
     await channel.send(embed=embed)
+
+@bot.event
+async def on_member_remove(member):
+    print(f"{member.name} has left {member.guild.name}")
+    await asyncio.to_thread(
+        record_member_snapshot_data, _member_snapshot(member), "leave", present=False
+    )
+    await send_member_departure_notification(member)
+
+@bot.event
+async def on_member_update(before, after):
+    changes = []
+    if before.name != after.name:
+        changes.append("username")
+    if before.display_name != after.display_name:
+        changes.append("display_name")
+    before_roles = {role.id for role in getattr(before, "roles", [])}
+    after_roles = {role.id for role in getattr(after, "roles", [])}
+    if before_roles != after_roles:
+        changes.append("roles")
+    before_avatar = getattr(getattr(before, "display_avatar", None), "url", None)
+    after_avatar = getattr(getattr(after, "display_avatar", None), "url", None)
+    if before_avatar != after_avatar:
+        changes.append("avatar")
+    await asyncio.to_thread(
+        record_member_snapshot_data,
+        _member_snapshot(after),
+        "identity_update" if changes else None,
+        {"changes": changes} if changes else None,
+    )
 
 @bot.event
 async def on_message(message):
@@ -5378,6 +6065,12 @@ async def on_message(message):
             str(message.guild.id), str(message.channel.id),
             str(message.id), message.author.display_name,
             message.content, message.created_at.timestamp(), is_grim=False
+        )
+        await asyncio.to_thread(
+            increment_member_message_count,
+            message.guild.id,
+            message.author.id,
+            _member_snapshot(message.author),
         )
         # Update member profile if they've crossed a milestone
         gid  = str(message.guild.id)
@@ -5547,6 +6240,8 @@ async def help_grim(ctx):
     embed.add_field(name="/redditfeed_status", value="Reddit feed status", inline=True)
     embed.add_field(name="/grim_language", value="Language preference", inline=True)
     embed.add_field(name="/grim_translate", value="Translate text", inline=True)
+    embed.add_field(name="/grim_members", value="Staff member history", inline=True)
+    embed.add_field(name="/grim_memberlog", value="Staff leave notifications", inline=True)
     embed.set_footer(text=f"Grim · {VERSION}")
     await ctx.send(embed=embed)
 

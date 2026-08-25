@@ -9,7 +9,7 @@ contain credentials or recovery keys.
 | Role | What it can do |
 | --- | --- |
 | Regular member | Use normal conversation, language, reminder, and public utility commands. |
-| Moderator with the relevant Discord permission | Manage feeds, welcome messages, live updates, and voice actions when Discord grants the required permission. |
+| Moderator with the relevant Discord permission | Manage feeds, welcome messages, live updates, member history, departure logs, and voice actions when Discord grants the required permission. |
 | Server owner or Discord administrator | All moderator actions plus moderation word lists, server memories, and the GitHub diagnostic. |
 | Creator | Receives creator-aware conversational context, but does **not** bypass Discord permissions, platform rules, safety, or privacy boundaries. |
 
@@ -23,7 +23,8 @@ Never elevate someone solely because a display name resembles the creator.
    read/send messages, message history, embed links, delete messages only if
    moderation is enabled, and voice permissions only if voice use is approved.
 2. Have a server owner or administrator configure feeds, welcome messages,
-   updates, moderation words, and permanent memories.
+   updates, moderation words, permanent memories, and `/grim_memberlog` in the
+   intended private staff/mod channel.
 3. Verify each feed and schedule through its status command in the same server.
 4. Use `/grim_language` as a member-level preference; `Auto` restores
    message-language matching.
@@ -42,6 +43,11 @@ Never elevate someone solely because a display name resembles the creator.
 - Management actions and user-triggered external requests are rate limited.
   If a legitimate action is blocked, wait a minute; do not work around the
   limit by using alternate accounts or commands.
+- Use `/grim_members` only in staff contexts. It is an ephemeral, dismissible
+  view of member identity and lifecycle data, not a conversation archive.
+  Discord does not always provide a verified reason for departure, so treat a
+  leave card as a factual record that a member is no longer in the server—not
+  proof of a voluntary leave, kick, or ban.
 
 ## 4. Safe deployment
 
