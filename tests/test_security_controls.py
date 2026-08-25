@@ -314,6 +314,15 @@ class SecurityControlsTests(unittest.TestCase):
         preferences = main.get_guild_language_preferences("50")
         self.assertEqual(preferences, [("english", 2), ("spanish", 1)])
 
+        class FakeEmoji:
+            def __init__(self, name, emoji_id):
+                self.name = name
+                self.id = emoji_id
+                self.animated = True
+
+            def __str__(self):
+                return f"<a:{self.name}:{self.id}>"
+
         created = main.datetime(2023, 4, 18, 2, 43, tzinfo=main.timezone.utc)
         guild = SimpleNamespace(
             id=1101443658953261076,
@@ -333,7 +342,7 @@ class SecurityControlsTests(unittest.TestCase):
             roles=[object()] * 24,
             premium_subscription_count=3,
             preferred_locale="en-US",
-            emojis=["🕯️", "🦇", "☾"],
+            emojis=[FakeEmoji(f"emoji{i}", 151245000000000000 + i) for i in range(65)],
             icon=SimpleNamespace(url="https://cdn.example/icon.png"),
             banner=SimpleNamespace(url="https://cdn.example/banner.png"),
         )
@@ -342,17 +351,47 @@ class SecurityControlsTests(unittest.TestCase):
         )
         fields = {field.name: field for field in embed.fields}
 
-        self.assertEqual(embed.title, "⛧ 𝕾𝖊𝖈𝖑𝖚𝖉𝖊")
+        self.assertEqual(embed.title, "𖦏 𝕾𝖊𝖈𝖑𝖚𝖉𝖊")
         self.assertEqual(embed.author.name, "GRIM // SERVER DOSSIER")
         self.assertEqual(embed.thumbnail.url, "https://cdn.example/icon.png")
         self.assertEqual(embed.image.url, "https://cdn.example/banner.png")
-        self.assertFalse(fields["◇ Server ID"].inline)
-        self.assertEqual(fields["◇ Text Channels"].value, "`22`")
-        self.assertEqual(fields["◇ Voice Channels"].value, "`4`")
-        self.assertIn("English 🇺🇸 · `2`", fields["◇ Language Signal"].value)
-        self.assertIn("Spanish 🇪🇸 · `1`", fields["◇ Language Signal"].value)
-        self.assertEqual(fields["◇ Server Emblems · 3"].value, "🕯️ 🦇 ☾")
-        self.assertIn("PST", fields["◇ Established"].value)
+        self.assertEqual(
+            embed.description,
+            "A quiet place for the strange and unguarded.",
+        )
+        self.assertFalse(fields["✧ Server ID"].inline)
+        self.assertEqual(fields["✧ Text Channels"].value, "`22`")
+        self.assertEqual(fields["✧ Voice Channels"].value, "`4`")
+        self.assertIn("English 🇺🇸 · `2`", fields["✧ Language Signal"].value)
+        self.assertIn("Spanish 🇪🇸 · `1`", fields["✧ Language Signal"].value)
+        emblem_fields = [
+            field for field in embed.fields if field.name.startswith("✧ Server Emblems")
+        ]
+        self.assertEqual(len(emblem_fields), 2)
+        self.assertEqual(sum(len(field.value.split()) for field in emblem_fields), 65)
+        self.assertTrue(
+            all(
+                token.startswith("<a:") and token.endswith(">")
+                for field in emblem_fields
+                for token in field.value.split()
+            )
+        )
+        self.assertIn("PST", fields["✧ Established"].value)
+
+    def test_server_dossier_refreshes_a_missing_description(self):
+        class FakeBot:
+            async def fetch_guild(self, guild_id, with_counts=True):
+                return SimpleNamespace(description="Fetched from the server profile.")
+
+        original_bot = main.bot
+        main.bot = FakeBot()
+        try:
+            description = asyncio.run(
+                main.resolve_server_description(SimpleNamespace(id=50, description=None))
+            )
+        finally:
+            main.bot = original_bot
+        self.assertEqual(description, "Fetched from the server profile.")
 
     def test_member_directory_database_read_runs_off_the_interaction_loop(self):
         member = self.fake_member()

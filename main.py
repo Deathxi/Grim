@@ -4294,7 +4294,39 @@ def _server_creation_label(created_at) -> str:
         return "Unknown"
     return f"{created_at.astimezone(GRIM_TIMEZONE).strftime('%B %d, %Y · %I:%M %p')} {GRIM_TIMEZONE_LABEL}"
 
-def build_server_dossier_embed(guild, language_preferences=None, bot_latency=None):
+async def resolve_server_description(guild) -> str:
+    """Read the server description, refreshing the guild object when cache is incomplete."""
+    description = (getattr(guild, "description", None) or "").strip()
+    if description:
+        return description
+    try:
+        fetched_guild = await bot.fetch_guild(guild.id, with_counts=True)
+        description = (getattr(fetched_guild, "description", None) or "").strip()
+        if description:
+            return description
+    except Exception as error:
+        print(f"[Server Dossier] Could not refresh guild description for {guild.id}: {error}")
+    return ""
+
+def _server_emoji_tokens(guild) -> list[str]:
+    """Render complete Discord emoji tokens without allowing malformed truncation."""
+    tokens = []
+    for emoji in getattr(guild, "emojis", []) or []:
+        rendered = str(emoji)
+        emoji_id = getattr(emoji, "id", None)
+        emoji_name = getattr(emoji, "name", None)
+        if emoji_id and emoji_name and not (
+            rendered.startswith("<") and rendered.endswith(">")
+        ):
+            prefix = "a" if getattr(emoji, "animated", False) else ""
+            rendered = f"<{prefix}:{emoji_name}:{emoji_id}>"
+        if rendered:
+            tokens.append(rendered)
+    return tokens
+
+def build_server_dossier_embed(
+    guild, language_preferences=None, bot_latency=None, server_description=None
+):
     """Build Grim's privacy-aware server dossier from public guild metadata."""
     members = list(getattr(guild, "members", []) or [])
     member_count = getattr(guild, "member_count", None) or len(members)
@@ -4306,12 +4338,16 @@ def build_server_dossier_embed(guild, language_preferences=None, bot_latency=Non
     voice_channels = len(getattr(guild, "voice_channels", []) or [])
     role_count = max(0, len(getattr(guild, "roles", []) or []) - 1)
     boost_count = getattr(guild, "premium_subscription_count", 0) or 0
-    description = (getattr(guild, "description", None) or "").strip()
+    description = (
+        server_description
+        if server_description is not None
+        else (getattr(guild, "description", None) or "").strip()
+    )
     if not description:
         description = "*No description has been written. The archive remains quiet.*"
 
     embed = discord.Embed(
-        title=f"⛧ {guild.name}",
+        title=f"𖦏 {guild.name}",
         description=description[:4096],
         color=discord.Color.from_rgb(27, 26, 30),
     )
@@ -4323,21 +4359,21 @@ def build_server_dossier_embed(guild, language_preferences=None, bot_latency=Non
         embed.set_image(url=banner.url)
 
     embed.set_author(name="GRIM // SERVER DOSSIER")
-    embed.add_field(name="◇ Server ID", value=f"`{guild.id}`", inline=False)
-    embed.add_field(name="◇ Owner", value=_server_owner_label(guild), inline=True)
-    embed.add_field(name="◇ Verification", value=_server_verification_label(guild), inline=True)
+    embed.add_field(name="✧ Server ID", value=f"`{guild.id}`", inline=False)
+    embed.add_field(name="✧ Owner", value=_server_owner_label(guild), inline=True)
+    embed.add_field(name="✧ Verification", value=_server_verification_label(guild), inline=True)
     embed.add_field(
-        name="◇ Established",
+        name="✧ Established",
         value=_server_creation_label(getattr(guild, "created_at", None)),
         inline=True,
     )
-    embed.add_field(name="◇ Members", value=f"`{member_count:,}` total\n`{online_count:,}` online", inline=True)
-    embed.add_field(name="◇ Text Channels", value=f"`{text_channels:,}`", inline=True)
-    embed.add_field(name="◇ Voice Channels", value=f"`{voice_channels:,}`", inline=True)
-    embed.add_field(name="◇ Roles", value=f"`{role_count:,}`", inline=True)
-    embed.add_field(name="◇ Boosts", value=f"`{boost_count:,}`", inline=True)
+    embed.add_field(name="✧ Members", value=f"`{member_count:,}` total\n`{online_count:,}` online", inline=True)
+    embed.add_field(name="✧ Text Channels", value=f"`{text_channels:,}`", inline=True)
+    embed.add_field(name="✧ Voice Channels", value=f"`{voice_channels:,}`", inline=True)
+    embed.add_field(name="✧ Roles", value=f"`{role_count:,}`", inline=True)
+    embed.add_field(name="✧ Boosts", value=f"`{boost_count:,}`", inline=True)
     if bot_latency is not None:
-        embed.add_field(name="◇ Grim Link", value=f"`{bot_latency:,} ms`", inline=True)
+        embed.add_field(name="✧ Grim Link", value=f"`{bot_latency:,} ms`", inline=True)
 
     locale = str(getattr(guild, "preferred_locale", "") or "Not set").replace("-", " ")
     preferences = language_preferences or []
@@ -4349,20 +4385,34 @@ def build_server_dossier_embed(guild, language_preferences=None, bot_latency=Non
     else:
         language_lines = "No explicit preferences recorded — Grim matches the conversation."
     embed.add_field(
-        name="◇ Language Signal",
+        name="✧ Language Signal",
         value=f"Server locale · `{locale}`\n{language_lines}",
         inline=False,
     )
 
-    emoji_values = [str(emoji) for emoji in getattr(guild, "emojis", []) or []]
-    emoji_preview = " ".join(emoji_values[:40])
-    if len(emoji_values) > 40:
-        emoji_preview += f"\n+{len(emoji_values) - 40} more"
-    embed.add_field(
-        name=f"◇ Server Emblems · {len(emoji_values)}",
-        value=emoji_preview[:1024] or "No custom emblems recorded.",
-        inline=False,
-    )
+    emoji_values = _server_emoji_tokens(guild)
+    emoji_chunks = []
+    current_chunk = []
+    current_length = 0
+    for emoji_value in emoji_values:
+        added_length = len(emoji_value) + (1 if current_chunk else 0)
+        if current_chunk and current_length + added_length > 1024:
+            emoji_chunks.append(current_chunk)
+            current_chunk = []
+            current_length = 0
+        current_chunk.append(emoji_value)
+        current_length += len(emoji_value) + (1 if len(current_chunk) > 1 else 0)
+    if current_chunk:
+        emoji_chunks.append(current_chunk)
+    if not emoji_chunks:
+        emoji_chunks = [["No custom emblems recorded."]]
+    for chunk_index, chunk in enumerate(emoji_chunks, start=1):
+        suffix = f" · {chunk_index}/{len(emoji_chunks)}" if len(emoji_chunks) > 1 else ""
+        embed.add_field(
+            name=f"✧ Server Emblems · {len(emoji_values)}{suffix}",
+            value=" ".join(chunk),
+            inline=False,
+        )
     embed.set_footer(text=f"Grim · server dossier · {get_current_version()}")
     return embed
 
@@ -4373,11 +4423,13 @@ async def server_info(interaction: discord.Interaction):
         await interaction.response.send_message("This command can only be used in a server!", ephemeral=True)
         return
     await interaction.response.defer()
+    server_description = await resolve_server_description(guild)
     language_preferences = await asyncio.to_thread(get_guild_language_preferences, guild.id)
     embed = build_server_dossier_embed(
         guild,
         language_preferences=language_preferences,
         bot_latency=round(bot.latency * 1000),
+        server_description=server_description,
     )
     await interaction.followup.send(embed=embed)
 
@@ -6395,11 +6447,13 @@ async def server_info_prefix(ctx):
     if not ctx.guild:
         await ctx.send("This command can only be used in a server!")
         return
+    server_description = await resolve_server_description(ctx.guild)
     language_preferences = await asyncio.to_thread(get_guild_language_preferences, ctx.guild.id)
     embed = build_server_dossier_embed(
         ctx.guild,
         language_preferences=language_preferences,
         bot_latency=round(bot.latency * 1000),
+        server_description=server_description,
     )
     await ctx.send(embed=embed)
 
