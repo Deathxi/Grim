@@ -307,7 +307,7 @@ class SecurityControlsTests(unittest.TestCase):
         self.assertIn("server", prefix_names)
         self.assertNotIn("info", prefix_names)
 
-    def test_server_dossier_uses_grim_layout_and_aggregate_language_data(self):
+    def test_server_info_uses_grim_layout_and_aggregate_language_data(self):
         main.save_member_language_preference("50", "10", "english")
         main.save_member_language_preference("50", "11", "english")
         main.save_member_language_preference("50", "12", "spanish")
@@ -346,7 +346,7 @@ class SecurityControlsTests(unittest.TestCase):
             icon=SimpleNamespace(url="https://cdn.example/icon.png"),
             banner=SimpleNamespace(url="https://cdn.example/banner.png"),
         )
-        embed = main.build_server_dossier_embed(
+        embed = main.build_server_info_embed(
             guild, language_preferences=preferences, bot_latency=42
         )
         fields = {field.name: field for field in embed.fields}
@@ -355,9 +355,8 @@ class SecurityControlsTests(unittest.TestCase):
         self.assertNotIn("author", embed.to_dict())
         self.assertEqual(embed.thumbnail.url, "https://cdn.example/icon.png")
         self.assertEqual(embed.image.url, "https://cdn.example/banner.png")
-        self.assertEqual(
-            embed.description,
-            "A quiet place for the strange and unguarded.",
+        self.assertTrue(
+            embed.description.startswith("A quiet place for the strange and unguarded.")
         )
         self.assertFalse(fields["✧ Server ID"].inline)
         self.assertEqual(fields["✧ Text Channels"].value, "`22`")
@@ -365,19 +364,20 @@ class SecurityControlsTests(unittest.TestCase):
         self.assertEqual(fields["✧ Grim Ping"].value, "`42 ms`")
         self.assertIn("English 🇺🇸 · `2`", fields["✧ Language Signal"].value)
         self.assertIn("Spanish 🇪🇸 · `1`", fields["✧ Language Signal"].value)
-        emblem_fields = [
-            field for field in embed.fields if field.name.startswith("✧ Server Emblems")
+        self.assertIn("✧ Emojis · 65", embed.description)
+        self.assertNotIn("Server Emblems", embed.description)
+        emoji_tokens = [
+            token for token in embed.description.split() if token.startswith("<a:")
         ]
-        self.assertEqual(len(emblem_fields), 2)
-        self.assertEqual(sum(len(field.value.split()) for field in emblem_fields), 65)
+        self.assertEqual(len(emoji_tokens), 65)
         self.assertTrue(
             all(
                 token.startswith("<a:") and token.endswith(">")
-                for field in emblem_fields
-                for token in field.value.split()
+                for token in emoji_tokens
             )
         )
         self.assertIn("PST", fields["✧ Established"].value)
+        self.assertIn("server info", embed.footer.text)
 
     def test_server_dossier_refreshes_a_missing_description(self):
         class FakeBot:

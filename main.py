@@ -371,7 +371,7 @@ LANGUAGE_FLAGS = {
 }
 
 def format_language_preference(language_code: str) -> str:
-    """Return a compact, display-safe language label for the server dossier."""
+    """Return a compact, display-safe language label for server info."""
     normalized = normalize_language(language_code) or language_code
     flag = LANGUAGE_FLAGS.get(normalized, "")
     return f"{language_label(normalized)} {flag}".strip()
@@ -4324,10 +4324,10 @@ def _server_emoji_tokens(guild) -> list[str]:
             tokens.append(rendered)
     return tokens
 
-def build_server_dossier_embed(
+def build_server_info_embed(
     guild, language_preferences=None, bot_latency=None, server_description=None
 ):
-    """Build Grim's privacy-aware server dossier from public guild metadata."""
+    """Build Grim's privacy-aware server info card from public guild metadata."""
     members = list(getattr(guild, "members", []) or [])
     member_count = getattr(guild, "member_count", None) or len(members)
     online_count = sum(
@@ -4390,32 +4390,37 @@ def build_server_dossier_embed(
     )
 
     emoji_values = _server_emoji_tokens(guild)
-    emoji_chunks = []
-    current_chunk = []
-    current_length = 0
-    for emoji_value in emoji_values:
-        added_length = len(emoji_value) + (1 if current_chunk else 0)
-        if current_chunk and current_length + added_length > 1024:
-            emoji_chunks.append(current_chunk)
-            current_chunk = []
-            current_length = 0
-        current_chunk.append(emoji_value)
-        current_length += len(emoji_value) + (1 if len(current_chunk) > 1 else 0)
-    if current_chunk:
-        emoji_chunks.append(current_chunk)
-    if not emoji_chunks:
-        emoji_chunks = [["No custom emblems recorded."]]
-    for chunk_index, chunk in enumerate(emoji_chunks, start=1):
-        suffix = f" · {chunk_index}/{len(emoji_chunks)}" if len(emoji_chunks) > 1 else ""
-        embed.add_field(
-            name=f"✧ Server Emblems · {len(emoji_values)}{suffix}",
-            value=" ".join(chunk),
-            inline=False,
-        )
-    embed.set_footer(text=f"Grim · server dossier · {get_current_version()}")
+    emoji_preview = " ".join(emoji_values)
+    if not emoji_preview:
+        emoji_preview = "No custom emojis recorded."
+    emoji_block = f"\n\n**✧ Emojis · {len(emoji_values)}**\n{emoji_preview}"
+    description_limit = 4096
+    if len(embed.description or "") + len(emoji_block) <= description_limit:
+        embed.description = (embed.description or "") + emoji_block
+    else:
+        available = max(0, description_limit - len(embed.description or "") - len(
+            f"\n\n**✧ Emojis · {len(emoji_values)}**\n"
+        ))
+        compact_tokens = []
+        compact_length = 0
+        for emoji_value in emoji_values:
+            added_length = len(emoji_value) + (1 if compact_tokens else 0)
+            if compact_tokens and compact_length + added_length > available:
+                break
+            compact_tokens.append(emoji_value)
+            compact_length += added_length
+        remaining = len(emoji_values) - len(compact_tokens)
+        compact_preview = " ".join(compact_tokens)
+        if remaining:
+            compact_preview += f"\n+{remaining} more"
+        embed.description = (
+            (embed.description or "")
+            + f"\n\n**✧ Emojis · {len(emoji_values)}**\n{compact_preview}"
+        )[:description_limit]
+    embed.set_footer(text=f"Grim · server info · {get_current_version()}")
     return embed
 
-@bot.tree.command(name="server", description="View Grim's server dossier")
+@bot.tree.command(name="server", description="View Grim's server info")
 async def server_info(interaction: discord.Interaction):
     guild = interaction.guild
     if guild is None:
@@ -4424,7 +4429,7 @@ async def server_info(interaction: discord.Interaction):
     await interaction.response.defer()
     server_description = await resolve_server_description(guild)
     language_preferences = await asyncio.to_thread(get_guild_language_preferences, guild.id)
-    embed = build_server_dossier_embed(
+    embed = build_server_info_embed(
         guild,
         language_preferences=language_preferences,
         bot_latency=round(bot.latency * 1000),
@@ -6448,7 +6453,7 @@ async def server_info_prefix(ctx):
         return
     server_description = await resolve_server_description(ctx.guild)
     language_preferences = await asyncio.to_thread(get_guild_language_preferences, ctx.guild.id)
-    embed = build_server_dossier_embed(
+    embed = build_server_info_embed(
         ctx.guild,
         language_preferences=language_preferences,
         bot_latency=round(bot.latency * 1000),
