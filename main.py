@@ -893,12 +893,7 @@ def build_member_departure_embed(guild_name, record, membership_periods=None, te
     safe_username = discord.utils.escape_markdown(str(username))
     embed = discord.Embed(
         title=f"{guild_name} - Member Departed",
-        description=(
-            f"**{safe_display_name}** has left **{guild_name}**."
-            if not test_mode else
-            f"**TEST ONLY** — simulated departure card for **{safe_display_name}** "
-            f"in **{guild_name}**. No membership state was changed."
-        ),
+        description=f"**{safe_display_name}** has left **{guild_name}**.",
         color=discord.Color.from_rgb(18, 18, 18),
     )
     if record.get("avatar_url"):
@@ -909,7 +904,7 @@ def build_member_departure_embed(guild_name, record, membership_periods=None, te
     if len(roles) > 8:
         roles_text += f" +{len(roles) - 8} more"
     embed.add_field(name="Status", value=f"{status} · no longer in server", inline=True)
-    embed.add_field(name="Member ID", value=f"`{record.get('member_id', 'unknown')}`", inline=True)
+    embed.add_field(name="Member ID", value=f"`{record.get('member_id', 'unknown')}`", inline=False)
     embed.add_field(name="Joined", value=_discord_time(record.get("joined_at")), inline=True)
     embed.add_field(
         name="Identity",
@@ -923,11 +918,7 @@ def build_member_departure_embed(guild_name, record, membership_periods=None, te
     embed.add_field(name="Membership", value="\n".join(membership_periods), inline=False)
     embed.add_field(name="Tracked messages", value=f"`{record.get('message_count', 0):,}`", inline=True)
     embed.add_field(name="Last known roles", value=roles_text[:1024], inline=False)
-    embed.set_footer(text=(
-        "Member history · Grim · SIMULATION ONLY · no state changed"
-        if test_mode else
-        "Member history · Grim · departure reason not provided by Discord"
-    ))
+    embed.set_footer(text="Member history · Grim · departure reason not provided by Discord")
     return embed
 
 async def send_member_departure_notification(member):
@@ -1004,7 +995,7 @@ async def send_member_departure_test(guild):
         }
     left_at = time.time()
     membership_periods = [
-        f"{_discord_time(record.get('joined_at'))} → {_discord_time(left_at)} (simulated)"
+        f"{_discord_time(record.get('joined_at'))} → {_discord_time(left_at)}"
     ]
     await channel.send(embed=build_member_departure_embed(
         guild.name, record, membership_periods, test_mode=True

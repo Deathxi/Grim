@@ -315,12 +315,17 @@ class SecurityControlsTests(unittest.TestCase):
         embed = main.build_member_departure_embed(
             "Test Server",
             record,
-            ["<t:1:f> → <t:2:f> (simulated)"],
+            ["<t:1:f> → <t:2:f>"],
             test_mode=True,
         )
         self.assertEqual(embed.title, "Test Server - Member Departed")
-        self.assertIn("TEST ONLY", embed.description)
-        self.assertIn("SIMULATION ONLY", embed.footer.text)
+        self.assertNotIn("TEST", embed.description)
+        self.assertNotIn("SIMULATION", embed.description)
+        self.assertNotIn("TEST", embed.footer.text)
+        self.assertNotIn("SIMULATION", embed.footer.text)
+        self.assertNotIn("SIMULATED", json.dumps(embed.to_dict()).upper())
+        member_id_field = next(field for field in embed.fields if field.name == "Member ID")
+        self.assertFalse(member_id_field.inline)
         self.assertEqual(main.get_member_history_events("50", "10"), before_events)
         styled_embed = main.build_member_departure_embed(
             "𝕾𝖊𝖈𝖑𝖚𝖉𝖊", record, test_mode=True
