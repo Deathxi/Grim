@@ -13,7 +13,7 @@ Version 2.0 begins Grim's security-first operations phase.
 - Server-scoped moderation controls, shared authorization checks, redacted security audit events, and abuse limits.
 - Atomic runtime-state writes and the `OPERATIONS_SECURITY.md` operations and incident-response SOP.
 - Staff-only member history directory with stable Discord-ID tracking, join/leave/rejoin and identity events, compact profile review, and configurable staff-channel departure cards.
-- Renamed management commands to `/info-server`, `/info-members`, and `/memberlog ENABLE|DISABLE` for clearer server administration.
+- Renamed management commands to `/server`, `/members`, and `/memberlog ENABLE|DISABLE` for clearer server administration.
 
 ---
 
@@ -77,7 +77,7 @@ Version 2.0 begins Grim's security-first operations phase.
 
 ### Added
 - Initial bot setup for Seclude & Affiliates.
-- `/info-server` — Display server status and member information.
+- `/server` — Display server status and member information.
 - `/haiku` — Generate an AI-written inspirational haiku via xAI Grok.
 - `/meme` — Generate creative meme captions.
 - `/rizz` — Get AI-generated pickup lines.

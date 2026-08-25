@@ -3584,7 +3584,7 @@ class MemberDirectoryView(ui.View):
         if self.message:
             try:
                 await self.message.edit(
-                    content="Member directory expired. Run `/info-members` again.",
+                    content="Member directory expired. Run `/members` again.",
                     embed=None,
                     view=None,
                 )
@@ -4220,8 +4220,8 @@ async def post_update_notification():
         _save_last_announced_version(VERSION)
         print(f"[Updates] Saved last announced version as {VERSION}")
 
-@bot.tree.command(name="info-server", description="Get server status and info")
-async def info_server(interaction: discord.Interaction):
+@bot.tree.command(name="server", description="Get server status and info")
+async def server_info(interaction: discord.Interaction):
     guild = interaction.guild
     
     if guild is None:
@@ -5940,8 +5940,8 @@ async def memberlog(
     embed.set_footer(text=f"Grim · {VERSION}")
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
-@bot.tree.command(name="info-members", description="Open the staff member history directory")
-async def info_members(interaction: discord.Interaction):
+@bot.tree.command(name="members", description="Open the staff member history directory")
+async def members_info(interaction: discord.Interaction):
     if not await require_permission(interaction, "manage_channels", "member_directory_open"):
         return
     await interaction.response.defer(ephemeral=True)
@@ -6263,8 +6263,8 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
 async def ping(ctx):
     await ctx.send(f"Pong! Latency: {round(bot.latency * 1000)}ms")
 
-@bot.command(name="info-server")
-async def info_server_prefix(ctx):
+@bot.command(name="server")
+async def server_info_prefix(ctx):
     embed = discord.Embed(
         title="Grim",
         description="Seclude & Affiliates",
@@ -6302,7 +6302,7 @@ async def help_grim(ctx):
     embed.add_field(name="!ping", value="Latency", inline=True)
     embed.add_field(name="!info", value="Bot info", inline=True)
     embed.add_field(name="!haiku", value="Haiku", inline=True)
-    embed.add_field(name="/info-server", value="Server status", inline=True)
+    embed.add_field(name="/server", value="Server status", inline=True)
     embed.add_field(name="/howdie", value="Fate", inline=True)
     embed.add_field(name="/8ball", value="Ask", inline=True)
     embed.add_field(name="/truth", value="Unfiltered", inline=True)
@@ -6322,7 +6322,7 @@ async def help_grim(ctx):
     embed.add_field(name="/redditfeed_status", value="Reddit feed status", inline=True)
     embed.add_field(name="/grim_language", value="Language preference", inline=True)
     embed.add_field(name="/grim_translate", value="Translate text", inline=True)
-    embed.add_field(name="/info-members", value="Staff member history", inline=True)
+    embed.add_field(name="/members", value="Staff member history", inline=True)
     embed.add_field(name="/memberlog ENABLE/DISABLE", value="Staff leave notifications", inline=True)
     embed.set_footer(text=f"Grim · {VERSION}")
     await ctx.send(embed=embed)

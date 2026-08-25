@@ -44,7 +44,7 @@ Never elevate someone solely because a display name resembles the creator.
 - Management actions and user-triggered external requests are rate limited.
   If a legitimate action is blocked, wait a minute; do not work around the
   limit by using alternate accounts or commands.
-- Use `/info-members` only in staff contexts. It is an ephemeral, dismissible
+- Use `/members` only in staff contexts. It is an ephemeral, dismissible
   view of member identity and lifecycle data, not a conversation archive.
   Discord does not always provide a verified reason for departure, so treat a
   leave card as a factual record that a member is no longer in the server—not

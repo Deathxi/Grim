@@ -296,13 +296,15 @@ class SecurityControlsTests(unittest.TestCase):
     def test_management_commands_use_the_new_names(self):
         slash_names = {command.name for command in main.bot.tree.get_commands()}
         prefix_names = {command.name for command in main.bot.commands}
-        self.assertIn("info-server", slash_names)
-        self.assertIn("info-members", slash_names)
+        self.assertIn("server", slash_names)
+        self.assertIn("members", slash_names)
         self.assertIn("memberlog", slash_names)
         self.assertNotIn("info", slash_names)
+        self.assertNotIn("info-server", slash_names)
+        self.assertNotIn("info-members", slash_names)
         self.assertNotIn("grim_members", slash_names)
         self.assertNotIn("grim_memberlog", slash_names)
-        self.assertIn("info-server", prefix_names)
+        self.assertIn("server", prefix_names)
         self.assertNotIn("info", prefix_names)
 
     def test_member_directory_database_read_runs_off_the_interaction_loop(self):
