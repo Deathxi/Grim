@@ -49,6 +49,9 @@ Never elevate someone solely because a display name resembles the creator.
   Discord does not always provide a verified reason for departure, so treat a
   leave card as a factual record that a member is no longer in the server—not
   proof of a voluntary leave, kick, or ban.
+- Deathxi can use `/memberlog TEST` to post a visibly simulated departure card
+  for validation. The test does not write member history or change membership
+  state.
 
 ## 4. Safe deployment
 

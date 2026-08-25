@@ -307,6 +307,22 @@ class SecurityControlsTests(unittest.TestCase):
         self.assertIn("server", prefix_names)
         self.assertNotIn("info", prefix_names)
 
+    def test_member_log_test_card_is_marked_simulation_and_does_not_change_history(self):
+        member = self.fake_member()
+        main.record_member_snapshot(member, "join")
+        before_events = main.get_member_history_events("50", "10")
+        record = main.get_member_record("50", "10")
+        embed = main.build_member_departure_embed(
+            "Test Server",
+            record,
+            ["<t:1:f> → <t:2:f> (simulated)"],
+            test_mode=True,
+        )
+        self.assertEqual(embed.title, "Member Departed · TEST")
+        self.assertIn("TEST ONLY", embed.description)
+        self.assertIn("SIMULATION ONLY", embed.footer.text)
+        self.assertEqual(main.get_member_history_events("50", "10"), before_events)
+
     def test_member_directory_database_read_runs_off_the_interaction_loop(self):
         member = self.fake_member()
         main.record_member_snapshot(member, "join")

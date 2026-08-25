@@ -886,14 +886,19 @@ def is_private_member_log_channel(channel, guild):
     except Exception:
         return False
 
-def build_member_departure_embed(guild_name, record, membership_periods=None):
+def build_member_departure_embed(guild_name, record, membership_periods=None, test_mode=False):
     display_name = record.get("display_name") or record.get("username") or "Unknown member"
     username = record.get("username") or "Unknown username"
     safe_display_name = discord.utils.escape_markdown(str(display_name))
     safe_username = discord.utils.escape_markdown(str(username))
     embed = discord.Embed(
-        title="Member Departed",
-        description=f"**{safe_display_name}** has left **{guild_name}**.",
+        title="Member Departed · TEST" if test_mode else "Member Departed",
+        description=(
+            f"**{safe_display_name}** has left **{guild_name}**."
+            if not test_mode else
+            f"**TEST ONLY** — simulated departure card for **{safe_display_name}** "
+            f"in **{guild_name}**. No membership state was changed."
+        ),
         color=discord.Color.from_rgb(18, 18, 18),
     )
     if record.get("avatar_url"):
@@ -918,7 +923,11 @@ def build_member_departure_embed(guild_name, record, membership_periods=None):
     embed.add_field(name="Membership", value="\n".join(membership_periods), inline=False)
     embed.add_field(name="Tracked messages", value=f"`{record.get('message_count', 0):,}`", inline=True)
     embed.add_field(name="Last known roles", value=roles_text[:1024], inline=False)
-    embed.set_footer(text=f"Member history · Grim · departure reason not provided by Discord")
+    embed.set_footer(text=(
+        "Member history · Grim · SIMULATION ONLY · no state changed"
+        if test_mode else
+        "Member history · Grim · departure reason not provided by Discord"
+    ))
     return embed
 
 async def send_member_departure_notification(member):
@@ -956,6 +965,51 @@ async def send_member_departure_notification(member):
         print(f"[Members] Posted departure notification for {member.id} in channel {channel_id}")
     except Exception as e:
         print(f"[Members] Could not post departure notification for {member.id}: {e}")
+
+async def send_member_departure_test(guild):
+    """Post a clearly marked simulated card without changing member history."""
+    guild_id = str(guild.id)
+    channel_id = member_log_channels.get(guild_id)
+    if not channel_id:
+        raise RuntimeError("No private member-log channel is configured for this server.")
+    member = guild.get_member(CREATOR_DISCORD_ID)
+    if not member:
+        try:
+            member = await guild.fetch_member(CREATOR_DISCORD_ID)
+        except Exception:
+            member = None
+    if not member:
+        raise RuntimeError("Deathxi could not be found as a current server member.")
+    channel = bot.get_channel(int(channel_id))
+    if not channel:
+        channel = await bot.fetch_channel(int(channel_id))
+    if not channel:
+        raise RuntimeError("The configured member-log channel could not be found.")
+    if (
+        str(getattr(getattr(channel, "guild", None), "id", None)) != guild_id
+        or not is_private_member_log_channel(channel, guild)
+    ):
+        member_log_channels.pop(guild_id, None)
+        save_member_log_channels()
+        raise RuntimeError("The configured member-log channel is no longer private or belongs to another server.")
+    record = await asyncio.to_thread(get_member_record, guild_id, member.id)
+    if not record:
+        snapshot = _member_snapshot(member)
+        record = {
+            **snapshot,
+            "left_at": time.time(),
+            "is_present": 0,
+            "message_count": 0,
+            "role_names": json.loads(snapshot["role_names_json"]),
+        }
+    left_at = time.time()
+    membership_periods = [
+        f"{_discord_time(record.get('joined_at'))} → {_discord_time(left_at)} (simulated)"
+    ]
+    await channel.send(embed=build_member_departure_embed(
+        guild.name, record, membership_periods, test_mode=True
+    ))
+    return channel_id
 _COMMAND_RATE_LIMITS: dict[tuple[str, str, str], list[float]] = {}
 RATE_LIMIT_WINDOW_SECONDS = 60
 RATE_LIMIT_MAX_REQUESTS = 8
@@ -5890,10 +5944,11 @@ async def grim_updates(interaction: discord.Interaction):
     await interaction.followup.send(embed=embed)
 
 @bot.tree.command(name="memberlog", description="Configure member departure notifications")
-@discord.app_commands.describe(action="Enable or disable departure notifications in this private staff channel")
+@discord.app_commands.describe(action="Enable, disable, or safely test departure notifications")
 @discord.app_commands.choices(action=[
     discord.app_commands.Choice(name="ENABLE", value="enable"),
     discord.app_commands.Choice(name="DISABLE", value="disable"),
+    discord.app_commands.Choice(name="TEST", value="test"),
 ])
 async def memberlog(
     interaction: discord.Interaction,
@@ -5903,6 +5958,35 @@ async def memberlog(
         return
     guild_id = str(interaction.guild_id)
     enabled = action.value == "enable"
+    if action.value == "test":
+        if not is_creator(interaction.user.id):
+            record_security_event(interaction, "member_log_test", "denied")
+            await interaction.response.send_message(
+                "Only Deathxi can run the simulated member-log test.",
+                ephemeral=True,
+            )
+            return
+        await interaction.response.defer(ephemeral=True)
+        try:
+            channel_id = await send_member_departure_test(interaction.guild)
+            record_security_event(
+                interaction, "member_log_test", "success",
+                {"channel_id": str(channel_id)},
+            )
+            await interaction.followup.send(
+                f"Test card posted in <#{channel_id}>. No membership or leave history was changed.",
+                ephemeral=True,
+            )
+        except Exception as error:
+            record_security_event(
+                interaction, "member_log_test", "failed",
+                {"reason": type(error).__name__},
+            )
+            await interaction.followup.send(
+                f"Test card was not posted: {error}",
+                ephemeral=True,
+            )
+        return
     if enabled:
         if not is_private_member_log_channel(interaction.channel, interaction.guild):
             record_security_event(
@@ -6323,7 +6407,7 @@ async def help_grim(ctx):
     embed.add_field(name="/grim_language", value="Language preference", inline=True)
     embed.add_field(name="/grim_translate", value="Translate text", inline=True)
     embed.add_field(name="/members", value="Staff member history", inline=True)
-    embed.add_field(name="/memberlog ENABLE/DISABLE", value="Staff leave notifications", inline=True)
+    embed.add_field(name="/memberlog ENABLE/DISABLE/TEST", value="Staff leave notifications", inline=True)
     embed.set_footer(text=f"Grim · {VERSION}")
     await ctx.send(embed=embed)
 

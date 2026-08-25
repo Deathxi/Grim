@@ -14,6 +14,7 @@ Version 2.0 begins Grim's security-first operations phase.
 - Atomic runtime-state writes and the `OPERATIONS_SECURITY.md` operations and incident-response SOP.
 - Staff-only member history directory with stable Discord-ID tracking, join/leave/rejoin and identity events, compact profile review, and configurable staff-channel departure cards.
 - Renamed management commands to `/server`, `/members`, and `/memberlog ENABLE|DISABLE` for clearer server administration.
+- Added creator-only `/memberlog TEST` for safely validating the private departure-card layout without changing member state.
 
 ---
 
