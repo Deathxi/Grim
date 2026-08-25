@@ -132,6 +132,11 @@ class SecurityControlsTests(unittest.TestCase):
             os.chdir(original_cwd)
             main.VERSION_COUNT_FILE = original_count_file
 
+    def test_grim_birthday_is_november_25(self):
+        self.assertTrue(main.is_grim_birthday(main.datetime(2026, 11, 25)))
+        self.assertFalse(main.is_grim_birthday(main.datetime(2026, 11, 24)))
+        self.assertFalse(main.is_grim_birthday(main.datetime(2026, 11, 26)))
+
     def test_moderation_words_are_server_scoped(self):
         main.set_guild_banned_words("one", ["alpha"])
         main.set_guild_banned_words("two", ["beta"])

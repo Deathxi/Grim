@@ -1082,6 +1082,33 @@ def save_updates_sha(data):
 updates_channels = load_updates_data()
 updates_sha = load_updates_sha()
 
+GRIM_BIRTHDAY_MONTH = 11
+GRIM_BIRTHDAY_DAY = 25
+GRIM_BIRTHDAY_MESSAGE = "Happy Birthday to me :)"
+GRIM_BIRTHDAY_TIMEZONE = timezone(timedelta(hours=-8))
+GRIM_BIRTHDAY_FILE = _data_path("grim_birthday_announcements.json")
+
+def load_grim_birthday_announcements():
+    try:
+        if os.path.exists(GRIM_BIRTHDAY_FILE):
+            with open(GRIM_BIRTHDAY_FILE, "r") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                return data
+    except:
+        pass
+    return {}
+
+def save_grim_birthday_announcements(data):
+    _atomic_json_write(GRIM_BIRTHDAY_FILE, data)
+
+def is_grim_birthday(now=None):
+    """Use the creator's Pacific calendar date for Grim's November 25 birthday."""
+    current = now or datetime.now(GRIM_BIRTHDAY_TIMEZONE)
+    return current.month == GRIM_BIRTHDAY_MONTH and current.day == GRIM_BIRTHDAY_DAY
+
+grim_birthday_announcements = load_grim_birthday_announcements()
+
 def is_url(text):
     return text.strip().startswith(("http://", "https://"))
 
@@ -3156,6 +3183,34 @@ async def after_synthesize():
     if synthesize_server_digest.failed():
         print("[Digest] Task stopped unexpectedly")
 
+@tasks.loop(minutes=1)
+async def check_grim_birthday():
+    """Post Grim's birthday message once per configured announcement channel."""
+    if not is_grim_birthday():
+        return
+
+    year = str(datetime.now(GRIM_BIRTHDAY_TIMEZONE).year)
+    sent_channels = set(grim_birthday_announcements.get(year, []))
+    if not updates_channels:
+        return
+
+    for guild_id, data in list(updates_channels.items()):
+        channel_id = str(data.get("channel_id", ""))
+        if not channel_id or channel_id in sent_channels:
+            continue
+        try:
+            channel = await bot.fetch_channel(int(channel_id))
+            if not channel:
+                print(f"[Birthday] Channel {channel_id} not found in guild {guild_id}")
+                continue
+            await channel.send(GRIM_BIRTHDAY_MESSAGE)
+            sent_channels.add(channel_id)
+            grim_birthday_announcements[year] = sorted(sent_channels)
+            save_grim_birthday_announcements(grim_birthday_announcements)
+            print(f"[Birthday] Posted Grim's birthday message in channel {channel_id}")
+        except Exception as e:
+            print(f"[Birthday] Could not post to channel {channel_id} in guild {guild_id}: {e}")
+
 async def sync_from_github():
     """Pull version.txt and updates_data.json from GitHub before startup — source of truth."""
     global updates_channels
@@ -3296,6 +3351,10 @@ async def on_ready():
     if not check_redditfeed.is_running():
         check_redditfeed.start()
         print("Started Reddit feed checker")
+
+    if not check_grim_birthday.is_running():
+        check_grim_birthday.start()
+        print("Started Grim birthday checker")
 
     # Re-establish VC session tracking for anyone already in a voice channel across a restart
     for guild in bot.guilds:
