@@ -307,36 +307,6 @@ class SecurityControlsTests(unittest.TestCase):
         self.assertIn("server", prefix_names)
         self.assertNotIn("info", prefix_names)
 
-    def test_member_log_test_card_is_marked_simulation_and_does_not_change_history(self):
-        member = self.fake_member()
-        main.record_member_snapshot(member, "join")
-        before_events = main.get_member_history_events("50", "10")
-        record = main.get_member_record("50", "10")
-        embed = main.build_member_departure_embed(
-            "Test Server",
-            record,
-            ["<t:1:f> → <t:2:f>"],
-            test_mode=True,
-        )
-        self.assertEqual(embed.title, "Test Server - Member Departed")
-        self.assertNotIn("TEST", embed.description)
-        self.assertNotIn("SIMULATION", embed.description)
-        self.assertNotIn("TEST", embed.footer.text)
-        self.assertNotIn("SIMULATION", embed.footer.text)
-        self.assertNotIn("SIMULATED", json.dumps(embed.to_dict()).upper())
-        member_id_field = next(field for field in embed.fields if field.name == "Member ID")
-        self.assertFalse(member_id_field.inline)
-        self.assertEqual(main.get_member_history_events("50", "10"), before_events)
-        styled_embed = main.build_member_departure_embed(
-            "𝕾𝖊𝖈𝖑𝖚𝖉𝖊", record, test_mode=True
-        )
-        self.assertEqual(styled_embed.title, "𝕾𝖊𝖈𝖑𝖚𝖉𝖊 - Member Departed")
-
-    def test_member_log_test_branch_uses_the_creator_identity_guard(self):
-        self.assertTrue(main.is_grim_creator(main.CREATOR_DISCORD_ID))
-        self.assertFalse(main.is_grim_creator("not-deathi"))
-        self.assertNotIn("is_creator", main.memberlog.callback.__code__.co_names)
-
     def test_member_directory_database_read_runs_off_the_interaction_loop(self):
         member = self.fake_member()
         main.record_member_snapshot(member, "join")

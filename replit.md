@@ -32,7 +32,7 @@ Grim is a Discord bot for Seclude & Affiliates. Built with Python and discord.py
 - `/welcome_on` - Enable new member welcome messages in the current channel
 - `/welcome_off` - Disable new member welcome messages
 - `/members` - Open the staff-only, dismissible member history directory
-- `/memberlog ENABLE|DISABLE|TEST` - Toggle or safely test departure notifications in the current private staff channel (TEST is creator-only and changes no member state)
+- `/memberlog ENABLE|DISABLE` - Toggle departure notifications in the current private staff channel (channels visible to `@everyone` are rejected)
 - `/grim_language [language]` - View or set your per-member reply language; choose Auto to match each message, or use common names such as Spanish, Romanian, German, Italian, Portuguese, Polish, Russian, Ukrainian, Greek, Japanese, Chinese, Korean, Arabic, or Hindi
 - `/grim_translate <language> <text>` - Translate text into any requested language using a common name or ISO language code
 - `/creator` - Meet the creator of Grim
