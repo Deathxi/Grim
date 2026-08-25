@@ -3584,7 +3584,7 @@ class MemberDirectoryView(ui.View):
         if self.message:
             try:
                 await self.message.edit(
-                    content="Member directory expired. Run `/grim_members` again.",
+                    content="Member directory expired. Run `/info-members` again.",
                     embed=None,
                     view=None,
                 )
@@ -4220,8 +4220,8 @@ async def post_update_notification():
         _save_last_announced_version(VERSION)
         print(f"[Updates] Saved last announced version as {VERSION}")
 
-@bot.tree.command(name="info", description="Get server status and info")
-async def info(interaction: discord.Interaction):
+@bot.tree.command(name="info-server", description="Get server status and info")
+async def info_server(interaction: discord.Interaction):
     guild = interaction.guild
     
     if guild is None:
@@ -5889,12 +5889,20 @@ async def grim_updates(interaction: discord.Interaction):
         embed.set_footer(text=f"Powered by {BOT_NAME} • {VERSION}")
     await interaction.followup.send(embed=embed)
 
-@bot.tree.command(name="grim_memberlog", description="Configure member departure notifications in this channel")
-@discord.app_commands.describe(enabled="Turn staff departure notifications on or off for this server")
-async def grim_memberlog(interaction: discord.Interaction, enabled: bool = True):
+@bot.tree.command(name="memberlog", description="Configure member departure notifications")
+@discord.app_commands.describe(action="Enable or disable departure notifications in this private staff channel")
+@discord.app_commands.choices(action=[
+    discord.app_commands.Choice(name="ENABLE", value="enable"),
+    discord.app_commands.Choice(name="DISABLE", value="disable"),
+])
+async def memberlog(
+    interaction: discord.Interaction,
+    action: discord.app_commands.Choice[str],
+):
     if not await require_permission(interaction, "manage_channels", "member_log_manage"):
         return
     guild_id = str(interaction.guild_id)
+    enabled = action.value == "enable"
     if enabled:
         if not is_private_member_log_channel(interaction.channel, interaction.guild):
             record_security_event(
@@ -5932,8 +5940,8 @@ async def grim_memberlog(interaction: discord.Interaction, enabled: bool = True)
     embed.set_footer(text=f"Grim · {VERSION}")
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
-@bot.tree.command(name="grim_members", description="Open the staff member history directory")
-async def grim_members(interaction: discord.Interaction):
+@bot.tree.command(name="info-members", description="Open the staff member history directory")
+async def info_members(interaction: discord.Interaction):
     if not await require_permission(interaction, "manage_channels", "member_directory_open"):
         return
     await interaction.response.defer(ephemeral=True)
@@ -6255,8 +6263,8 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
 async def ping(ctx):
     await ctx.send(f"Pong! Latency: {round(bot.latency * 1000)}ms")
 
-@bot.command(name="info")
-async def info(ctx):
+@bot.command(name="info-server")
+async def info_server_prefix(ctx):
     embed = discord.Embed(
         title="Grim",
         description="Seclude & Affiliates",
@@ -6294,7 +6302,7 @@ async def help_grim(ctx):
     embed.add_field(name="!ping", value="Latency", inline=True)
     embed.add_field(name="!info", value="Bot info", inline=True)
     embed.add_field(name="!haiku", value="Haiku", inline=True)
-    embed.add_field(name="/info", value="Server status", inline=True)
+    embed.add_field(name="/info-server", value="Server status", inline=True)
     embed.add_field(name="/howdie", value="Fate", inline=True)
     embed.add_field(name="/8ball", value="Ask", inline=True)
     embed.add_field(name="/truth", value="Unfiltered", inline=True)
@@ -6314,8 +6322,8 @@ async def help_grim(ctx):
     embed.add_field(name="/redditfeed_status", value="Reddit feed status", inline=True)
     embed.add_field(name="/grim_language", value="Language preference", inline=True)
     embed.add_field(name="/grim_translate", value="Translate text", inline=True)
-    embed.add_field(name="/grim_members", value="Staff member history", inline=True)
-    embed.add_field(name="/grim_memberlog", value="Staff leave notifications", inline=True)
+    embed.add_field(name="/info-members", value="Staff member history", inline=True)
+    embed.add_field(name="/memberlog ENABLE/DISABLE", value="Staff leave notifications", inline=True)
     embed.set_footer(text=f"Grim · {VERSION}")
     await ctx.send(embed=embed)
 

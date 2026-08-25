@@ -293,6 +293,18 @@ class SecurityControlsTests(unittest.TestCase):
         self.assertFalse(main.is_private_member_log_channel(public_channel, guild))
         self.assertTrue(main.is_private_member_log_channel(private_channel, guild))
 
+    def test_management_commands_use_the_new_names(self):
+        slash_names = {command.name for command in main.bot.tree.get_commands()}
+        prefix_names = {command.name for command in main.bot.commands}
+        self.assertIn("info-server", slash_names)
+        self.assertIn("info-members", slash_names)
+        self.assertIn("memberlog", slash_names)
+        self.assertNotIn("info", slash_names)
+        self.assertNotIn("grim_members", slash_names)
+        self.assertNotIn("grim_memberlog", slash_names)
+        self.assertIn("info-server", prefix_names)
+        self.assertNotIn("info", prefix_names)
+
     def test_member_directory_database_read_runs_off_the_interaction_loop(self):
         member = self.fake_member()
         main.record_member_snapshot(member, "join")
