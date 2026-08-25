@@ -892,7 +892,7 @@ def build_member_departure_embed(guild_name, record, membership_periods=None, te
     safe_display_name = discord.utils.escape_markdown(str(display_name))
     safe_username = discord.utils.escape_markdown(str(username))
     embed = discord.Embed(
-        title="Member Departed · TEST" if test_mode else "Member Departed",
+        title=f"{guild_name} - Member Departed",
         description=(
             f"**{safe_display_name}** has left **{guild_name}**."
             if not test_mode else

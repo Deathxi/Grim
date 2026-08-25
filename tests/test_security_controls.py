@@ -262,7 +262,7 @@ class SecurityControlsTests(unittest.TestCase):
         main.record_member_snapshot(member, "leave", present=False)
         record = main.get_member_record("50", "10")
         embed = main.build_member_departure_embed("Test Server", record)
-        self.assertEqual(embed.title, "Member Departed")
+        self.assertEqual(embed.title, "Test Server - Member Departed")
         self.assertIn("Noct", embed.description)
         self.assertIn("Test Server", embed.description)
         self.assertIn("departure reason not provided by Discord", embed.footer.text)
@@ -318,10 +318,14 @@ class SecurityControlsTests(unittest.TestCase):
             ["<t:1:f> → <t:2:f> (simulated)"],
             test_mode=True,
         )
-        self.assertEqual(embed.title, "Member Departed · TEST")
+        self.assertEqual(embed.title, "Test Server - Member Departed")
         self.assertIn("TEST ONLY", embed.description)
         self.assertIn("SIMULATION ONLY", embed.footer.text)
         self.assertEqual(main.get_member_history_events("50", "10"), before_events)
+        styled_embed = main.build_member_departure_embed(
+            "𝕾𝖊𝖈𝖑𝖚𝖉𝖊", record, test_mode=True
+        )
+        self.assertEqual(styled_embed.title, "𝕾𝖊𝖈𝖑𝖚𝖉𝖊 - Member Departed")
 
     def test_member_log_test_branch_uses_the_creator_identity_guard(self):
         self.assertTrue(main.is_grim_creator(main.CREATOR_DISCORD_ID))
