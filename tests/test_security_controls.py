@@ -114,6 +114,24 @@ class SecurityControlsTests(unittest.TestCase):
             main.MAIN_HASH_FILE = original_hash_file
             main.VERSION = original_version
 
+    def test_current_version_does_not_regress_to_an_old_repository_snapshot(self):
+        original_count_file = main.VERSION_COUNT_FILE
+        original_cwd = Path.cwd()
+        try:
+            count_file = Path(self.temp_dir.name) / "version_count.txt"
+            count_file.write_text("200")
+            main.VERSION_COUNT_FILE = str(count_file)
+            import os
+            os.chdir(self.temp_dir.name)
+            Path("version.txt").write_text("128")
+            self.assertEqual(main.get_current_version(), "V2.00")
+            count_file.write_text("245")
+            self.assertEqual(main.get_current_version(), "V2.45")
+        finally:
+            import os
+            os.chdir(original_cwd)
+            main.VERSION_COUNT_FILE = original_count_file
+
     def test_moderation_words_are_server_scoped(self):
         main.set_guild_banned_words("one", ["alpha"])
         main.set_guild_banned_words("two", ["beta"])

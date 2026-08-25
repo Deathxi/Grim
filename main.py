@@ -28,17 +28,25 @@ VERSION_BASELINE_COUNT = 200
 def _format_version(count):
     return f"V{count // 100}.{count % 100:02d}"
 
-def _load_version():
-    # Persistent file survives redeploys; fall back to project-root version.txt for first boot
+def _read_version_count():
+    """Read the persistent release counter without allowing old state to regress."""
     for path in [VERSION_COUNT_FILE, "version.txt"]:
         try:
             with open(path, "r") as f:
-                val = f.read().strip()
-                if val.isdigit():
-                    return _format_version(max(int(val), VERSION_BASELINE_COUNT))
+                value = f.read().strip()
+            if value.isdigit():
+                return max(int(value), VERSION_BASELINE_COUNT)
         except:
             pass
-    return _format_version(VERSION_BASELINE_COUNT)
+    return VERSION_BASELINE_COUNT
+
+def _load_version():
+    # Persistent file survives redeploys; fall back to project-root version.txt for first boot
+    return _format_version(_read_version_count())
+
+def get_current_version():
+    """Return the current persistent version for commands that must never go stale."""
+    return _format_version(_read_version_count())
 
 def _get_main_hash():
     try:
@@ -3209,11 +3217,29 @@ async def sync_from_github():
     # Reload updates_channels from the freshly pulled file
     updates_channels = load_updates_data()
     print(f"[Sync] updates_channels reloaded — {len(updates_channels)} guild(s) registered")
-    # Set VERSION directly from the synced file so it's correct before _bump_version runs
+    # Reconcile the synced file with persistent state without ever downgrading
+    # after a reconnect or a deployment from an older repository snapshot.
     global VERSION
     try:
         with open("version.txt", "r") as f:
-            VERSION = _format_version(int(f.read().strip()))
+            github_count = int(f.read().strip())
+        persistent_count = 0
+        if os.path.exists(VERSION_COUNT_FILE):
+            try:
+                with open(VERSION_COUNT_FILE, "r") as f:
+                    persistent_count = int(f.read().strip())
+            except:
+                pass
+        current_count = max(
+            github_count, persistent_count, VERSION_BASELINE_COUNT
+        )
+        if current_count != persistent_count:
+            os.makedirs(os.path.dirname(VERSION_COUNT_FILE), exist_ok=True)
+            with open(VERSION_COUNT_FILE, "w") as f:
+                f.write(str(current_count))
+        with open("version.txt", "w") as f:
+            f.write(str(current_count))
+        VERSION = _format_version(current_count)
         print(f"[Sync] VERSION pre-set to {VERSION}")
     except Exception as e:
         print(f"[Sync] Could not pre-set VERSION: {e}")
@@ -3498,7 +3524,7 @@ async def info(interaction: discord.Interaction):
     embed.add_field(name="Roles", value=f"```{len(guild.roles)}```", inline=True)
     embed.add_field(name="Boosts", value=f"```{guild.premium_subscription_count}```", inline=True)
     
-    embed.set_footer(text=f"{interaction.user.name} · {VERSION}")
+    embed.set_footer(text=f"{interaction.user.name} · {get_current_version()}")
     
     await interaction.response.send_message(embed=embed)
 
