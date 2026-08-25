@@ -2,6 +2,8 @@ import asyncio
 import json
 import sqlite3
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -269,6 +271,53 @@ class SecurityControlsTests(unittest.TestCase):
         labels = [getattr(child, "label", None) for child in view.children]
         self.assertIn("Back to members", labels)
         self.assertIn("Next member", labels)
+
+    def test_member_departure_log_channel_must_be_private(self):
+        default_role = object()
+        guild = SimpleNamespace(default_role=default_role)
+        public_channel = SimpleNamespace(
+            permissions_for=lambda role: SimpleNamespace(view_channel=True)
+        )
+        private_channel = SimpleNamespace(
+            permissions_for=lambda role: SimpleNamespace(view_channel=False)
+        )
+        self.assertFalse(main.is_private_member_log_channel(public_channel, guild))
+        self.assertTrue(main.is_private_member_log_channel(private_channel, guild))
+
+    def test_member_directory_database_read_runs_off_the_interaction_loop(self):
+        member = self.fake_member()
+        main.record_member_snapshot(member, "join")
+        record = main.get_member_record("50", "10")
+        original_loader = main.get_member_directory_records
+        worker_threads = []
+
+        def delayed_loader(guild_id):
+            worker_threads.append(threading.get_ident())
+            time.sleep(0.01)
+            return original_loader(guild_id)
+
+        class DeferredInteraction:
+            def __init__(self):
+                self.edits = []
+
+            async def edit_original_response(self, **kwargs):
+                self.edits.append(kwargs)
+
+        async def show_directory_with_delayed_read():
+            view = main.MemberDirectoryView("50", "99", [record])
+            interaction = DeferredInteraction()
+            main.get_member_directory_records = delayed_loader
+            try:
+                event_loop_thread = threading.get_ident()
+                await view.show_directory(interaction)
+            finally:
+                main.get_member_directory_records = original_loader
+            return event_loop_thread, interaction.edits
+
+        event_loop_thread, edits = asyncio.run(show_directory_with_delayed_read())
+        self.assertTrue(worker_threads)
+        self.assertNotEqual(worker_threads[0], event_loop_thread)
+        self.assertTrue(edits)
 
 
 if __name__ == "__main__":

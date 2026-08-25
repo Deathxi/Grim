@@ -24,7 +24,8 @@ Never elevate someone solely because a display name resembles the creator.
    moderation is enabled, and voice permissions only if voice use is approved.
 2. Have a server owner or administrator configure feeds, welcome messages,
    updates, moderation words, permanent memories, and `/grim_memberlog` in the
-   intended private staff/mod channel.
+   intended private staff/mod channel. Grim will reject a departure-log channel
+   visible to `@everyone`.
 3. Verify each feed and schedule through its status command in the same server.
 4. Use `/grim_language` as a member-level preference; `Auto` restores
    message-language matching.

@@ -829,7 +829,12 @@ def _discord_time(value):
     return f"<t:{int(value)}:f>"
 
 def _member_membership_summary(guild_id, member_id, record):
-    events = list(reversed(get_member_history_events(guild_id, member_id, limit=50)))
+    return _member_membership_summary_from_events(
+        get_member_history_events(guild_id, member_id, limit=50), record
+    )
+
+def _member_membership_summary_from_events(events, record):
+    events = list(reversed(events))
     periods = []
     started = None
     for event in events:
@@ -843,6 +848,19 @@ def _member_membership_summary(guild_id, member_id, record):
     if not periods and record.get("joined_at"):
         periods.append(f"{_discord_time(record['joined_at'])} → {'present' if record['is_present'] else _discord_time(record.get('left_at'))}")
     return periods[-4:] or ["No membership event history yet."]
+
+def get_member_profile_detail(guild_id, member_id):
+    """Load all database inputs for one directory profile off the Discord event loop."""
+    record = get_member_record(guild_id, member_id)
+    if not record:
+        return None
+    events = get_member_history_events(guild_id, member_id, limit=8)
+    all_events = get_member_history_events(guild_id, member_id, limit=50)
+    return {
+        "record": record,
+        "events": events,
+        "membership_periods": _member_membership_summary_from_events(all_events, record),
+    }
 
 MEMBER_LOG_CHANNELS_FILE = _data_path("member_log_channels.json")
 
@@ -861,7 +879,14 @@ def save_member_log_channels():
 
 member_log_channels = load_member_log_channels()
 
-def build_member_departure_embed(guild_name, record):
+def is_private_member_log_channel(channel, guild):
+    """Departure cards may only target a channel hidden from the guild default role."""
+    try:
+        return not channel.permissions_for(guild.default_role).view_channel
+    except Exception:
+        return False
+
+def build_member_departure_embed(guild_name, record, membership_periods=None):
     display_name = record.get("display_name") or record.get("username") or "Unknown member"
     embed = discord.Embed(
         title="Member Departed",
@@ -878,9 +903,11 @@ def build_member_departure_embed(guild_name, record):
     embed.add_field(name="Status", value=f"{status} · no longer in server", inline=True)
     embed.add_field(name="Member ID", value=f"`{record.get('member_id', 'unknown')}`", inline=True)
     embed.add_field(name="Joined", value=_discord_time(record.get("joined_at")), inline=True)
-    embed.add_field(name="Membership", value="\n".join(
-        _member_membership_summary(record["guild_id"], record["member_id"], record)
-    ), inline=False)
+    membership_periods = membership_periods or [
+        f"{_discord_time(record.get('joined_at'))} → "
+        f"{'present' if record.get('is_present') else _discord_time(record.get('left_at'))}"
+    ]
+    embed.add_field(name="Membership", value="\n".join(membership_periods), inline=False)
     embed.add_field(name="Tracked messages", value=f"`{record.get('message_count', 0):,}`", inline=True)
     embed.add_field(name="Last known roles", value=roles_text[:1024], inline=False)
     embed.set_footer(text=f"Member history · Grim · departure reason not provided by Discord")
@@ -900,7 +927,12 @@ async def send_member_departure_notification(member):
         if not channel:
             print(f"[Members] Staff log channel {channel_id} not found in guild {guild_id}")
             return
-        await channel.send(embed=build_member_departure_embed(member.guild.name, record))
+        membership_periods = await asyncio.to_thread(
+            _member_membership_summary, guild_id, member.id, record
+        )
+        await channel.send(embed=build_member_departure_embed(
+            member.guild.name, record, membership_periods
+        ))
         print(f"[Members] Posted departure notification for {member.id} in channel {channel_id}")
     except Exception as e:
         print(f"[Members] Could not post departure notification for {member.id}: {e}")
@@ -3330,7 +3362,7 @@ def build_member_directory_embed(records, page, total_pages):
     embed.set_footer(text="Staff view · member history · expires in 5 minutes")
     return embed
 
-def build_member_profile_embed(guild_id, record):
+def build_member_profile_embed(record, events, membership_periods):
     display_name = record.get("display_name") or record.get("username") or "Unknown member"
     embed = discord.Embed(
         title=display_name[:256],
@@ -3354,9 +3386,11 @@ def build_member_profile_embed(guild_id, record):
     if len(roles) > 12:
         role_text += f" +{len(roles) - 12} more"
     embed.add_field(name="Current / last known roles", value=role_text[:1024], inline=False)
-    periods = _member_membership_summary(guild_id, record["member_id"], record)
-    embed.add_field(name="Membership periods", value="\n".join(periods)[:1024], inline=False)
-    events = get_member_history_events(guild_id, record["member_id"], limit=8)
+    embed.add_field(
+        name="Membership periods",
+        value="\n".join(membership_periods)[:1024],
+        inline=False,
+    )
     if events:
         event_lines = []
         for event in events:
@@ -3388,6 +3422,7 @@ class MemberDirectorySelect(ui.Select):
         )
 
     async def callback(self, interaction):
+        await interaction.response.defer()
         await self.directory_view.show_profile(interaction, self.values[0])
 
 class MemberDirectoryPageButton(ui.Button):
@@ -3404,6 +3439,7 @@ class MemberDirectoryPageButton(ui.Button):
         )
 
     async def callback(self, interaction):
+        await interaction.response.defer()
         self.directory_view.page += self.direction
         await self.directory_view.show_directory(interaction)
 
@@ -3413,6 +3449,7 @@ class MemberDirectoryBackButton(ui.Button):
         super().__init__(label="Back to members", style=discord.ButtonStyle.secondary)
 
     async def callback(self, interaction):
+        await interaction.response.defer()
         await self.directory_view.show_directory(interaction)
 
 class MemberDirectoryMemberButton(ui.Button):
@@ -3430,6 +3467,7 @@ class MemberDirectoryMemberButton(ui.Button):
         )
 
     async def callback(self, interaction):
+        await interaction.response.defer()
         selected_index = self.directory_view.selected_index()
         next_record = self.directory_view.records[selected_index + self.direction]
         await self.directory_view.show_profile(interaction, next_record["member_id"])
@@ -3440,8 +3478,9 @@ class MemberDirectoryCloseButton(ui.Button):
         super().__init__(label="Close", style=discord.ButtonStyle.danger)
 
     async def callback(self, interaction):
+        await interaction.response.defer()
         self.directory_view.stop()
-        await interaction.response.edit_message(
+        await interaction.edit_original_response(
             content="Member directory closed.",
             embed=None,
             view=None,
@@ -3493,27 +3532,31 @@ class MemberDirectoryView(ui.View):
         return True
 
     async def show_directory(self, interaction):
-        self.records = get_member_directory_records(self.guild_id)
+        self.records = await asyncio.to_thread(get_member_directory_records, self.guild_id)
         self.selected_member_id = None
         self.page = min(self.page, self.total_pages() - 1)
         self.refresh_items()
-        await interaction.response.edit_message(
+        await interaction.edit_original_response(
             embed=build_member_directory_embed(self.records, self.page, self.total_pages()),
             view=self,
         )
 
     async def show_profile(self, interaction, member_id):
-        record = get_member_record(self.guild_id, member_id)
-        if not record:
-            await interaction.response.send_message(
-                "That member record is no longer available.", ephemeral=True
+        detail = await asyncio.to_thread(get_member_profile_detail, self.guild_id, member_id)
+        if not detail:
+            await interaction.edit_original_response(
+                content="That member record is no longer available.",
+                embed=None,
+                view=None,
             )
             return
         self.selected_member_id = str(member_id)
-        self.records = get_member_directory_records(self.guild_id)
+        self.records = await asyncio.to_thread(get_member_directory_records, self.guild_id)
         self.refresh_items()
-        await interaction.response.edit_message(
-            embed=build_member_profile_embed(self.guild_id, record),
+        await interaction.edit_original_response(
+            embed=build_member_profile_embed(
+                detail["record"], detail["events"], detail["membership_periods"]
+            ),
             view=self,
         )
 
@@ -5833,6 +5876,17 @@ async def grim_memberlog(interaction: discord.Interaction, enabled: bool = True)
         return
     guild_id = str(interaction.guild_id)
     if enabled:
+        if not is_private_member_log_channel(interaction.channel, interaction.guild):
+            record_security_event(
+                interaction, "member_log_manage", "denied_public_channel",
+                {"channel_id": str(interaction.channel_id)},
+            )
+            await interaction.response.send_message(
+                "Member departure logs can only be enabled in a private staff channel "
+                "that is hidden from `@everyone`.",
+                ephemeral=True,
+            )
+            return
         member_log_channels[guild_id] = str(interaction.channel_id)
         save_member_log_channels()
         record_security_event(
