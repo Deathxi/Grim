@@ -323,6 +323,11 @@ class SecurityControlsTests(unittest.TestCase):
         self.assertIn("SIMULATION ONLY", embed.footer.text)
         self.assertEqual(main.get_member_history_events("50", "10"), before_events)
 
+    def test_member_log_test_branch_uses_the_creator_identity_guard(self):
+        self.assertTrue(main.is_grim_creator(main.CREATOR_DISCORD_ID))
+        self.assertFalse(main.is_grim_creator("not-deathi"))
+        self.assertNotIn("is_creator", main.memberlog.callback.__code__.co_names)
+
     def test_member_directory_database_read_runs_off_the_interaction_loop(self):
         member = self.fake_member()
         main.record_member_snapshot(member, "join")

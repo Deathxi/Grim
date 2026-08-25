@@ -5959,7 +5959,7 @@ async def memberlog(
     guild_id = str(interaction.guild_id)
     enabled = action.value == "enable"
     if action.value == "test":
-        if not is_creator(interaction.user.id):
+        if not is_grim_creator(interaction.user.id):
             record_security_event(interaction, "member_log_test", "denied")
             await interaction.response.send_message(
                 "Only Deathxi can run the simulated member-log test.",
