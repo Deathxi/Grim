@@ -385,10 +385,16 @@ from datetime import datetime, timezone, timedelta
 ghostwrite_cache = {}
 CACHE_TTL = 900  # 15 minutes
 GRIM_TIMEZONE = ZoneInfo("America/Los_Angeles")
+GRIM_TIMEZONE_LABEL = "PST"
 
 def get_grim_current_time():
     """Return Grim's current time in the creator's Pacific timezone."""
     return datetime.now(GRIM_TIMEZONE)
+
+def format_grim_current_time(now=None):
+    """Format Grim's clock with the requested explicit PST label."""
+    current = now or get_grim_current_time()
+    return f"{current.strftime('%A, %B %d, %Y — %I:%M %p')} {GRIM_TIMEZONE_LABEL}"
 
 # Storage for scheduled ghostwrites: {channel_id: {"username": str, "topic": str, "interval_hours": int, "last_run": float}}
 GHOSTWRITE_LIVE_FILE = _data_path("ghostwrite_live_data.json")
@@ -1816,7 +1822,7 @@ async def generate_contextual_reply(message: discord.Message) -> str | None:
         digest_block = "Not yet generated — will be ready after the server has some activity."
 
     # Current date/time — always injected so Grim is grounded in today
-    now_str = get_grim_current_time().strftime("%A, %B %d, %Y — %I:%M %p %Z")
+    now_str = format_grim_current_time()
 
     # Live search enrichment — if the message asks about real-time info, fetch it now
     LIVE_INTENT_KEYWORDS = [

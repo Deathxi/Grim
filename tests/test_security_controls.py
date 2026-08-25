@@ -142,6 +142,11 @@ class SecurityControlsTests(unittest.TestCase):
         self.assertEqual(current.tzinfo, main.GRIM_TIMEZONE)
         self.assertIn(current.tzname(), {"PST", "PDT"})
 
+    def test_grim_clock_always_identifies_pst(self):
+        formatted = main.format_grim_current_time(main.datetime(2026, 8, 25, 12, 34))
+        self.assertTrue(formatted.endswith(" PST"))
+        self.assertNotIn(" PDT", formatted)
+
     def test_moderation_words_are_server_scoped(self):
         main.set_guild_banned_words("one", ["alpha"])
         main.set_guild_banned_words("two", ["beta"])
