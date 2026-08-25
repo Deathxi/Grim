@@ -23,6 +23,7 @@ CREATOR_DISCORD_ID = 235194449573969920
 
 VERSION_COUNT_FILE = os.path.expanduser("~/.grim_data/version_count.txt")
 MAIN_HASH_FILE = os.path.expanduser("~/.grim_data/main_hash.txt")
+VERSION_BASELINE_COUNT = 200
 
 def _format_version(count):
     return f"V{count // 100}.{count % 100:02d}"
@@ -34,10 +35,10 @@ def _load_version():
             with open(path, "r") as f:
                 val = f.read().strip()
                 if val.isdigit():
-                    return _format_version(int(val))
+                    return _format_version(max(int(val), VERSION_BASELINE_COUNT))
         except:
             pass
-    return "V1.01"
+    return _format_version(VERSION_BASELINE_COUNT)
 
 def _get_main_hash():
     try:
@@ -69,7 +70,10 @@ def _bump_version():
             with open("version.txt", "r") as f:
                 count = int(f.read().strip())
         except:
-            count = 101
+            count = VERSION_BASELINE_COUNT - 1
+    # Version 2.0 is the new release floor. Existing 1.xx counters migrate
+    # once without discarding runtime data, then future deploys increment normally.
+    count = max(count, VERSION_BASELINE_COUNT - 1)
     count += 1
     VERSION = _format_version(count)
     with open(VERSION_COUNT_FILE, "w") as f:

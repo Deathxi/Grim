@@ -89,6 +89,31 @@ class SecurityControlsTests(unittest.TestCase):
             ctx.messages, ["Too many requests recently. Please try again in a minute."]
         )
 
+    def test_version_migrates_old_counter_to_v2_without_skipping_baseline(self):
+        original_count_file = main.VERSION_COUNT_FILE
+        original_hash_file = main.MAIN_HASH_FILE
+        original_version = main.VERSION
+        original_cwd = Path.cwd()
+        try:
+            count_file = Path(self.temp_dir.name) / "version_count.txt"
+            hash_file = Path(self.temp_dir.name) / "main_hash.txt"
+            count_file.write_text("134")
+            hash_file.write_text("old-code-hash")
+            main.VERSION_COUNT_FILE = str(count_file)
+            main.MAIN_HASH_FILE = str(hash_file)
+            import os
+            os.chdir(self.temp_dir.name)
+            main.VERSION = main._load_version()
+            main._bump_version()
+            self.assertEqual(main.VERSION, "V2.00")
+            self.assertEqual(count_file.read_text(), "200")
+        finally:
+            import os
+            os.chdir(original_cwd)
+            main.VERSION_COUNT_FILE = original_count_file
+            main.MAIN_HASH_FILE = original_hash_file
+            main.VERSION = original_version
+
     def test_moderation_words_are_server_scoped(self):
         main.set_guild_banned_words("one", ["alpha"])
         main.set_guild_banned_words("two", ["beta"])

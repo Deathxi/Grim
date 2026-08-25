@@ -4,6 +4,17 @@ All notable changes to this project are documented here, organized by month.
 
 ---
 
+## Version 2.0 — August 2026
+
+Version 2.0 begins Grim's security-first operations phase.
+
+### Added
+- Explicit 2.0 release baseline with automatic migration from any older 1.xx runtime counter.
+- Server-scoped moderation controls, shared authorization checks, redacted security audit events, and abuse limits.
+- Atomic runtime-state writes and the `OPERATIONS_SECURITY.md` operations and incident-response SOP.
+
+---
+
 ## June 2026
 
 ### Added
