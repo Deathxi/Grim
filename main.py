@@ -6,6 +6,7 @@ import aiohttp
 import uuid
 import base64
 import sqlite3
+import tempfile
 import psutil
 import hashlib
 import re
@@ -124,6 +125,26 @@ os.makedirs(DATA_DIR, exist_ok=True)
 
 def _data_path(filename):
     return os.path.join(DATA_DIR, filename)
+
+def _atomic_json_write(path: str, data):
+    """Write runtime state atomically so a crash cannot leave truncated JSON."""
+    directory = os.path.dirname(path) or "."
+    os.makedirs(directory, exist_ok=True)
+    fd, temporary_path = tempfile.mkstemp(
+        prefix=f".{os.path.basename(path)}.",
+        suffix=".tmp",
+        dir=directory,
+        text=True,
+    )
+    try:
+        with os.fdopen(fd, "w") as handle:
+            json.dump(data, handle, indent=2)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_path, path)
+    finally:
+        if os.path.exists(temporary_path):
+            os.unlink(temporary_path)
 
 # Friendly names for common per-member preferences. "auto" means the newest
 # member message determines the response language, without a fixed language list.
@@ -341,8 +362,7 @@ def load_livetweet_data():
     return {}
 
 def save_livetweet_data(data):
-    with open(LIVETWEET_FILE, 'w') as f:
-        json.dump(data, f)
+    _atomic_json_write(LIVETWEET_FILE, data)
 
 livetweet_channels = load_livetweet_data()
 
@@ -365,8 +385,7 @@ def load_ghostwrite_live_data():
     return {}
 
 def save_ghostwrite_live_data(data):
-    with open(GHOSTWRITE_LIVE_FILE, 'w') as f:
-        json.dump(data, f)
+    _atomic_json_write(GHOSTWRITE_LIVE_FILE, data)
 
 ghostwrite_live_channels = load_ghostwrite_live_data()
 
@@ -395,8 +414,7 @@ def load_newsfeed_data():
     return {}
 
 def save_newsfeed_data(data):
-    with open(NEWSFEED_FILE, 'w') as f:
-        json.dump(data, f)
+    _atomic_json_write(NEWSFEED_FILE, data)
 
 newsfeed_feeds = load_newsfeed_data()
 
@@ -415,8 +433,7 @@ def load_grim_memories():
 grim_memories = load_grim_memories()
 
 def save_grim_memories():
-    with open(GRIM_MEMORIES_FILE, "w") as f:
-        json.dump(grim_memories, f, indent=2)
+    _atomic_json_write(GRIM_MEMORIES_FILE, grim_memories)
 
 # Auto-synthesized server digest — Grok distills what's been happening every 4 hours
 GRIM_DIGEST_FILE = _data_path("grim_digest.json")
@@ -431,8 +448,7 @@ def load_grim_digests():
     return {}
 
 def save_grim_digests():
-    with open(GRIM_DIGEST_FILE, "w") as f:
-        json.dump(grim_digests, f, indent=2)
+    _atomic_json_write(GRIM_DIGEST_FILE, grim_digests)
 
 grim_digests = load_grim_digests()
 
@@ -481,10 +497,145 @@ def init_chat_db():
             PRIMARY KEY (guild_id, member_id)
         )
     """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS security_audit_events (
+            event_id TEXT PRIMARY KEY,
+            occurred_at REAL NOT NULL,
+            guild_id TEXT,
+            actor_id TEXT,
+            action TEXT NOT NULL,
+            outcome TEXT NOT NULL,
+            metadata_json TEXT NOT NULL
+        )
+    """)
     conn.commit()
     conn.close()
 
 init_chat_db()
+
+_COMMAND_RATE_LIMITS: dict[tuple[str, str, str], list[float]] = {}
+RATE_LIMIT_WINDOW_SECONDS = 60
+RATE_LIMIT_MAX_REQUESTS = 8
+
+def record_security_event(
+    interaction: discord.Interaction | None,
+    action: str,
+    outcome: str,
+    metadata: dict | None = None,
+):
+    """Persist minimal security telemetry without message content or secrets."""
+    try:
+        guild_id = str(interaction.guild_id) if interaction and interaction.guild_id else None
+        actor_id = str(interaction.user.id) if interaction and interaction.user else None
+        safe_metadata = {}
+        for key, value in (metadata or {}).items():
+            key_text = str(key)[:40]
+            if any(secret_word in key_text.lower() for secret_word in ("token", "secret", "password", "content", "text")):
+                continue
+            if isinstance(value, (str, int, float, bool)) or value is None:
+                safe_metadata[key_text] = str(value)[:160] if isinstance(value, str) else value
+        conn = sqlite3.connect(CHAT_DB_FILE)
+        conn.execute("""
+            INSERT INTO security_audit_events
+                (event_id, occurred_at, guild_id, actor_id, action, outcome, metadata_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (
+            str(uuid.uuid4()),
+            time.time(),
+            guild_id,
+            actor_id,
+            str(action)[:80],
+            str(outcome)[:40],
+            json.dumps(safe_metadata, sort_keys=True),
+        ))
+        conn.execute(
+            "DELETE FROM security_audit_events WHERE occurred_at < ?",
+            (time.time() - 90 * 86400,),
+        )
+        conn.commit()
+        conn.close()
+    except Exception as error:
+        print(f"[Security] Audit write failed: {type(error).__name__}")
+
+def _rate_limit_allows_actor(guild_id: str, actor_id: str, action: str) -> bool:
+    key = (guild_id, actor_id, action)
+    now = time.time()
+    recent = [stamp for stamp in _COMMAND_RATE_LIMITS.get(key, []) if now - stamp < RATE_LIMIT_WINDOW_SECONDS]
+    if len(recent) >= RATE_LIMIT_MAX_REQUESTS:
+        _COMMAND_RATE_LIMITS[key] = recent
+        return False
+    recent.append(now)
+    _COMMAND_RATE_LIMITS[key] = recent
+    return True
+
+def _rate_limit_allows(interaction: discord.Interaction, action: str) -> bool:
+    return _rate_limit_allows_actor(
+        str(interaction.guild_id or "dm"),
+        str(interaction.user.id),
+        action,
+    )
+
+async def require_permission(
+    interaction: discord.Interaction,
+    permission: str,
+    action: str,
+    *,
+    administrator: bool = False,
+) -> bool:
+    """Fail closed for guild management actions and audit every denial."""
+    if not interaction.guild_id or not interaction.guild:
+        record_security_event(interaction, action, "denied", {"reason": "not_in_guild"})
+        await interaction.response.send_message(
+            "This management command can only be used inside a server.", ephemeral=True
+        )
+        return False
+
+    permissions = interaction.user.guild_permissions
+    allowed = (
+        interaction.guild.owner_id == interaction.user.id
+        or permissions.administrator
+        or (getattr(permissions, permission, False) and not administrator)
+    )
+    if administrator:
+        allowed = (
+            interaction.guild.owner_id == interaction.user.id
+            or permissions.administrator
+        )
+    if not allowed:
+        record_security_event(interaction, action, "denied", {"reason": "missing_permission"})
+        await interaction.response.send_message(
+            "You do not have permission to manage Grim in this server.", ephemeral=True
+        )
+        return False
+
+    if not _rate_limit_allows(interaction, action):
+        record_security_event(interaction, action, "rate_limited")
+        await interaction.response.send_message(
+            "Too many management requests recently. Please try again in a minute.",
+            ephemeral=True,
+        )
+        return False
+    return True
+
+async def require_external_action(interaction: discord.Interaction, action: str = "external_ai") -> bool:
+    """Limit user-triggered paid/external requests across command entry points."""
+    if _rate_limit_allows(interaction, action):
+        return True
+    record_security_event(interaction, action, "rate_limited")
+    await interaction.response.send_message(
+        "Too many requests recently. Please try again in a minute.", ephemeral=True
+    )
+    return False
+
+async def require_member_state_action(interaction: discord.Interaction, action: str) -> bool:
+    """Allow normal members to manage only their own settings with rate limiting."""
+    if _rate_limit_allows(interaction, action):
+        return True
+    record_security_event(interaction, action, "rate_limited")
+    await interaction.response.send_message(
+        "Too many requests recently. Please try again in a minute.", ephemeral=True
+    )
+    return False
 
 # In-memory tracker for members currently in a voice channel: {"guild_id:member_id": join_timestamp}
 _vc_active_sessions: dict[str, float] = {}
@@ -789,8 +940,7 @@ def load_nftwatch_data():
     return {}
 
 def save_nftwatch_data(data):
-    with open(NFTWATCH_FILE, 'w') as f:
-        json.dump(data, f)
+    _atomic_json_write(NFTWATCH_FILE, data)
 
 nftwatch_feeds = load_nftwatch_data()
 
@@ -807,8 +957,7 @@ def load_redditfeed_data():
     return {}
 
 def save_redditfeed_data(data):
-    with open(REDDITFEED_FILE, 'w') as f:
-        json.dump(data, f)
+    _atomic_json_write(REDDITFEED_FILE, data)
 
 redditfeed_feeds = load_redditfeed_data()
 
@@ -818,16 +967,36 @@ def load_moderation_data():
     try:
         if os.path.exists(MODERATION_FILE):
             with open(MODERATION_FILE, 'r') as f:
-                return json.load(f)
+                data = json.load(f)
+                if isinstance(data, dict) and "guilds" in data:
+                    return data
+                if isinstance(data, dict) and "banned_words" in data:
+                    # A legacy global list cannot safely be assigned to every
+                    # server, so preserve it for administrator review only.
+                    return {
+                        "guilds": {},
+                        "legacy_unassigned_words": data.get("banned_words", []),
+                    }
     except:
         pass
-    return {"banned_words": []}
+    return {"guilds": {}, "legacy_unassigned_words": []}
 
 def save_moderation_data(data):
-    with open(MODERATION_FILE, 'w') as f:
-        json.dump(data, f)
+    _atomic_json_write(MODERATION_FILE, data)
 
 moderation_data = load_moderation_data()
+
+def get_guild_banned_words(guild_id: str) -> list[str]:
+    guilds = moderation_data.setdefault("guilds", {})
+    settings = guilds.setdefault(str(guild_id), {"banned_words": []})
+    words = settings.get("banned_words", [])
+    return words if isinstance(words, list) else []
+
+def set_guild_banned_words(guild_id: str, words: list[str]):
+    moderation_data.setdefault("guilds", {})[str(guild_id)] = {
+        "banned_words": words
+    }
+    save_moderation_data(moderation_data)
 
 WELCOME_FILE = _data_path("welcome_data.json")
 
@@ -841,8 +1010,7 @@ def load_welcome_data():
     return {}
 
 def save_welcome_data(data):
-    with open(WELCOME_FILE, 'w') as f:
-        json.dump(data, f)
+    _atomic_json_write(WELCOME_FILE, data)
 
 welcome_channels = load_welcome_data()
 
@@ -880,12 +1048,10 @@ def load_updates_data():
     return {}
 
 def save_updates_data(data):
-    with open(UPDATES_CONFIG_FILE, 'w') as f:
-        json.dump(data, f)
+    _atomic_json_write(UPDATES_CONFIG_FILE, data)
     # Also keep project-root copy in sync so GitHub push has something to push
     try:
-        with open(UPDATES_CONFIG_FALLBACK, 'w') as f:
-            json.dump(data, f)
+        _atomic_json_write(UPDATES_CONFIG_FALLBACK, data)
     except:
         pass
 
@@ -899,8 +1065,7 @@ def load_updates_sha():
     return {}
 
 def save_updates_sha(data):
-    with open(UPDATES_SHA_FILE, 'w') as f:
-        json.dump(data, f)
+    _atomic_json_write(UPDATES_SHA_FILE, data)
 
 updates_channels = load_updates_data()
 updates_sha = load_updates_sha()
@@ -920,8 +1085,7 @@ def load_remindme_data():
     return {}
 
 def save_remindme_data(data):
-    with open(REMINDME_FILE, 'w') as f:
-        json.dump(data, f)
+    _atomic_json_write(REMINDME_FILE, data)
 
 remindme_store = load_remindme_data()
 
@@ -1480,6 +1644,10 @@ async def generate_contextual_reply(message: discord.Message) -> str | None:
     guild = message.guild
     channel = message.channel
     author = message.author
+    if not _rate_limit_allows_actor(
+        str(guild.id) if guild else "dm", str(author.id), "external_ai"
+    ):
+        return None
 
     guild_id = str(guild.id) if guild else "dm"
     channel_id = str(channel.id)
@@ -3024,8 +3192,10 @@ async def sync_from_github():
                         except:
                             pass
                     if needs_restore:
-                        with open(UPDATES_CONFIG_FILE, "w") as f:
-                            f.write(content)
+                        github_updates = json.loads(content)
+                        if not isinstance(github_updates, dict):
+                            raise ValueError("updates_data.json must contain an object")
+                        _atomic_json_write(UPDATES_CONFIG_FILE, github_updates)
                         print(f"[Sync] Restored persistent updates_data.json from GitHub")
                     else:
                         print(f"[Sync] Persistent updates_data.json has data — keeping it")
@@ -3330,6 +3500,8 @@ async def info(interaction: discord.Interaction):
 
 @bot.tree.command(name="howdie", description="How will someone meet their dramatic end?")
 async def howdie(interaction: discord.Interaction, user: discord.Member):
+    if not await require_external_action(interaction):
+        return
     await interaction.response.defer()
     
     death_scene = await generate_death_scene(user.display_name)
@@ -3350,6 +3522,8 @@ async def howdie(interaction: discord.Interaction, user: discord.Member):
 
 @bot.tree.command(name="8ball", description="Ask the existentially dread-filled Magic 8-ball")
 async def eightball(interaction: discord.Interaction, question: str):
+    if not await require_external_action(interaction):
+        return
     await interaction.response.defer()
     
     answer = await generate_8ball_response(question)
@@ -3370,6 +3544,8 @@ async def eightball(interaction: discord.Interaction, question: str):
 
 @bot.tree.command(name="truth", description="Ask Grok anything - unfiltered, raw answers")
 async def truth(interaction: discord.Interaction, question: str):
+    if not await require_external_action(interaction):
+        return
     await interaction.response.defer()
     
     answer = await generate_unfiltered_truth(question)
@@ -3389,6 +3565,8 @@ async def truth(interaction: discord.Interaction, question: str):
 
 @bot.tree.command(name="summon", description="Summon Grim from the shadows")
 async def summon(interaction: discord.Interaction):
+    if not await require_external_action(interaction):
+        return
     await interaction.response.defer()
     
     message = await generate_summon_message()
@@ -3408,6 +3586,8 @@ async def summon(interaction: discord.Interaction):
 
 @bot.tree.command(name="inspire", description="Get an inspiring real-world story to lift your spirits")
 async def inspire(interaction: discord.Interaction):
+    if not await require_external_action(interaction):
+        return
     await interaction.response.defer()
     
     story = await generate_inspiration()
@@ -3427,6 +3607,8 @@ async def inspire(interaction: discord.Interaction):
 @bot.tree.command(name="summarize", description="Get a private TLDR of recent channel conversation")
 @discord.app_commands.describe(messages="Number of recent messages to summarize (e.g. 50)")
 async def summarize(interaction: discord.Interaction, messages: int):
+    if not await require_external_action(interaction):
+        return
     if messages < 5:
         await interaction.response.send_message("Give me at least 5 messages to work with.", ephemeral=True)
         return
@@ -3504,6 +3686,8 @@ Write it like a quick briefing — direct, no fluff. Natural prose, no bullet po
 
 @bot.tree.command(name="roast", description="Roast a member with chaotic, unhinged energy")
 async def roast(interaction: discord.Interaction, user: discord.Member):
+    if not await require_external_action(interaction):
+        return
     await interaction.response.defer()
     
     roast_text = await generate_roast(user.display_name)
@@ -3524,6 +3708,8 @@ async def roast(interaction: discord.Interaction, user: discord.Member):
 
 @bot.tree.command(name="ascii", description="Get a random ASCII art masterpiece")
 async def ascii_art(interaction: discord.Interaction):
+    if not await require_external_action(interaction):
+        return
     await interaction.response.defer()
     
     art, theme = await generate_leet_art()
@@ -3536,6 +3722,8 @@ async def ascii_art(interaction: discord.Interaction):
 
 @bot.tree.command(name="ghostwrite", description="Generate a tweet in someone's X writing style")
 async def ghostwrite(interaction: discord.Interaction, username: str, topics: str):
+    if not await require_external_action(interaction):
+        return
     await interaction.response.defer()
     
     tweet_data, error = await fetch_user_tweets(username, count=15)
@@ -3569,8 +3757,7 @@ async def ghostwrite(interaction: discord.Interaction, username: str, topics: st
 async def ghostwritelive(interaction: discord.Interaction, interval: str, username: str, topic: str):
     global ghostwrite_live_channels
     
-    if not interaction.user.guild_permissions.manage_channels:
-        await interaction.response.send_message("You need 'Manage Channels' permission to use this command.", ephemeral=True)
+    if not await require_permission(interaction, "manage_channels", "ghostwrite_live"):
         return
     
     await interaction.response.defer()
@@ -3582,6 +3769,7 @@ async def ghostwritelive(interaction: discord.Interaction, interval: str, userna
     if channel_id in ghostwrite_live_channels:
         del ghostwrite_live_channels[channel_id]
         save_ghostwrite_live_data(ghostwrite_live_channels)
+        record_security_event(interaction, "ghostwrite_live", "disabled")
         
         embed = discord.Embed(
             title="Disabled",
@@ -3638,6 +3826,10 @@ async def ghostwritelive(interaction: discord.Interaction, interval: str, userna
         "last_run": time.time()
     }
     save_ghostwrite_live_data(ghostwrite_live_channels)
+    record_security_event(
+        interaction, "ghostwrite_live", "enabled",
+        {"interval_minutes": interval_minutes},
+    )
     
     embed = discord.Embed(
         title=f"Ghostwrite Live Enabled",
@@ -3674,13 +3866,22 @@ class NewsfeedCancelSelect(ui.Select):
     
     async def callback(self, interaction: discord.Interaction):
         global newsfeed_feeds
+        if not await require_permission(interaction, "manage_channels", "newsfeed_cancel"):
+            return
         feed_id = self.values[0]
         
         if feed_id in newsfeed_feeds:
             feed_data = newsfeed_feeds[feed_id]
+            if feed_data.get("guild_id") != str(interaction.guild_id):
+                record_security_event(interaction, "newsfeed_cancel", "denied", {"reason": "cross_server"})
+                await interaction.response.send_message(
+                    "That feed does not belong to this server.", ephemeral=True
+                )
+                return
             topic = feed_data.get("topic", "Unknown")
             del newsfeed_feeds[feed_id]
             save_newsfeed_data(newsfeed_feeds)
+            record_security_event(interaction, "newsfeed_cancel", "success", {"feed_id": feed_id[:8]})
             
             embed = discord.Embed(
                 title="Cancelled",
@@ -3731,6 +3932,8 @@ class NewsfeedEditModal(ui.Modal, title="Edit Interval"):
     
     async def on_submit(self, interaction: discord.Interaction):
         global newsfeed_feeds
+        if not await require_permission(interaction, "manage_channels", "newsfeed_edit"):
+            return
         
         interval_str = self.new_interval.value.lower().strip()
         hours_match = re.match(r'^(\d+)h$', interval_str)
@@ -3746,15 +3949,27 @@ class NewsfeedEditModal(ui.Modal, title="Edit Interval"):
             await interaction.response.send_message("Invalid interval format. Use '4h' or '30m'.", ephemeral=True)
             return
         
-        if interval_minutes < 10:
-            await interaction.response.send_message("Minimum interval is 10 minutes.", ephemeral=True)
+        if interval_minutes < 10 or interval_minutes > 10080:
+            await interaction.response.send_message(
+                "Interval must be between 10 minutes and 168 hours.", ephemeral=True
+            )
             return
         
         if self.feed_id in newsfeed_feeds:
+            if newsfeed_feeds[self.feed_id].get("guild_id") != str(interaction.guild_id):
+                record_security_event(interaction, "newsfeed_edit", "denied", {"reason": "cross_server"})
+                await interaction.response.send_message(
+                    "That feed does not belong to this server.", ephemeral=True
+                )
+                return
             old_interval = newsfeed_feeds[self.feed_id].get("interval_display", "?")
             newsfeed_feeds[self.feed_id]["interval_minutes"] = interval_minutes
             newsfeed_feeds[self.feed_id]["interval_display"] = interval_display
             save_newsfeed_data(newsfeed_feeds)
+            record_security_event(
+                interaction, "newsfeed_edit", "success",
+                {"feed_id": self.feed_id[:8], "interval_minutes": interval_minutes},
+            )
             
             topic = self.feed_data.get("topic", "Unknown")
             
@@ -3789,8 +4004,13 @@ class NewsfeedEditSelect(ui.Select):
         )
     
     async def callback(self, interaction: discord.Interaction):
+        if not await require_permission(interaction, "manage_channels", "newsfeed_edit"):
+            return
         feed_id = self.values[0]
-        if feed_id in self.feeds_data:
+        if (
+            feed_id in self.feeds_data
+            and self.feeds_data[feed_id].get("guild_id") == str(interaction.guild_id)
+        ):
             modal = NewsfeedEditModal(feed_id, self.feeds_data[feed_id])
             await interaction.response.send_modal(modal)
         else:
@@ -3818,8 +4038,7 @@ class NewsfeedEditView(ui.View):
 async def newsfeed_edit(interaction: discord.Interaction):
     global newsfeed_feeds
     
-    if not interaction.user.guild_permissions.manage_channels:
-        await interaction.response.send_message("You need 'Manage Channels' permission to use this command.", ephemeral=True)
+    if not await require_permission(interaction, "manage_channels", "newsfeed_edit"):
         return
     
     if not newsfeed_feeds:
@@ -3858,8 +4077,7 @@ async def newsfeed_edit(interaction: discord.Interaction):
 async def newsfeed_cancel(interaction: discord.Interaction):
     global newsfeed_feeds
     
-    if not interaction.user.guild_permissions.manage_channels:
-        await interaction.response.send_message("You need 'Manage Channels' permission to use this command.", ephemeral=True)
+    if not await require_permission(interaction, "manage_channels", "newsfeed_cancel"):
         return
     
     if not newsfeed_feeds:
@@ -4179,8 +4397,7 @@ async def grim_status(interaction: discord.Interaction):
 async def newsfeed(interaction: discord.Interaction, interval: str, topic: str):
     global newsfeed_feeds
     
-    if not interaction.user.guild_permissions.manage_channels:
-        await interaction.response.send_message("You need 'Manage Channels' permission to use this command.", ephemeral=True)
+    if not await require_permission(interaction, "manage_channels", "newsfeed_create"):
         return
     
     await interaction.response.defer()
@@ -4225,6 +4442,10 @@ async def newsfeed(interaction: discord.Interaction, interval: str, topic: str):
         "posted_headlines": [headline]
     }
     save_newsfeed_data(newsfeed_feeds)
+    record_security_event(
+        interaction, "newsfeed_create", "success",
+        {"feed_id": feed_id[:8], "interval_minutes": interval_minutes},
+    )
     
     print(f"[Newsfeed Command] Created feed {feed_id}, image_url value: {image_url}")
     
@@ -4244,8 +4465,7 @@ async def newsfeed(interaction: discord.Interaction, interval: str, topic: str):
 async def nftwatch(interaction: discord.Interaction, link: str):
     global nftwatch_feeds
     
-    if not interaction.user.guild_permissions.manage_channels:
-        await interaction.response.send_message("You need 'Manage Channels' permission to use this command.", ephemeral=True)
+    if not await require_permission(interaction, "manage_channels", "nftwatch_create"):
         return
     
     api_key = os.environ.get("OPENSEA_API_KEY")
@@ -4283,6 +4503,7 @@ async def nftwatch(interaction: discord.Interaction, link: str):
         "collection_name": collection_data.get("name", slug)
     }
     save_nftwatch_data(nftwatch_feeds)
+    record_security_event(interaction, "nftwatch_create", "success", {"watch_id": watch_id})
     
     collection_name = collection_data.get("name", slug)
     image_url = collection_data.get("image_url", "")
@@ -4304,8 +4525,7 @@ async def nftwatch(interaction: discord.Interaction, link: str):
 async def nftwatch_cancel(interaction: discord.Interaction):
     global nftwatch_feeds
     
-    if not interaction.user.guild_permissions.manage_channels:
-        await interaction.response.send_message("You need 'Manage Channels' permission to use this command.", ephemeral=True)
+    if not await require_permission(interaction, "manage_channels", "nftwatch_cancel"):
         return
     
     guild_id = str(interaction.guild_id)
@@ -4320,6 +4540,7 @@ async def nftwatch_cancel(interaction: discord.Interaction):
         wdata = guild_watches[wid]
         del nftwatch_feeds[wid]
         save_nftwatch_data(nftwatch_feeds)
+        record_security_event(interaction, "nftwatch_cancel", "success", {"watch_id": wid})
         
         embed = discord.Embed(
             title="NFT Watch Cancelled",
@@ -4340,12 +4561,20 @@ async def nftwatch_cancel(interaction: discord.Interaction):
             super().__init__(placeholder="Select a watch to cancel...", options=options, min_values=1, max_values=len(options))
         
         async def callback(self, inter: discord.Interaction):
+            if not await require_permission(inter, "manage_channels", "nftwatch_cancel"):
+                return
             cancelled = []
             for wid in self.values:
-                if wid in nftwatch_feeds:
+                if (
+                    wid in nftwatch_feeds
+                    and nftwatch_feeds[wid].get("guild_id") == str(inter.guild_id)
+                ):
                     cancelled.append(nftwatch_feeds[wid].get("collection_name", nftwatch_feeds[wid]["slug"]))
                     del nftwatch_feeds[wid]
             save_nftwatch_data(nftwatch_feeds)
+            record_security_event(
+                inter, "nftwatch_cancel", "success", {"cancelled_count": len(cancelled)}
+            )
             
             embed = discord.Embed(
                 title="NFT Watch Cancelled",
@@ -4384,8 +4613,7 @@ def _parse_subreddit_name(raw: str) -> str:
 async def redditfeed(interaction: discord.Interaction, subreddits: str, interval: str):
     global redditfeed_feeds
 
-    if not interaction.user.guild_permissions.manage_channels:
-        await interaction.response.send_message("You need 'Manage Channels' permission to use this command.", ephemeral=True)
+    if not await require_permission(interaction, "manage_channels", "redditfeed_create"):
         return
 
     interval = interval.strip().lower()
@@ -4424,6 +4652,10 @@ async def redditfeed(interaction: discord.Interaction, subreddits: str, interval
         "posted_urls": []
     }
     save_redditfeed_data(redditfeed_feeds)
+    record_security_event(
+        interaction, "redditfeed_create", "success",
+        {"feed_id": feed_id, "subreddit_count": len(sub_list), "interval_minutes": interval_minutes},
+    )
 
     sub_display = ", ".join([f"r/{s}" for s in sub_list])
     embed = discord.Embed(
@@ -4458,12 +4690,21 @@ class RedditfeedCancelSelect(ui.Select):
 
     async def callback(self, interaction: discord.Interaction):
         global redditfeed_feeds
+        if not await require_permission(interaction, "manage_channels", "redditfeed_cancel"):
+            return
         feed_id = self.values[0]
         if feed_id in redditfeed_feeds:
             data = redditfeed_feeds[feed_id]
+            if data.get("guild_id") != str(interaction.guild_id):
+                record_security_event(interaction, "redditfeed_cancel", "denied", {"reason": "cross_server"})
+                await interaction.response.send_message(
+                    "That feed does not belong to this server.", ephemeral=True
+                )
+                return
             subs = ", ".join([f"r/{s}" for s in data.get("subreddits", [])])
             del redditfeed_feeds[feed_id]
             save_redditfeed_data(redditfeed_feeds)
+            record_security_event(interaction, "redditfeed_cancel", "success", {"feed_id": feed_id})
             embed = discord.Embed(
                 title="Cancelled",
                 description=f"Stopped Reddit feed for **{subs}**",
@@ -4503,8 +4744,7 @@ class RedditfeedCancelView(ui.View):
 async def redditfeed_cancel(interaction: discord.Interaction):
     global redditfeed_feeds
 
-    if not interaction.user.guild_permissions.manage_channels:
-        await interaction.response.send_message("You need 'Manage Channels' permission to use this command.", ephemeral=True)
+    if not await require_permission(interaction, "manage_channels", "redditfeed_cancel"):
         return
 
     guild_id_str = str(interaction.guild_id)
@@ -4526,63 +4766,64 @@ async def redditfeed_cancel(interaction: discord.Interaction):
 @bot.tree.command(name="mod_add", description="Add a word to the auto-delete list")
 async def mod_add(interaction: discord.Interaction, word: str):
     global moderation_data
-    if not interaction.user.guild_permissions.administrator:
-        await interaction.response.send_message("Administrator permission required.", ephemeral=True)
+    if not await require_permission(interaction, "administrator", "moderation_add", administrator=True):
         return
     
     word = word.strip().lower()
-    if not word:
+    if not word or len(word) > 80:
         await interaction.response.send_message("Please provide a valid word.", ephemeral=True)
         return
     
-    if word in [w.lower() for w in moderation_data["banned_words"]]:
+    guild_id = str(interaction.guild_id)
+    words = get_guild_banned_words(guild_id)
+    if word in [w.lower() for w in words]:
         await interaction.response.send_message(f"Already on the list.", ephemeral=True)
         return
     
-    moderation_data["banned_words"].append(word)
-    save_moderation_data(moderation_data)
+    words.append(word)
+    set_guild_banned_words(guild_id, words)
+    record_security_event(interaction, "moderation_add", "success", {"word_length": len(word)})
     
     embed = discord.Embed(
         title="Word Added",
         description=f"```{word}```",
         color=discord.Color.from_rgb(18, 18, 18)
     )
-    embed.set_footer(text=f"{len(moderation_data['banned_words'])} word(s) on list · {VERSION}")
+    embed.set_footer(text=f"{len(words)} word(s) on this server · {VERSION}")
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 @bot.tree.command(name="mod_remove", description="Remove a word from the auto-delete list")
 async def mod_remove(interaction: discord.Interaction, word: str):
     global moderation_data
-    if not interaction.user.guild_permissions.administrator:
-        await interaction.response.send_message("Administrator permission required.", ephemeral=True)
+    if not await require_permission(interaction, "administrator", "moderation_remove", administrator=True):
         return
     
     word = word.strip().lower()
-    original = moderation_data["banned_words"]
+    guild_id = str(interaction.guild_id)
+    original = get_guild_banned_words(guild_id)
     updated = [w for w in original if w.lower() != word]
     
     if len(updated) == len(original):
         await interaction.response.send_message(f"That word wasn't on the list.", ephemeral=True)
         return
     
-    moderation_data["banned_words"] = updated
-    save_moderation_data(moderation_data)
+    set_guild_banned_words(guild_id, updated)
+    record_security_event(interaction, "moderation_remove", "success", {"word_length": len(word)})
     
     embed = discord.Embed(
         title="Word Removed",
         description=f"```{word}```",
         color=discord.Color.from_rgb(18, 18, 18)
     )
-    embed.set_footer(text=f"{len(moderation_data['banned_words'])} word(s) on list · {VERSION}")
+    embed.set_footer(text=f"{len(updated)} word(s) on this server · {VERSION}")
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 @bot.tree.command(name="mod_list", description="View all words on the auto-delete list")
 async def mod_list(interaction: discord.Interaction):
-    if not interaction.user.guild_permissions.administrator:
-        await interaction.response.send_message("Administrator permission required.", ephemeral=True)
+    if not await require_permission(interaction, "administrator", "moderation_list", administrator=True):
         return
     
-    words = moderation_data.get("banned_words", [])
+    words = get_guild_banned_words(str(interaction.guild_id))
     
     embed = discord.Embed(
         title="Auto-Delete List",
@@ -4601,6 +4842,14 @@ async def mod_list(interaction: discord.Interaction):
 @discord.app_commands.describe(when="A duration (10m, 2h, 1d3h30m) or exact GMT date/time (07/06/2026 17:00)", text="What Grim should remind you about")
 async def remindme(interaction: discord.Interaction, when: str, text: str):
     global remindme_store
+    if not await require_member_state_action(interaction, "reminder_create"):
+        return
+    text = text.strip()
+    if not text or len(text) > 1000:
+        await interaction.response.send_message(
+            "Reminder text must be between 1 and 1,000 characters.", ephemeral=True
+        )
+        return
 
     target_ts = parse_remindme_target(when)
     if target_ts is None:
@@ -4628,6 +4877,10 @@ async def remindme(interaction: discord.Interaction, when: str, text: str):
         "created_ts": now_ts
     }
     save_remindme_data(remindme_store)
+    record_security_event(
+        interaction, "reminder_create", "success",
+        {"reminder_id": rid, "text_length": len(text)},
+    )
 
     due_str = datetime.fromtimestamp(target_ts, tz=timezone.utc).strftime("%m/%d/%Y %H:%M GMT")
     embed = discord.Embed(
@@ -4669,6 +4922,8 @@ async def remindmes_cmd(interaction: discord.Interaction):
 @bot.tree.command(name="remindme_cancel", description="Cancel an active personal reminder by its ID")
 async def remindme_cancel(interaction: discord.Interaction, reminder_id: str):
     global remindme_store
+    if not await require_member_state_action(interaction, "reminder_cancel"):
+        return
 
     rid = reminder_id.strip()
     if rid not in remindme_store:
@@ -4683,6 +4938,7 @@ async def remindme_cancel(interaction: discord.Interaction, reminder_id: str):
     text = data["text"]
     del remindme_store[rid]
     save_remindme_data(remindme_store)
+    record_security_event(interaction, "reminder_cancel", "success", {"reminder_id": rid})
 
     embed = discord.Embed(
         title="Reminder Cancelled",
@@ -4788,8 +5044,7 @@ async def creator(interaction: discord.Interaction):
 async def livetweet(interaction: discord.Interaction, username: str):
     global livetweet_channels
     
-    if not interaction.user.guild_permissions.manage_channels:
-        await interaction.response.send_message("You need 'Manage Channels' permission to use this command.", ephemeral=True)
+    if not await require_permission(interaction, "manage_channels", "livetweet_manage"):
         return
     
     await interaction.response.defer()
@@ -4800,6 +5055,7 @@ async def livetweet(interaction: discord.Interaction, username: str):
     if channel_id in livetweet_channels and livetweet_channels[channel_id]["username"].lower() == clean_username.lower():
         del livetweet_channels[channel_id]
         save_livetweet_data(livetweet_channels)
+        record_security_event(interaction, "livetweet_manage", "disabled")
         
         embed = discord.Embed(
             title="Disabled",
@@ -4830,6 +5086,7 @@ async def livetweet(interaction: discord.Interaction, username: str):
             "last_tweet_id": last_tweet_id
         }
         save_livetweet_data(livetweet_channels)
+        record_security_event(interaction, "livetweet_manage", "enabled")
         
         embed = discord.Embed(
             title="Enabled",
@@ -4848,10 +5105,8 @@ async def livetweet(interaction: discord.Interaction, username: str):
 
 @bot.tree.command(name="grim_updates", description="Toggle Grim update announcements in this channel")
 async def grim_updates(interaction: discord.Interaction):
-    if not interaction.user.guild_permissions.manage_channels:
-        await interaction.response.send_message("You need 'Manage Channels' permission to use this command.", ephemeral=True)
+    if not await require_permission(interaction, "manage_channels", "grim_updates_manage"):
         return
-    # Defer immediately — GitHub push can take a few seconds
     await interaction.response.defer()
     guild_id = str(interaction.guild_id)
     if guild_id in updates_channels:
@@ -4859,6 +5114,7 @@ async def grim_updates(interaction: discord.Interaction):
         updates_sha.pop(guild_id, None)
         save_updates_data(updates_channels)
         save_updates_sha(updates_sha)
+        record_security_event(interaction, "grim_updates_manage", "disabled")
         embed = discord.Embed(
             title="Update Announcements Disabled",
             description="Grim will no longer post patch notes in this server.",
@@ -4868,44 +5124,23 @@ async def grim_updates(interaction: discord.Interaction):
     else:
         updates_channels[guild_id] = {"channel_id": str(interaction.channel_id)}
         save_updates_data(updates_channels)
+        record_security_event(interaction, "grim_updates_manage", "enabled")
         embed = discord.Embed(
             title="Update Announcements Enabled",
             description=f"Grim will post patch notes in <#{interaction.channel_id}> whenever a new version is deployed.",
             color=discord.Color.from_rgb(18, 18, 18)
         )
         embed.set_footer(text=f"Powered by {BOT_NAME} • {VERSION}")
-    # Push config to GitHub immediately so it survives the next redeploy
-    # NOTE: always push to "updates_data.json" (GitHub path), read from UPDATES_CONFIG_FILE (local persistent path)
-    token = os.environ.get("GITHUB_PERSONAL_ACCESS_TOKEN")
-    if token:
-        try:
-            with open(UPDATES_CONFIG_FILE, "rb") as f:
-                content = base64.b64encode(f.read()).decode()
-            async with aiohttp.ClientSession() as session:
-                headers = {"Authorization": f"token {token}", "Accept": "application/vnd.github.v3+json", "User-Agent": "GrimBot"}
-                async with session.get(f"https://api.github.com/repos/Deathxi/Grim/contents/updates_data.json?ref=main", headers=headers) as r:
-                    existing = await r.json()
-                payload = {"message": "Update updates_data.json via bot command", "content": content, "branch": "main"}
-                if existing.get("sha"):
-                    payload["sha"] = existing["sha"]
-                async with session.put(f"https://api.github.com/repos/Deathxi/Grim/contents/updates_data.json", headers=headers, json=payload) as r:
-                    result = await r.json()
-                if "content" in result:
-                    print(f"[Updates] Pushed updates_data.json to GitHub ✓")
-                else:
-                    print(f"[Updates] GitHub push failed: {result.get('message')}")
-        except Exception as e:
-            print(f"[Updates] Could not push config to GitHub: {e}")
     await interaction.followup.send(embed=embed)
 
 @bot.tree.command(name="welcome_on", description="Enable welcome messages for new members in this channel")
 async def welcome_on(interaction: discord.Interaction):
-    if not interaction.user.guild_permissions.manage_channels:
-        await interaction.response.send_message("You need 'Manage Channels' permission to use this command.", ephemeral=True)
+    if not await require_permission(interaction, "manage_channels", "welcome_manage"):
         return
     guild_id = str(interaction.guild_id)
     welcome_channels[guild_id] = str(interaction.channel_id)
     save_welcome_data(welcome_channels)
+    record_security_event(interaction, "welcome_manage", "enabled")
     embed = discord.Embed(
         title="Welcome Messages Enabled",
         description=f"New member greetings will be posted in <#{interaction.channel_id}>.",
@@ -4916,13 +5151,13 @@ async def welcome_on(interaction: discord.Interaction):
 
 @bot.tree.command(name="welcome_off", description="Disable welcome messages for new members")
 async def welcome_off(interaction: discord.Interaction):
-    if not interaction.user.guild_permissions.manage_channels:
-        await interaction.response.send_message("You need 'Manage Channels' permission to use this command.", ephemeral=True)
+    if not await require_permission(interaction, "manage_channels", "welcome_manage"):
         return
     guild_id = str(interaction.guild_id)
     if guild_id in welcome_channels:
         del welcome_channels[guild_id]
         save_welcome_data(welcome_channels)
+        record_security_event(interaction, "welcome_manage", "disabled")
         embed = discord.Embed(
             title="Welcome Messages Disabled",
             description="New member greetings have been turned off.",
@@ -4936,6 +5171,8 @@ async def welcome_off(interaction: discord.Interaction):
 # ── Voice Channel Commands ────────────────────────────────────────────────────
 @bot.tree.command(name="vc_join", description="Have Grim join your voice channel")
 async def vc_join(interaction: discord.Interaction):
+    if not await require_permission(interaction, "move_members", "voice_join"):
+        return
     await interaction.response.defer(ephemeral=True)
     guild_id = str(interaction.guild_id)
 
@@ -4960,6 +5197,7 @@ async def vc_join(interaction: discord.Interaction):
     try:
         vc = await channel.connect()
         vc_sessions[guild_id] = {"vc": vc, "empty_since": None}
+        record_security_event(interaction, "voice_join", "success")
         embed = discord.Embed(
             description=f"Joined **{channel.name}**.\nI'll leave automatically if the channel stays empty for 1 hour.",
             color=discord.Color.from_rgb(18, 18, 18)
@@ -4975,6 +5213,8 @@ async def vc_join(interaction: discord.Interaction):
 
 @bot.tree.command(name="vc_leave", description="Have Grim leave the voice channel")
 async def vc_leave(interaction: discord.Interaction):
+    if not await require_permission(interaction, "move_members", "voice_leave"):
+        return
     await interaction.response.defer(ephemeral=True)
     guild_id = str(interaction.guild_id)
 
@@ -4986,6 +5226,7 @@ async def vc_leave(interaction: discord.Interaction):
     channel_name = session["vc"].channel.name
     await session["vc"].disconnect()
     vc_sessions.pop(guild_id, None)
+    record_security_event(interaction, "voice_leave", "success")
     embed = discord.Embed(
         description=f"Left **{channel_name}**.",
         color=discord.Color.from_rgb(18, 18, 18)
@@ -5018,7 +5259,7 @@ async def on_message(message):
     if message.author.bot:
         return
     
-    banned = moderation_data.get("banned_words", [])
+    banned = get_guild_banned_words(str(message.guild.id)) if message.guild else []
     if banned:
         content_lower = message.content.lower()
         for word in banned:
@@ -5159,6 +5400,10 @@ async def info(ctx):
 
 @bot.command(name="haiku")
 async def haiku(ctx):
+    guild_id = str(ctx.guild.id) if ctx.guild else "dm"
+    if not _rate_limit_allows_actor(guild_id, str(ctx.author.id), "external_ai"):
+        await ctx.send("Too many requests recently. Please try again in a minute.")
+        return
     haiku_text = await generate_haiku()
     
     if haiku_text is None:
@@ -5206,8 +5451,7 @@ async def help_grim(ctx):
 
 @bot.tree.command(name="grim_github_test", description="Test GitHub connection and token status (admin only)")
 async def grim_github_test(interaction: discord.Interaction):
-    if not interaction.user.guild_permissions.administrator:
-        await interaction.response.send_message("admins only.", ephemeral=True)
+    if not await require_permission(interaction, "administrator", "github_diagnostic", administrator=True):
         return
     await interaction.response.defer(ephemeral=True)
     token = os.environ.get("GITHUB_PERSONAL_ACCESS_TOKEN", "")
@@ -5226,20 +5470,32 @@ async def grim_github_test(interaction: discord.Interaction):
             has_repo = "repo" in scopes
             lines = [
                 f"✅ Token valid — authenticated as **{login}**",
-                f"Scopes: `{scopes}`",
                 f"Repo access: {'✅' if has_repo else '❌ missing `repo` scope'}",
-                f"Token prefix: `{token[:10]}...`",
             ]
+            record_security_event(interaction, "github_diagnostic", "success", {"repo_access": has_repo})
             await interaction.followup.send("\n".join(lines), ephemeral=True)
         else:
-            await interaction.followup.send(f"❌ GitHub returned `{status}`: {data.get('message', 'unknown error')}\nToken prefix: `{token[:10]}...`", ephemeral=True)
+            record_security_event(interaction, "github_diagnostic", "failed", {"status": status})
+            await interaction.followup.send(
+                f"❌ GitHub returned `{status}`: {data.get('message', 'unknown error')}",
+                ephemeral=True,
+            )
     except Exception as e:
-        await interaction.followup.send(f"❌ Request failed: {e}", ephemeral=True)
+        record_security_event(interaction, "github_diagnostic", "failed", {"reason": type(e).__name__})
+        await interaction.followup.send("❌ GitHub diagnostic request failed.", ephemeral=True)
 
 @bot.tree.command(name="grim_remember", description="Give Grim a permanent memory about this server")
 @discord.app_commands.describe(memory="The fact or detail you want Grim to remember")
 async def grim_remember(interaction: discord.Interaction, memory: str):
+    if not await require_permission(interaction, "administrator", "memory_add", administrator=True):
+        return
     guild_id = str(interaction.guild_id)
+    memory = memory.strip()
+    if not memory or len(memory) > 500:
+        await interaction.response.send_message(
+            "Memories must be between 1 and 500 characters.", ephemeral=True
+        )
+        return
     if guild_id not in grim_memories:
         grim_memories[guild_id] = []
     if memory in grim_memories[guild_id]:
@@ -5247,6 +5503,7 @@ async def grim_remember(interaction: discord.Interaction, memory: str):
         return
     grim_memories[guild_id].append(memory)
     save_grim_memories()
+    record_security_event(interaction, "memory_add", "success", {"memory_length": len(memory)})
     embed = discord.Embed(
         description=f"got it. i'll remember that.",
         color=discord.Color.from_rgb(18, 18, 18)
@@ -5257,6 +5514,8 @@ async def grim_remember(interaction: discord.Interaction, memory: str):
 
 @bot.tree.command(name="grim_memories", description="View everything Grim has been told to remember about this server")
 async def grim_memories_cmd(interaction: discord.Interaction):
+    if not await require_permission(interaction, "administrator", "memory_list", administrator=True):
+        return
     guild_id = str(interaction.guild_id)
     memories = grim_memories.get(guild_id, [])
     embed = discord.Embed(
@@ -5274,6 +5533,8 @@ async def grim_memories_cmd(interaction: discord.Interaction):
 @bot.tree.command(name="grim_forget", description="Remove a memory Grim has about this server")
 @discord.app_commands.describe(number="The memory number from /grim_memories")
 async def grim_forget(interaction: discord.Interaction, number: int):
+    if not await require_permission(interaction, "administrator", "memory_remove", administrator=True):
+        return
     guild_id = str(interaction.guild_id)
     memories = grim_memories.get(guild_id, [])
     if not memories:
@@ -5285,6 +5546,7 @@ async def grim_forget(interaction: discord.Interaction, number: int):
     removed = memories.pop(number - 1)
     grim_memories[guild_id] = memories
     save_grim_memories()
+    record_security_event(interaction, "memory_remove", "success", {"memory_index": number})
     embed = discord.Embed(
         description=f"forgotten.",
         color=discord.Color.from_rgb(18, 18, 18)
@@ -5317,6 +5579,8 @@ async def grim_language(interaction: discord.Interaction, language: str | None =
             )
         await interaction.response.send_message(message, ephemeral=True)
         return
+    if not await require_member_state_action(interaction, "language_preference"):
+        return
 
     normalized = normalize_language(language)
     if normalized is None:
@@ -5328,6 +5592,7 @@ async def grim_language(interaction: discord.Interaction, language: str | None =
 
     if normalized == "auto":
         clear_member_language_preference(guild_id, member_id)
+        record_security_event(interaction, "language_preference", "cleared")
         await interaction.response.send_message(
             "auto language matching is on. i'll reply in the language of your newest message.",
             ephemeral=True,
@@ -5335,6 +5600,7 @@ async def grim_language(interaction: discord.Interaction, language: str | None =
         return
 
     save_member_language_preference(guild_id, member_id, normalized)
+    record_security_event(interaction, "language_preference", "saved")
     await interaction.response.send_message(
         f"got it. i'll reply to you in **{language_label(normalized)}** until you switch back to Auto.",
         ephemeral=True,
@@ -5346,6 +5612,8 @@ async def grim_language(interaction: discord.Interaction, language: str | None =
     text="Text to translate",
 )
 async def grim_translate(interaction: discord.Interaction, language: str, text: str):
+    if not await require_external_action(interaction):
+        return
     clean_text = text.strip()
     if not clean_text:
         await interaction.response.send_message("give me some text to translate.", ephemeral=True)
@@ -5385,9 +5653,13 @@ async def grim_translate(interaction: discord.Interaction, language: str, text: 
     embed.set_footer(text=f"Grim · {VERSION}")
     await interaction.followup.send(embed=embed)
 
-token = os.environ.get("DISCORD_TOKEN")
-if not token:
-    print("ERROR: DISCORD_TOKEN not found in environment variables!")
-    print("Please add your Discord bot token as a secret.")
-else:
+def run_bot():
+    token = os.environ.get("DISCORD_TOKEN")
+    if not token:
+        print("ERROR: DISCORD_TOKEN not found in environment variables!")
+        print("Please add your Discord bot token as a secret.")
+        return
     bot.run(token)
+
+if __name__ == "__main__":
+    run_bot()

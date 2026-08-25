@@ -22,9 +22,11 @@ FILES = [
     "run_grim_backup.sh",
     "setup_vps.sh",
     "BACKUP_RESTORE.md",
+    "OPERATIONS_SECURITY.md",
     "scripts/post-merge.sh",
     "systemd/grim-backup.service",
     "systemd/grim-backup.timer",
+    "tests/test_security_controls.py",
 ]
 # NOTE: version.txt and updates_data.json are runtime data managed exclusively by the deployed bot.
 # Never push them from this script — the dev environment has stale copies that would corrupt the real data.
