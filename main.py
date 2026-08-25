@@ -4358,7 +4358,6 @@ def build_server_dossier_embed(
     if banner and getattr(banner, "url", None):
         embed.set_image(url=banner.url)
 
-    embed.set_author(name="GRIM // SERVER DOSSIER")
     embed.add_field(name="✧ Server ID", value=f"`{guild.id}`", inline=False)
     embed.add_field(name="✧ Owner", value=_server_owner_label(guild), inline=True)
     embed.add_field(name="✧ Verification", value=_server_verification_label(guild), inline=True)
@@ -4373,7 +4372,7 @@ def build_server_dossier_embed(
     embed.add_field(name="✧ Roles", value=f"`{role_count:,}`", inline=True)
     embed.add_field(name="✧ Boosts", value=f"`{boost_count:,}`", inline=True)
     if bot_latency is not None:
-        embed.add_field(name="✧ Grim Link", value=f"`{bot_latency:,} ms`", inline=True)
+        embed.add_field(name="✧ Grim Ping", value=f"`{bot_latency:,} ms`", inline=True)
 
     locale = str(getattr(guild, "preferred_locale", "") or "Not set").replace("-", " ")
     preferences = language_preferences or []

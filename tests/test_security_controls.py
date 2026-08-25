@@ -352,7 +352,7 @@ class SecurityControlsTests(unittest.TestCase):
         fields = {field.name: field for field in embed.fields}
 
         self.assertEqual(embed.title, "𖦏 𝕾𝖊𝖈𝖑𝖚𝖉𝖊")
-        self.assertEqual(embed.author.name, "GRIM // SERVER DOSSIER")
+        self.assertNotIn("author", embed.to_dict())
         self.assertEqual(embed.thumbnail.url, "https://cdn.example/icon.png")
         self.assertEqual(embed.image.url, "https://cdn.example/banner.png")
         self.assertEqual(
@@ -362,6 +362,7 @@ class SecurityControlsTests(unittest.TestCase):
         self.assertFalse(fields["✧ Server ID"].inline)
         self.assertEqual(fields["✧ Text Channels"].value, "`22`")
         self.assertEqual(fields["✧ Voice Channels"].value, "`4`")
+        self.assertEqual(fields["✧ Grim Ping"].value, "`42 ms`")
         self.assertIn("English 🇺🇸 · `2`", fields["✧ Language Signal"].value)
         self.assertIn("Spanish 🇪🇸 · `1`", fields["✧ Language Signal"].value)
         emblem_fields = [
