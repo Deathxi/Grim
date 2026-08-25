@@ -904,8 +904,6 @@ def save_member_log_channels():
     _atomic_json_write(MEMBER_LOG_CHANNELS_FILE, member_log_channels)
 
 member_log_channels = load_member_log_channels()
-SERVER_DOSSIER_PREVIEW_ON_STARTUP = True
-_server_dossier_preview_posted = False
 
 def is_private_member_log_channel(channel, guild):
     """Departure cards may only target a channel hidden from the guild default role."""
@@ -4087,8 +4085,6 @@ async def on_ready():
         print(f"[VC] Resumed tracking for {len(_vc_active_sessions)} member(s) already in voice")
 
     _bump_version()
-    if SERVER_DOSSIER_PREVIEW_ON_STARTUP:
-        asyncio.create_task(post_server_dossier_preview_to_staff())
     if os.environ.get("REPL_ID"):
         await _push_version_to_github()   # atomic — must succeed before notification fires
         asyncio.create_task(push_to_github_on_startup())
@@ -4369,34 +4365,6 @@ def build_server_dossier_embed(guild, language_preferences=None, bot_latency=Non
     )
     embed.set_footer(text=f"Grim · server dossier · {get_current_version()}")
     return embed
-
-async def post_server_dossier_preview_to_staff():
-    """Temporary one-off production-layout preview for the configured private staff log."""
-    global _server_dossier_preview_posted
-    if _server_dossier_preview_posted:
-        return
-    _server_dossier_preview_posted = True
-    for guild_id, channel_id in list(member_log_channels.items()):
-        guild = bot.get_guild(int(guild_id))
-        if not guild:
-            continue
-        try:
-            channel = bot.get_channel(int(channel_id)) or await bot.fetch_channel(int(channel_id))
-            if (
-                str(getattr(getattr(channel, "guild", None), "id", None)) != str(guild.id)
-                or not is_private_member_log_channel(channel, guild)
-            ):
-                continue
-            language_preferences = await asyncio.to_thread(get_guild_language_preferences, guild.id)
-            await channel.send(embed=build_server_dossier_embed(
-                guild,
-                language_preferences=language_preferences,
-                bot_latency=round(bot.latency * 1000),
-            ))
-            print(f"[Server Dossier] Posted one-off staff preview in channel {channel_id}")
-            return
-        except Exception as error:
-            print(f"[Server Dossier] Could not post staff preview in channel {channel_id}: {error}")
 
 @bot.tree.command(name="server", description="View Grim's server dossier")
 async def server_info(interaction: discord.Interaction):

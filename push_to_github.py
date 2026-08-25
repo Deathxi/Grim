@@ -102,6 +102,11 @@ else:
                 "content": base64.b64encode(content).decode(),
                 "encoding": "base64"
             })
+            if "sha" not in blob:
+                raise SystemExit(
+                    f"GitHub blob creation failed for {filepath}: "
+                    f"{blob.get('message', 'unknown GitHub error')}"
+                )
             tree.append({
                 "path": filepath,
                 "mode": "100644",
@@ -126,12 +131,20 @@ else:
             "tree": new_tree["sha"],
             "parents": [head_sha]
         })
+        if "sha" not in new_commit:
+            raise SystemExit(
+                f"GitHub commit creation failed: {new_commit.get('message', 'unknown GitHub error')}"
+            )
 
         # Update branch ref
-        api("PATCH", f"/repos/{REPO}/git/refs/heads/{BRANCH}", {
+        updated_ref = api("PATCH", f"/repos/{REPO}/git/refs/heads/{BRANCH}", {
             "sha": new_commit["sha"],
             "force": False
         })
+        if "object" not in updated_ref:
+            raise SystemExit(
+                f"GitHub branch update failed: {updated_ref.get('message', 'unknown GitHub error')}"
+            )
 
         # Update stored main.py hash if it was pushed
         if "main.py" in to_push:
