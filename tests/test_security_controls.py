@@ -137,6 +137,11 @@ class SecurityControlsTests(unittest.TestCase):
         self.assertFalse(main.is_grim_birthday(main.datetime(2026, 11, 24)))
         self.assertFalse(main.is_grim_birthday(main.datetime(2026, 11, 26)))
 
+    def test_grim_clock_uses_pacific_timezone(self):
+        current = main.get_grim_current_time()
+        self.assertEqual(current.tzinfo, main.GRIM_TIMEZONE)
+        self.assertIn(current.tzname(), {"PST", "PDT"})
+
     def test_moderation_words_are_server_scoped(self):
         main.set_guild_banned_words("one", ["alpha"])
         main.set_guild_banned_words("two", ["beta"])

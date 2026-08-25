@@ -15,6 +15,7 @@ from discord.ext import commands, tasks
 from discord import ui
 from openai import OpenAI
 import tweepy
+from zoneinfo import ZoneInfo
 
 BOT_START_TIME = None
 
@@ -383,6 +384,11 @@ import time
 from datetime import datetime, timezone, timedelta
 ghostwrite_cache = {}
 CACHE_TTL = 900  # 15 minutes
+GRIM_TIMEZONE = ZoneInfo("America/Los_Angeles")
+
+def get_grim_current_time():
+    """Return Grim's current time in the creator's Pacific timezone."""
+    return datetime.now(GRIM_TIMEZONE)
 
 # Storage for scheduled ghostwrites: {channel_id: {"username": str, "topic": str, "interval_hours": int, "last_run": float}}
 GHOSTWRITE_LIVE_FILE = _data_path("ghostwrite_live_data.json")
@@ -1085,7 +1091,7 @@ updates_sha = load_updates_sha()
 GRIM_BIRTHDAY_MONTH = 11
 GRIM_BIRTHDAY_DAY = 25
 GRIM_BIRTHDAY_MESSAGE = "Happy Birthday to me :)"
-GRIM_BIRTHDAY_TIMEZONE = timezone(timedelta(hours=-8))
+GRIM_BIRTHDAY_TIMEZONE = GRIM_TIMEZONE
 GRIM_BIRTHDAY_FILE = _data_path("grim_birthday_announcements.json")
 
 def load_grim_birthday_announcements():
@@ -1810,7 +1816,7 @@ async def generate_contextual_reply(message: discord.Message) -> str | None:
         digest_block = "Not yet generated — will be ready after the server has some activity."
 
     # Current date/time — always injected so Grim is grounded in today
-    now_str = datetime.now().strftime("%A, %B %d, %Y — %I:%M %p")
+    now_str = get_grim_current_time().strftime("%A, %B %d, %Y — %I:%M %p %Z")
 
     # Live search enrichment — if the message asks about real-time info, fetch it now
     LIVE_INTENT_KEYWORDS = [
