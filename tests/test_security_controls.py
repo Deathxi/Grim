@@ -299,6 +299,8 @@ class SecurityControlsTests(unittest.TestCase):
         self.assertIn("server", slash_names)
         self.assertIn("members", slash_names)
         self.assertIn("memberlog", slash_names)
+        self.assertIn("language", slash_names)
+        self.assertIn("grim_language", slash_names)
         self.assertNotIn("info", slash_names)
         self.assertNotIn("info-server", slash_names)
         self.assertNotIn("info-members", slash_names)

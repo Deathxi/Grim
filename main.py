@@ -6620,11 +6620,10 @@ async def grim_forget(interaction: discord.Interaction, number: int):
     embed.set_footer(text=f"Grim · {VERSION}")
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
-@bot.tree.command(name="grim_language", description="Set or view your preferred language for Grim replies")
-@discord.app_commands.describe(
-    language="Common language name or ISO/BCP-47 code; use Auto to match each message"
-)
-async def grim_language(interaction: discord.Interaction, language: str | None = None):
+async def _handle_language_preference(
+    interaction: discord.Interaction,
+    language: str | None = None,
+):
     if not interaction.guild_id:
         await interaction.response.send_message(
             "language preferences are available inside a server.", ephemeral=True
@@ -6670,6 +6669,20 @@ async def grim_language(interaction: discord.Interaction, language: str | None =
         f"got it. i'll reply to you in **{language_label(normalized)}** until you switch back to Auto.",
         ephemeral=True,
     )
+
+@bot.tree.command(name="language", description="Set or view your preferred language for Grim replies")
+@discord.app_commands.describe(
+    preference="Language for Grim replies; use Auto to match each message"
+)
+async def language(interaction: discord.Interaction, preference: str | None = None):
+    await _handle_language_preference(interaction, preference)
+
+@bot.tree.command(name="grim_language", description="Set or view your preferred language for Grim replies")
+@discord.app_commands.describe(
+    language="Common language name or ISO/BCP-47 code; use Auto to match each message"
+)
+async def grim_language(interaction: discord.Interaction, language: str | None = None):
+    await _handle_language_preference(interaction, language)
 
 @bot.tree.command(name="grim_translate", description="Translate text with Grim")
 @discord.app_commands.describe(

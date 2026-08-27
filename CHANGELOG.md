@@ -77,6 +77,7 @@ Version 2.0 begins Grim's security-first operations phase.
 ## November 2025
 
 ### Added
+- `/language [preference]` — Set or view a preferred language with a simpler command; `/grim_language` remains available as an alias.
 - Initial bot setup for Seclude & Affiliates.
 - `/server` — Display server status and member information.
 - `/haiku` — Generate an AI-written inspirational haiku via xAI Grok.
