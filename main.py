@@ -6345,32 +6345,44 @@ async def on_message(message):
         if profile_needs_update(gid, mid, msg_count):
             asyncio.create_task(_synthesize_member_profile(gid, mid, name, msg_count))
 
-        # 0.5% chance to drop a comical surveillance warning
-        if random.random() < 0.005 and message.channel.type in (discord.ChannelType.text, discord.ChannelType.news):
+        # 0.2% chance to drop a darkly witty security warning
+        if random.random() < 0.002 and message.channel.type in (discord.ChannelType.text, discord.ChannelType.news):
             _SURVEILLANCE_WARNINGS = [
-                "Palantir just flagged this channel.",
-                "Palantir's sentiment analysis is running hot on this one.",
-                "Palantir added that to a profile. somewhere.",
-                "Blackrock is watching. they're always watching.",
-                "Blackrock's data team just logged this.",
-                "Blackrock owns the servers this is running through.",
-                "META's ad algorithm just learned something new about you.",
-                "META filed that under 'behavioral signals.'",
-                "META already sold that sentence to three advertisers.",
-                "the NSA has a copy of this. they always do.",
-                "NSA flagged that keyword. enjoy your day.",
-                "the NSA's passive collection just picked that up.",
-                "the CIA opened a new tab for this.",
-                "a CIA contractor just got an alert.",
-                "the CIA doesn't comment on ongoing operations.",
-                "Interpol cross-referenced that. internationally.",
-                "Interpol has a file on this channel now.",
-                "Interpol's digital crimes unit sends their regards.",
+                "the algorithm has reviewed your coping mechanisms.",
+                "your digital footprint just requested witness protection.",
+                "that message is now part of a quarterly risk assessment.",
+                "somewhere, a compliance officer just felt a disturbance.",
+                "the cloud remembers. the cloud always remembers.",
+                "your future biographer has entered this chat.",
+                "the data broker called that one a personality trait.",
+                "your metadata has been forwarded to someone with a lanyard.",
+                "the recommendation engine thinks this is your villain origin story.",
+                "the audit log has opinions. none of them are comforting.",
+                "your privacy settings just sighed and closed their eyes.",
+                "the server room got colder when you sent that.",
+                "your digital shadow is now slightly more employable than you.",
+                "that sentence has been tagged: suspiciously human.",
+                "the terms of service just developed a nervous twitch.",
+                "your browser history has requested legal representation.",
+                "a data broker saw that and called it a buying signal.",
+                "the machine-learning model has mistaken this for confidence.",
+                "your notification was intercepted by the Department of Vibes.",
+                "the compliance dashboard just changed from green to spiritually complicated.",
+                "your message is being archived under 'future evidence.'",
+                "someone's dashboard just grew a new little red dot.",
+                "the privacy policy read that and became performance art.",
+                "your digital afterlife now has a footnote.",
+                "the machine has decided this is a teachable moment.",
+                "a risk analyst somewhere just whispered, 'interesting.'",
+                "your data trail is beginning to look less like a trail and more like a confession.",
+                "the watchlist is probably fine. probably.",
+                "your personality has been converted into an engagement metric.",
+                "the archive has accepted your offering.",
             ]
             await message.channel.send(random.choice(_SURVEILLANCE_WARNINGS))
 
-        # 0.01% chance to immortalize the message as a fancy quote embed
-        elif random.random() < 0.0001 and message.channel.type in (discord.ChannelType.text, discord.ChannelType.news) and len(message.content) > 10:
+        # 0.1% chance to immortalize the message as a fancy quote embed
+        elif random.random() < 0.001 and message.channel.type in (discord.ChannelType.text, discord.ChannelType.news) and len(message.content) > 10:
             date_str = message.created_at.strftime("%B / %Y")
             quote_embed = discord.Embed(
                 description=f'*" {message.content} "*',
@@ -6379,27 +6391,6 @@ async def on_message(message):
             quote_embed.set_author(name=f"— {message.author.display_name}  ·  {date_str}")
             quote_embed.set_thumbnail(url=message.author.display_avatar.url)
             await message.channel.send(embed=quote_embed)
-
-        # 0.5% chance to drop a joke
-        elif random.random() < 0.005 and message.channel.type in (discord.ChannelType.text, discord.ChannelType.news):
-            _JOKES = [
-                "why don't scientists trust atoms? because they make up everything.",
-                "i told my computer i needed a break. now it won't stop sending me Kit-Kat ads.",
-                "why do programmers prefer dark mode? because light attracts bugs.",
-                "a SQL query walks into a bar, walks up to two tables and asks... can i join you?",
-                "why did the scarecrow win an award? because he was outstanding in his field.",
-                "i asked my dog what 2 minus 2 is. he said nothing.",
-                "why can't you give Elsa a balloon? because she'll let it go.",
-                "i'm reading a book about anti-gravity. it's impossible to put down.",
-                "why did the bicycle fall over? because it was two-tired.",
-                "my wife told me i had to stop acting like a flamingo. i had to put my foot down.",
-                "i used to hate facial hair but then it grew on me.",
-                "i'm on a seafood diet. i see food and i eat it.",
-                "what do you call a fake noodle? an impasta.",
-                "why did the math book look so sad? it had too many problems.",
-                "i told a joke about construction. i'm still working on it.",
-            ]
-            await message.channel.send(random.choice(_JOKES))
 
     if bot.user in message.mentions:
         # Reset counter — Grim is already responding, no need to also proactively chime

@@ -67,6 +67,7 @@ Version 2.0 begins Grim's security-first operations phase.
 - `Quote` message context menu command (right-click → Apps → Quote) — posts a stylized embed with the quoted user's large profile picture and their message in curly quotes.
 
 ### Fixed
+- Adjusted passive message events: random quote embeds now trigger at 0.1%, the joke response was removed, and dark security quips now trigger at 0.2% with an expanded set of prompts.
 - `/newsfeed_cancel`, `/newsfeed_edit`, and `/newsfeed_status` now correctly filter feeds by stored `guild_id` instead of relying on the unreliable `get_channel()` cache lookup.
 - `guild_id` is now stored on all new feeds at creation time.
 - @ mention replies now work correctly (resolved Message Content Intent configuration).
