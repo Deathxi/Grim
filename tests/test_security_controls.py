@@ -309,6 +309,22 @@ class SecurityControlsTests(unittest.TestCase):
         self.assertIn("server", prefix_names)
         self.assertNotIn("info", prefix_names)
 
+    def test_patch_notes_extract_only_new_changelog_bullets(self):
+        patch = """@@ -1,2 +1,4 @@
+ ## Fixed
+-old note
++- new addition
++  - nested addition
+ context
++++ b/CHANGELOG.md
+"""
+        notes = main._extract_added_changelog_notes(patch)
+        self.assertEqual(notes, ["new addition", "nested addition"])
+        self.assertEqual(
+            main._format_patch_notes(notes),
+            "• new addition\n• nested addition",
+        )
+
     def test_server_info_uses_grim_layout_and_aggregate_language_data(self):
         main.save_member_language_preference("50", "10", "english")
         main.save_member_language_preference("50", "11", "english")

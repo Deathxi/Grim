@@ -4172,24 +4172,28 @@ def _save_last_announced_version(version: str):
     with open(LAST_ANNOUNCED_VERSION_FILE, "w") as f:
         f.write(version)
 
-def _load_changelog_notes() -> str:
-    """Pull the most recent section from CHANGELOG.md if it exists."""
-    try:
-        with open("CHANGELOG.md", "r") as f:
-            lines = f.readlines()
-        notes = []
-        in_section = False
-        for line in lines:
-            if line.startswith("## ") and not in_section:
-                in_section = True
-                continue
-            if line.startswith("## ") and in_section:
-                break
-            if in_section and line.strip():
-                notes.append(line.rstrip())
-        return "\n".join(notes[:10]) if notes else ""
-    except:
-        return ""
+def _extract_added_changelog_notes(patch: str) -> list[str]:
+    """Extract newly added Markdown bullet points from a GitHub changelog patch."""
+    notes = []
+    for line in patch.splitlines():
+        if not line.startswith("+") or line.startswith("+++"):
+            continue
+        content = line[1:].strip()
+        if content.startswith(("- ", "* ")):
+            note = content[2:].strip()
+            if note and note not in notes:
+                notes.append(note)
+    return notes
+
+def _format_patch_notes(notes: list[str], max_notes: int = 8) -> str:
+    """Format changelog bullets for a compact Discord embed field."""
+    formatted = []
+    for note in notes[:max_notes]:
+        clean_note = " ".join(note.split())
+        if len(clean_note) > 240:
+            clean_note = f"{clean_note[:237].rstrip()}..."
+        formatted.append(f"• {clean_note}")
+    return "\n".join(formatted)
 
 async def post_update_notification():
     """Post an update embed to all registered channels when the version has changed.
@@ -4213,6 +4217,7 @@ async def post_update_notification():
     branch = "main"
     new_commits = []
     changed_files = {}
+    patch_notes = []
     token = os.environ.get("GITHUB_PERSONAL_ACCESS_TOKEN")
     if token:
         try:
@@ -4235,6 +4240,10 @@ async def post_update_notification():
                             detail = await r.json()
                         for file in detail.get("files", []):
                             changed_files[file["filename"]] = file["status"]
+                            if file["filename"] == "CHANGELOG.md" and file.get("patch"):
+                                patch_notes.extend(
+                                    _extract_added_changelog_notes(file["patch"])
+                                )
                     updates_sha["_global"] = latest_sha
                     save_updates_sha(updates_sha)
         except Exception as e:
@@ -4253,6 +4262,12 @@ async def post_update_notification():
         description=description,
         color=discord.Color.from_rgb(18, 18, 18)
     )
+    if patch_notes:
+        embed.add_field(
+            name="Patch Notes",
+            value=_format_patch_notes(patch_notes),
+            inline=False,
+        )
     embed.add_field(name="Repository", value=f"[{repo}](https://github.com/{repo})", inline=True)
     if changed_files:
         embed.add_field(name="Changes", value=str(len(changed_files)), inline=True)
