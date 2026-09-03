@@ -16,6 +16,9 @@ Version 2.0 begins Grim's security-first operations phase.
 - Renamed management commands to `/server`, `/members`, and `/memberlog ENABLE|DISABLE` for clearer server administration.
 - Redesigned `/server` as Grim's privacy-aware server info card with banner, emojis, separated text and voice channel totals, and aggregate language signals.
 
+### Fixed
+- Saved `/language` preferences now apply consistently to the creator account as well as every other member; Auto remains the default.
+
 ---
 
 ## June 2026

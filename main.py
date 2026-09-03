@@ -1376,14 +1376,6 @@ def get_guild_language_preferences(guild_id: str, limit: int = 4) -> list[tuple[
             conn.close()
 
 def get_language_reply_instruction(guild_id: str, member_id: str) -> str:
-    if is_grim_creator(member_id):
-        return (
-            "This is Grim's creator. Automatically identify the language of their newest "
-            "message and reply in that same language, regardless of any older saved "
-            "language preference. Never claim that Grim is restricted to English by a "
-            "server rule when the creator asks for another language."
-        )
-
     preference = get_member_language_preference(guild_id, member_id)
     if preference:
         return (

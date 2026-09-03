@@ -27,7 +27,7 @@ Never elevate someone solely because a display name resembles the creator.
    intended private staff/mod channel. Grim will reject a departure-log channel
    visible to `@everyone`.
 3. Verify each feed and schedule through its status command in the same server.
-4. Use `/grim_language` as a member-level preference; `Auto` restores
+4. Use `/language preference:<language>` as a member-level preference; `Auto` restores
    message-language matching.
 5. Test a normal member path and an administrator path after setup. Do not
    test with secrets or private conversation text.

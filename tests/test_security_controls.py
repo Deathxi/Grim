@@ -325,6 +325,21 @@ class SecurityControlsTests(unittest.TestCase):
             "• new addition\n• nested addition",
         )
 
+    def test_creator_saved_language_preference_is_honored(self):
+        guild_id = "50"
+        creator_id = str(main.CREATOR_DISCORD_ID)
+        main.save_member_language_preference(guild_id, creator_id, "spanish")
+
+        instruction = main.get_language_reply_instruction(guild_id, creator_id)
+
+        self.assertIn("Spanish", instruction)
+        self.assertIn("Reply entirely in that language", instruction)
+        self.assertNotIn("regardless of any older saved", instruction)
+
+        main.clear_member_language_preference(guild_id, creator_id)
+        auto_instruction = main.get_language_reply_instruction(guild_id, creator_id)
+        self.assertIn("Automatically identify the language", auto_instruction)
+
     def test_server_info_uses_grim_layout_and_aggregate_language_data(self):
         main.save_member_language_preference("50", "10", "english")
         main.save_member_language_preference("50", "11", "english")
