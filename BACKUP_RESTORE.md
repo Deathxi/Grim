@@ -13,6 +13,9 @@ in-progress SQLite update. It never backs up `/root/grim/.env`, provider
 credentials, or files with credential-like names inside the data directory.
 The passphrase file is never uploaded.
 
+The latest sanitized live rehearsal record is
+[`docs/backup-rehearsal-2026-09-03.md`](docs/backup-rehearsal-2026-09-03.md).
+
 ## Initial setup
 
 Create a private repository dedicated to backups, for example

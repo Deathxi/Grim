@@ -1557,6 +1557,165 @@ def save_updates_sha(data):
 updates_channels = load_updates_data()
 updates_sha = load_updates_sha()
 
+RUNTIME_HEARTBEAT_FILE = _data_path("runtime_heartbeat.json")
+OUTAGE_REPORT_STATE_FILE = _data_path("outage_report_state.json")
+RUNTIME_SESSION_ID = uuid.uuid4().hex
+OUTAGE_REPORT_MIN_SECONDS = 5
+_gateway_disconnected_at = None
+_active_outage_reports = set()
+
+def _load_runtime_heartbeat() -> dict:
+    try:
+        with open(RUNTIME_HEARTBEAT_FILE, "r") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except:
+        return {}
+
+def _write_runtime_heartbeat(status: str = "online", timestamp: float | None = None):
+    recorded_at = float(timestamp if timestamp is not None else time.time())
+    _atomic_json_write(
+        RUNTIME_HEARTBEAT_FILE,
+        {
+            "session_id": RUNTIME_SESSION_ID,
+            "last_seen": recorded_at,
+            "status": status,
+        },
+    )
+
+def _build_process_outage(previous: dict, recovered_at: float) -> dict | None:
+    if not previous or previous.get("session_id") == RUNTIME_SESSION_ID:
+        return None
+    try:
+        started_at = float(previous["last_seen"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    duration = max(0.0, recovered_at - started_at)
+    if duration < OUTAGE_REPORT_MIN_SECONDS:
+        return None
+    return {
+        "started_at": started_at,
+        "recovered_at": recovered_at,
+        "duration": duration,
+        "kind": (
+            "Unexpected outage"
+            if previous.get("status") == "online"
+            else "Restart / offline period"
+        ),
+    }
+
+def _build_gateway_outage(started_at: float, recovered_at: float) -> dict | None:
+    duration = max(0.0, recovered_at - started_at)
+    if duration < OUTAGE_REPORT_MIN_SECONDS:
+        return None
+    return {
+        "started_at": started_at,
+        "recovered_at": recovered_at,
+        "duration": duration,
+        "kind": "Discord connection outage",
+    }
+
+def _outage_report_id(outage: dict) -> str:
+    raw = (
+        f"{outage['kind']}|{float(outage['started_at']):.3f}|"
+        f"{float(outage['recovered_at']):.3f}"
+    )
+    return hashlib.sha256(raw.encode()).hexdigest()[:20]
+
+def _load_outage_report_state() -> dict:
+    try:
+        with open(OUTAGE_REPORT_STATE_FILE, "r") as f:
+            state = json.load(f)
+        if not isinstance(state, dict):
+            raise ValueError("outage report state must be an object")
+        state.setdefault("pending", {})
+        state.setdefault("delivered_ids", [])
+        return state
+    except:
+        return {"pending": {}, "delivered_ids": []}
+
+def _save_outage_report_state(state: dict):
+    _atomic_json_write(OUTAGE_REPORT_STATE_FILE, state)
+
+def _queue_outage_report(outage: dict) -> str | None:
+    report_id = _outage_report_id(outage)
+    state = _load_outage_report_state()
+    if report_id in state["delivered_ids"]:
+        return None
+    state["pending"].setdefault(
+        report_id,
+        {"outage": outage, "delivered_channels": []},
+    )
+    _save_outage_report_state(state)
+    return report_id
+
+def _mark_outage_channel_delivered(report_id: str, channel_id: str):
+    state = _load_outage_report_state()
+    pending = state["pending"].get(report_id)
+    if not pending:
+        return
+    delivered = pending.setdefault("delivered_channels", [])
+    if channel_id not in delivered:
+        delivered.append(channel_id)
+    _save_outage_report_state(state)
+
+def _finish_outage_report(report_id: str):
+    state = _load_outage_report_state()
+    state["pending"].pop(report_id, None)
+    delivered_ids = state.setdefault("delivered_ids", [])
+    if report_id not in delivered_ids:
+        delivered_ids.append(report_id)
+    state["delivered_ids"] = delivered_ids[-50:]
+    _save_outage_report_state(state)
+
+def _load_pending_outage_reports() -> list[dict]:
+    state = _load_outage_report_state()
+    return [
+        pending["outage"]
+        for pending in state["pending"].values()
+        if isinstance(pending, dict) and isinstance(pending.get("outage"), dict)
+    ]
+
+def _schedule_outage_report(outage: dict):
+    report_id = _queue_outage_report(outage)
+    if not report_id or report_id in _active_outage_reports:
+        return
+    _active_outage_reports.add(report_id)
+    asyncio.create_task(post_outage_after_report(outage, report_id))
+
+def _format_outage_timestamp(timestamp: float) -> str:
+    return datetime.fromtimestamp(timestamp, GRIM_TIMEZONE).strftime(
+        "%B %d, %Y · %I:%M:%S %p %Z"
+    )
+
+def _build_outage_report_embed(outage: dict) -> discord.Embed:
+    embed = discord.Embed(
+        title="Grim · Offline After-Report",
+        description=(
+            "Grim is back online. Times are approximate and based on the last "
+            "successful heartbeat."
+        ),
+        color=discord.Color.from_rgb(18, 18, 18),
+    )
+    embed.add_field(name="Event", value=outage["kind"], inline=False)
+    embed.add_field(
+        name="Offline From",
+        value=f"`{_format_outage_timestamp(outage['started_at'])}`",
+        inline=False,
+    )
+    embed.add_field(
+        name="Back Online",
+        value=f"`{_format_outage_timestamp(outage['recovered_at'])}`",
+        inline=False,
+    )
+    embed.add_field(
+        name="Approx. Downtime",
+        value=f"`{_format_duration(outage['duration'])}`",
+        inline=False,
+    )
+    embed.set_footer(text=f"Powered by {BOT_NAME} • {VERSION}")
+    return embed
+
 GRIM_BIRTHDAY_MONTH = 11
 GRIM_BIRTHDAY_DAY = 25
 GRIM_BIRTHDAY_MESSAGE = "Happy Birthday to me :)"
@@ -3779,12 +3938,34 @@ async def health_monitor():
         else:
             tasks_status.append("redditfeed: OK")
 
+        if not runtime_heartbeat.is_running():
+            print("[Health Monitor] Runtime heartbeat not running, restarting...")
+            try:
+                runtime_heartbeat.start()
+                tasks_status.append("heartbeat: RESTARTED")
+            except Exception as e:
+                tasks_status.append(f"heartbeat: FAILED ({e})")
+        else:
+            tasks_status.append("heartbeat: OK")
+
         print(f"[Health Monitor] Status: {', '.join(tasks_status)}")
     except Exception as e:
         print(f"[Health Monitor] Error in health check: {e}")
 
 @health_monitor.before_loop
 async def before_health_monitor():
+    await bot.wait_until_ready()
+
+@tasks.loop(seconds=30)
+async def runtime_heartbeat():
+    """Persist liveness outside the repository for approximate outage reporting."""
+    try:
+        await asyncio.to_thread(_write_runtime_heartbeat)
+    except Exception as e:
+        print(f"[Heartbeat] Could not persist runtime heartbeat: {e}")
+
+@runtime_heartbeat.before_loop
+async def before_runtime_heartbeat():
     await bot.wait_until_ready()
 
 # ── VC empty-channel auto-disconnect ─────────────────────────────────────────
@@ -4010,8 +4191,21 @@ async def sync_from_github():
 
 @bot.event
 async def on_ready():
-    global BOT_START_TIME
-    BOT_START_TIME = time.time()
+    global BOT_START_TIME, _gateway_disconnected_at
+    recovered_at = time.time()
+    first_ready_this_process = not runtime_heartbeat.is_running()
+    previous_heartbeat = _load_runtime_heartbeat() if first_ready_this_process else {}
+    process_outage = (
+        _build_process_outage(previous_heartbeat, recovered_at)
+        if first_ready_this_process
+        else None
+    )
+    gateway_outage = None
+    if _gateway_disconnected_at is not None:
+        gateway_outage = _build_gateway_outage(_gateway_disconnected_at, recovered_at)
+        _gateway_disconnected_at = None
+
+    BOT_START_TIME = recovered_at
     print(f"{bot.user} has connected to Discord!")
     print(f"Bot is in {len(bot.guilds)} server(s)")
     print(f"[Startup] Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S UTC')}")
@@ -4055,6 +4249,11 @@ async def on_ready():
         health_monitor.start()
         print("Started health monitor (checks every 5 minutes)")
 
+    if not runtime_heartbeat.is_running():
+        _write_runtime_heartbeat(timestamp=recovered_at)
+        runtime_heartbeat.start()
+        print("Started runtime heartbeat (updates every 30 seconds)")
+
     if not vc_empty_monitor.is_running():
         vc_empty_monitor.start()
         print("Started VC empty-channel monitor (checks every 2 minutes)")
@@ -4081,6 +4280,30 @@ async def on_ready():
         await _push_version_to_github()   # atomic — must succeed before notification fires
         asyncio.create_task(push_to_github_on_startup())
     asyncio.create_task(post_update_notification())
+    for pending_outage in _load_pending_outage_reports():
+        _schedule_outage_report(pending_outage)
+    if process_outage:
+        _schedule_outage_report(process_outage)
+    if gateway_outage:
+        _schedule_outage_report(gateway_outage)
+
+@bot.event
+async def on_disconnect():
+    global _gateway_disconnected_at
+    if _gateway_disconnected_at is None:
+        _gateway_disconnected_at = time.time()
+        print("[Outage] Discord connection lost; timing recovery.")
+
+@bot.event
+async def on_resumed():
+    global _gateway_disconnected_at
+    if _gateway_disconnected_at is None:
+        return
+    recovered_at = time.time()
+    outage = _build_gateway_outage(_gateway_disconnected_at, recovered_at)
+    _gateway_disconnected_at = None
+    if outage:
+        _schedule_outage_report(outage)
 
 async def push_to_github_on_startup():
     token = os.environ.get("GITHUB_PERSONAL_ACCESS_TOKEN")
@@ -4278,6 +4501,66 @@ async def post_update_notification():
     if posted:
         _save_last_announced_version(VERSION)
         print(f"[Updates] Saved last announced version as {VERSION}")
+
+async def post_outage_after_report(outage: dict, report_id: str | None = None):
+    """Post recovery details to the channels configured by /grim_updates."""
+    report_id = report_id or _queue_outage_report(outage)
+    if not report_id:
+        return
+    try:
+        await asyncio.sleep(5)
+        if not updates_channels:
+            print("[Outage] No update channels registered; keeping after-report pending.")
+            return
+
+        embed = _build_outage_report_embed(outage)
+        for attempt in range(3):
+            state = _load_outage_report_state()
+            pending = state["pending"].get(report_id)
+            if not pending:
+                return
+            delivered = set(pending.get("delivered_channels", []))
+            remaining = [
+                (guild_id, data)
+                for guild_id, data in list(updates_channels.items())
+                if str(data.get("channel_id", "")) not in delivered
+            ]
+            if not remaining:
+                _finish_outage_report(report_id)
+                return
+
+            for guild_id, data in remaining:
+                channel_id = str(data.get("channel_id", ""))
+                try:
+                    channel = await bot.fetch_channel(int(channel_id))
+                    await channel.send(embed=embed)
+                    _mark_outage_channel_delivered(report_id, channel_id)
+                    print(
+                        f"[Outage] Posted {outage['kind']} after-report to "
+                        f"channel {channel_id} in guild {guild_id}"
+                    )
+                except Exception as e:
+                    print(
+                        f"[Outage] Could not post to channel {channel_id} "
+                        f"in guild {guild_id}: {e}"
+                    )
+
+            if attempt < 2:
+                await asyncio.sleep(60)
+
+        state = _load_outage_report_state()
+        pending = state["pending"].get(report_id, {})
+        delivered = set(pending.get("delivered_channels", []))
+        configured = {
+            str(data.get("channel_id", ""))
+            for data in updates_channels.values()
+        }
+        if configured and configured.issubset(delivered):
+            _finish_outage_report(report_id)
+        else:
+            print(f"[Outage] Report {report_id} remains pending after retries.")
+    finally:
+        _active_outage_reports.discard(report_id)
 
 def _server_owner_label(guild) -> str:
     owner = getattr(guild, "owner", None)
@@ -5942,10 +6225,22 @@ async def support(interaction: discord.Interaction):
 
 def _build_quote_embed(content: str, author_name: str, avatar_url: str, created_at) -> discord.Embed:
     date_str = created_at.strftime("%B / %Y")
-    embed = discord.Embed(
-        description=f'*" {content} "*',
-        color=discord.Color.from_rgb(18, 18, 18)
-    )
+    clean_content = " ".join((content or "(no text)").split())
+    framed_quote = f"“ {clean_content} ”"
+    if len(framed_quote) <= 256:
+        embed = discord.Embed(
+            title=framed_quote,
+            color=discord.Color.from_rgb(18, 18, 18),
+        )
+    else:
+        safe_quote = framed_quote[:4090]
+        if len(framed_quote) > 4090:
+            safe_quote = f"{safe_quote[:4087].rstrip()}..."
+        embed = discord.Embed(
+            title="Quoted Message",
+            description=f"**{safe_quote}**",
+            color=discord.Color.from_rgb(18, 18, 18),
+        )
     embed.set_thumbnail(url=avatar_url)
     embed.set_footer(text=f"— {author_name}  ·  {date_str}", icon_url=avatar_url)
     return embed
@@ -5973,6 +6268,32 @@ async def quote_last(interaction: discord.Interaction):
     embed = _build_quote_embed(content, target.author.display_name, target.author.display_avatar.url, target.created_at)
     await interaction.channel.send(embed=embed)
     await interaction.delete_original_response()
+
+@bot.command(name="quote")
+async def quote_reply(ctx: commands.Context):
+    """Quote the Discord message that an ordinary !quote message replies to."""
+    reference = ctx.message.reference
+    if not reference or not reference.message_id:
+        await ctx.send(
+            "reply to a message with `!quote`, or use right-click → Apps → Quote."
+        )
+        return
+
+    target = reference.resolved if isinstance(reference.resolved, discord.Message) else None
+    if target is None:
+        try:
+            target = await ctx.channel.fetch_message(reference.message_id)
+        except Exception:
+            await ctx.send("i couldn't retrieve that message.")
+            return
+
+    embed = _build_quote_embed(
+        target.content or "(no text)",
+        target.author.display_name,
+        target.author.display_avatar.url,
+        target.created_at,
+    )
+    await ctx.send(embed=embed)
 
 @bot.tree.command(name="creator", description="Meet the creator of Grim")
 async def creator(interaction: discord.Interaction):
@@ -6063,17 +6384,25 @@ async def grim_updates(interaction: discord.Interaction):
         record_security_event(interaction, "grim_updates_manage", "disabled")
         embed = discord.Embed(
             title="Update Announcements Disabled",
-            description="Grim will no longer post patch notes in this server.",
+            description=(
+                "Grim will no longer post patch notes or offline after-reports "
+                "in this server."
+            ),
             color=discord.Color.from_rgb(18, 18, 18)
         )
         embed.set_footer(text=f"Powered by {BOT_NAME} • {VERSION}")
     else:
         updates_channels[guild_id] = {"channel_id": str(interaction.channel_id)}
         save_updates_data(updates_channels)
+        for pending_outage in _load_pending_outage_reports():
+            _schedule_outage_report(pending_outage)
         record_security_event(interaction, "grim_updates_manage", "enabled")
         embed = discord.Embed(
             title="Update Announcements Enabled",
-            description=f"Grim will post patch notes in <#{interaction.channel_id}> whenever a new version is deployed.",
+            description=(
+                f"Grim will post patch notes and offline after-reports in "
+                f"<#{interaction.channel_id}>."
+            ),
             color=discord.Color.from_rgb(18, 18, 18)
         )
         embed.set_footer(text=f"Powered by {BOT_NAME} • {VERSION}")
@@ -6390,13 +6719,12 @@ async def on_message(message):
 
         # 0.1% chance to immortalize the message as a fancy quote embed
         elif random.random() < 0.001 and message.channel.type in (discord.ChannelType.text, discord.ChannelType.news) and len(message.content) > 10:
-            date_str = message.created_at.strftime("%B / %Y")
-            quote_embed = discord.Embed(
-                description=f'*" {message.content} "*',
-                color=discord.Color.from_rgb(18, 18, 18)
+            quote_embed = _build_quote_embed(
+                message.content,
+                message.author.display_name,
+                message.author.display_avatar.url,
+                message.created_at,
             )
-            quote_embed.set_author(name=f"— {message.author.display_name}  ·  {date_str}")
-            quote_embed.set_thumbnail(url=message.author.display_avatar.url)
             await message.channel.send(embed=quote_embed)
 
     if bot.user in message.mentions:
@@ -6735,7 +7063,13 @@ def run_bot():
         print("ERROR: DISCORD_TOKEN not found in environment variables!")
         print("Please add your Discord bot token as a secret.")
         return
-    bot.run(token)
+    try:
+        bot.run(token)
+    finally:
+        try:
+            _write_runtime_heartbeat(status="offline")
+        except Exception as e:
+            print(f"[Heartbeat] Could not record shutdown: {e}")
 
 if __name__ == "__main__":
     run_bot()

@@ -15,9 +15,12 @@ Version 2.0 begins Grim's security-first operations phase.
 - Staff-only member history directory with stable Discord-ID tracking, join/leave/rejoin and identity events, compact profile review, and configurable staff-channel departure cards.
 - Renamed management commands to `/server`, `/members`, and `/memberlog ENABLE|DISABLE` for clearer server administration.
 - Redesigned `/server` as Grim's privacy-aware server info card with banner, emojis, separated text and voice channel totals, and aggregate language signals.
+- `/grim_updates` channels now receive offline after-reports when Grim recovers, including the approximate Pacific-time outage window and downtime.
+- Replying to a Discord message with `!quote` now quotes that exact message; the existing right-click Apps → Quote action and `/quote` latest-message command remain available.
 
 ### Fixed
 - Saved `/language` preferences now apply consistently to the creator account as well as every other member; Auto remains the default.
+- Random and manual quote embeds now use a larger, bold title treatment, with a bold fallback for quotes too long for Discord's title limit.
 
 ---
 

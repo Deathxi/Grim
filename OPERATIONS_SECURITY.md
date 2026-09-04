@@ -31,6 +31,9 @@ Never elevate someone solely because a display name resembles the creator.
    message-language matching.
 5. Test a normal member path and an administrator path after setup. Do not
    test with secrets or private conversation text.
+6. Configure `/grim_updates` in the operations channel to receive deployment
+   patch notes and offline after-reports. Outage times are approximate because
+   an abrupt crash may occur between 30-second heartbeats.
 
 ## 3. Routine operations
 

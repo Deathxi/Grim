@@ -12,6 +12,7 @@ Grim is a Discord bot for Seclude & Affiliates. Built with Python and discord.py
 
 ## Commands
 - `/server` - View Grim's server info: identity, structure, language signals, emojis, and banner
+- `/quote` - Quote the latest non-Grim message; right-click a specific message and use Apps → Quote, or reply to it with `!quote`
 - `/haiku` - Generate an inspirational haiku
 - `/meme` - Generate creative meme captions
 - `/rizz` - Get pickup lines for the brave
@@ -51,6 +52,7 @@ Grim is a Discord bot for Seclude & Affiliates. Built with Python and discord.py
 - Explicit text translation into any requested language; no voice or speech features are included
 - Persistent, server-scoped member identity and lifecycle history with staff-only paginated profile review and configurable departure cards; it stores no message contents in the tracker
 - VPS-only weekly encrypted backups of `~/.grim_data` to a separate private GitHub repository; see `BACKUP_RESTORE.md`
+- `/grim_updates` channels receive deployment patch notes and offline after-reports with approximate Pacific-time outage windows
 
 ## Setup
 1. Add your `DISCORD_TOKEN` as a secret

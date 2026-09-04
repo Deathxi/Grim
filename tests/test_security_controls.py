@@ -50,9 +50,11 @@ class SecurityControlsTests(unittest.TestCase):
         self.original_moderation_data = main.moderation_data
         self.original_member_log_file = main.MEMBER_LOG_CHANNELS_FILE
         self.original_member_log_channels = main.member_log_channels
+        self.original_outage_state_file = main.OUTAGE_REPORT_STATE_FILE
         main.CHAT_DB_FILE = str(Path(self.temp_dir.name) / "chat_history.db")
         main.MODERATION_FILE = str(Path(self.temp_dir.name) / "moderation_data.json")
         main.MEMBER_LOG_CHANNELS_FILE = str(Path(self.temp_dir.name) / "member_log_channels.json")
+        main.OUTAGE_REPORT_STATE_FILE = str(Path(self.temp_dir.name) / "outage_report_state.json")
         main.member_log_channels = {}
         main.moderation_data = {"guilds": {}, "legacy_unassigned_words": []}
         main._COMMAND_RATE_LIMITS.clear()
@@ -82,6 +84,7 @@ class SecurityControlsTests(unittest.TestCase):
         main.moderation_data = self.original_moderation_data
         main.MEMBER_LOG_CHANNELS_FILE = self.original_member_log_file
         main.member_log_channels = self.original_member_log_channels
+        main.OUTAGE_REPORT_STATE_FILE = self.original_outage_state_file
         main._COMMAND_RATE_LIMITS.clear()
         self.temp_dir.cleanup()
 
@@ -301,6 +304,7 @@ class SecurityControlsTests(unittest.TestCase):
         self.assertIn("memberlog", slash_names)
         self.assertIn("language", slash_names)
         self.assertIn("grim_language", slash_names)
+        self.assertIn("quote", prefix_names)
         self.assertNotIn("info", slash_names)
         self.assertNotIn("info-server", slash_names)
         self.assertNotIn("info-members", slash_names)
@@ -308,6 +312,80 @@ class SecurityControlsTests(unittest.TestCase):
         self.assertNotIn("grim_memberlog", slash_names)
         self.assertIn("server", prefix_names)
         self.assertNotIn("info", prefix_names)
+
+    def test_quote_embed_uses_large_title_and_bold_long_fallback(self):
+        created = main.datetime(2026, 8, 27, tzinfo=main.timezone.utc)
+        short_embed = main._build_quote_embed(
+            "the short quote", "Noct", "https://cdn.example/avatar.png", created
+        )
+        self.assertEqual(short_embed.title, "“ the short quote ”")
+        self.assertIsNone(short_embed.description)
+
+        long_embed = main._build_quote_embed(
+            "x" * 300, "Noct", "https://cdn.example/avatar.png", created
+        )
+        self.assertEqual(long_embed.title, "Quoted Message")
+        self.assertTrue(long_embed.description.startswith("**“ "))
+        self.assertTrue(long_embed.description.endswith(" ”**"))
+
+        boundary_embed = main._build_quote_embed(
+            "x" * 252, "Noct", "https://cdn.example/avatar.png", created
+        )
+        self.assertEqual(len(boundary_embed.title), 256)
+        overflow_embed = main._build_quote_embed(
+            "x" * 253, "Noct", "https://cdn.example/avatar.png", created
+        )
+        self.assertEqual(overflow_embed.title, "Quoted Message")
+
+        maximum_embed = main._build_quote_embed(
+            "x" * 5000, "Noct", "https://cdn.example/avatar.png", created
+        )
+        self.assertLessEqual(len(maximum_embed.description), 4096)
+
+    def test_outage_report_calculates_previous_session_and_pacific_times(self):
+        recovered_at = 1_788_000_120.0
+        previous = {
+            "session_id": "previous-session",
+            "last_seen": recovered_at - 120,
+            "status": "online",
+        }
+        outage = main._build_process_outage(previous, recovered_at)
+        self.assertEqual(outage["kind"], "Unexpected outage")
+        self.assertEqual(outage["duration"], 120)
+
+        embed = main._build_outage_report_embed(outage)
+        fields = {field.name: field.value for field in embed.fields}
+        self.assertEqual(fields["Approx. Downtime"], "`2m`")
+        self.assertRegex(fields["Offline From"], r"P(?:S|D)T")
+        self.assertRegex(fields["Back Online"], r"P(?:S|D)T")
+        self.assertIsNone(
+            main._build_process_outage(
+                {"session_id": main.RUNTIME_SESSION_ID, "last_seen": recovered_at - 60},
+                recovered_at,
+            )
+        )
+
+    def test_outage_reports_are_persistently_deduplicated(self):
+        outage = {
+            "started_at": 1_788_000_000.0,
+            "recovered_at": 1_788_000_120.0,
+            "duration": 120.0,
+            "kind": "Unexpected outage",
+        }
+        report_id = main._queue_outage_report(outage)
+        self.assertIsNotNone(report_id)
+        self.assertEqual(main._queue_outage_report(outage), report_id)
+
+        main._mark_outage_channel_delivered(report_id, "777")
+        state = main._load_outage_report_state()
+        self.assertEqual(
+            state["pending"][report_id]["delivered_channels"],
+            ["777"],
+        )
+
+        main._finish_outage_report(report_id)
+        self.assertIsNone(main._queue_outage_report(outage))
+        self.assertEqual(main._load_pending_outage_reports(), [])
 
     def test_patch_notes_extract_only_new_changelog_bullets(self):
         patch = """@@ -1,2 +1,4 @@
