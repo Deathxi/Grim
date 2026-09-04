@@ -313,34 +313,13 @@ class SecurityControlsTests(unittest.TestCase):
         self.assertIn("server", prefix_names)
         self.assertNotIn("info", prefix_names)
 
-    def test_quote_embed_uses_large_title_and_bold_long_fallback(self):
+    def test_quote_card_uses_regular_24px_text_and_png_output(self):
         created = main.datetime(2026, 8, 27, tzinfo=main.timezone.utc)
-        short_embed = main._build_quote_embed(
-            "the short quote", "Noct", "https://cdn.example/avatar.png", created
-        )
-        self.assertEqual(short_embed.title, "“ the short quote ”")
-        self.assertIsNone(short_embed.description)
-
-        long_embed = main._build_quote_embed(
-            "x" * 300, "Noct", "https://cdn.example/avatar.png", created
-        )
-        self.assertEqual(long_embed.title, "Quoted Message")
-        self.assertTrue(long_embed.description.startswith("**“ "))
-        self.assertTrue(long_embed.description.endswith(" ”**"))
-
-        boundary_embed = main._build_quote_embed(
-            "x" * 252, "Noct", "https://cdn.example/avatar.png", created
-        )
-        self.assertEqual(len(boundary_embed.title), 256)
-        overflow_embed = main._build_quote_embed(
-            "x" * 253, "Noct", "https://cdn.example/avatar.png", created
-        )
-        self.assertEqual(overflow_embed.title, "Quoted Message")
-
-        maximum_embed = main._build_quote_embed(
-            "x" * 5000, "Noct", "https://cdn.example/avatar.png", created
-        )
-        self.assertLessEqual(len(maximum_embed.description), 4096)
+        card = main._render_quote_card("the short quote", "Noct", None, created)
+        self.assertTrue(card.startswith(b"\x89PNG\r\n\x1a\n"))
+        image = main.Image.open(main.BytesIO(card))
+        self.assertEqual(image.width, 900)
+        self.assertGreaterEqual(image.height, 210)
 
     def test_outage_report_calculates_previous_session_and_pacific_times(self):
         recovered_at = 1_788_000_120.0

@@ -1,3 +1,4 @@
+- Render quoted messages as custom image cards with regular 24px text and the member avatar on the right.
 - Split the offline after-report introduction into two lines for easier reading.
 # Grim — Changelog
 

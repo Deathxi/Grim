@@ -7,6 +7,7 @@ import uuid
 import base64
 import sqlite3
 import tempfile
+from io import BytesIO
 import psutil
 import hashlib
 import re
@@ -16,6 +17,7 @@ from discord.ext import commands, tasks
 from discord import ui
 from openai import OpenAI
 import tweepy
+from PIL import Image, ImageDraw, ImageFont
 from zoneinfo import ZoneInfo
 
 BOT_START_TIME = None
@@ -6223,34 +6225,95 @@ async def support(interaction: discord.Interaction):
     embed.set_footer(text=f"Grim · {VERSION}")
     await interaction.response.send_message(embed=embed)
 
-def _build_quote_embed(content: str, author_name: str, avatar_url: str, created_at) -> discord.Embed:
-    date_str = created_at.strftime("%B / %Y")
+def _quote_font(size: int):
+    for path in (
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    ):
+        try:
+            return ImageFont.truetype(path, size)
+        except OSError:
+            continue
+    return ImageFont.load_default(size=size)
+
+def _wrap_quote_text(draw, text: str, font, max_width: int) -> list[str]:
+    words = text.split()
+    lines, current = [], ""
+    for word in words:
+        candidate = f"{current} {word}".strip()
+        if not current or draw.textlength(candidate, font=font) <= max_width:
+            current = candidate
+        else:
+            lines.append(current)
+            current = word
+    if current:
+        lines.append(current)
+    return lines or ["(no text)"]
+
+def _render_quote_card(
+    content: str, author_name: str, avatar_bytes: bytes | None, created_at
+) -> bytes:
+    width, padding, avatar_size = 900, 42, 112
+    quote_font, meta_font = _quote_font(24), _quote_font(16)
     clean_content = " ".join((content or "(no text)").split())
-    framed_quote = f"“ {clean_content} ”"
-    if len(framed_quote) <= 256:
-        embed = discord.Embed(
-            title=framed_quote,
-            color=discord.Color.from_rgb(18, 18, 18),
-        )
-    else:
-        safe_quote = framed_quote[:4090]
-        if len(framed_quote) > 4090:
-            safe_quote = f"{safe_quote[:4087].rstrip()}..."
-        embed = discord.Embed(
-            title="Quoted Message",
-            description=f"**{safe_quote}**",
-            color=discord.Color.from_rgb(18, 18, 18),
-        )
-    embed.set_thumbnail(url=avatar_url)
-    embed.set_footer(text=f"— {author_name}  ·  {date_str}", icon_url=avatar_url)
-    return embed
+    measure = ImageDraw.Draw(Image.new("RGB", (1, 1)))
+    lines = _wrap_quote_text(measure, f"“ {clean_content} ”", quote_font, 675)
+    if len(lines) > 14:
+        lines = lines[:14]
+        lines[-1] = f"{lines[-1][:70].rstrip()}…"
+    line_height = 35
+    height = max(210, padding * 2 + len(lines) * line_height + 44)
+    image = Image.new("RGB", (width, height), (18, 18, 18))
+    draw = ImageDraw.Draw(image)
+    draw.rounded_rectangle((1, 1, width - 2, height - 2), 12, outline=(47, 49, 54), width=2)
+
+    y = padding
+    for line in lines:
+        draw.text((padding, y), line, font=quote_font, fill=(238, 238, 238))
+        y += line_height
+    draw.text(
+        (padding, height - padding - 18),
+        f"— {author_name}  ·  {created_at.strftime('%B / %Y')}",
+        font=meta_font,
+        fill=(185, 187, 190),
+    )
+
+    if avatar_bytes:
+        try:
+            avatar = Image.open(BytesIO(avatar_bytes)).convert("RGB")
+            avatar = avatar.resize((avatar_size, avatar_size), Image.Resampling.LANCZOS)
+            mask = Image.new("L", (avatar_size, avatar_size), 0)
+            ImageDraw.Draw(mask).ellipse((0, 0, avatar_size, avatar_size), fill=255)
+            image.paste(avatar, (width - padding - avatar_size, padding), mask)
+        except Exception:
+            pass
+
+    output = BytesIO()
+    image.save(output, format="PNG", optimize=True)
+    return output.getvalue()
+
+async def _build_quote_file(
+    content: str, author_name: str, avatar_url: str, created_at
+) -> discord.File:
+    avatar_bytes = None
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(avatar_url, timeout=aiohttp.ClientTimeout(total=10)) as response:
+                if response.status == 200:
+                    avatar_bytes = await response.read()
+    except Exception:
+        pass
+    card = await asyncio.to_thread(
+        _render_quote_card, content, author_name, avatar_bytes, created_at
+    )
+    return discord.File(BytesIO(card), filename="grim-quote.png")
 
 @bot.tree.context_menu(name="Quote")
 async def quote_message(interaction: discord.Interaction, message: discord.Message):
     content = message.content or "(no text)"
-    embed = _build_quote_embed(content, message.author.display_name, message.author.display_avatar.url, message.created_at)
     await interaction.response.defer(ephemeral=True)
-    await interaction.channel.send(embed=embed)
+    quote_file = await _build_quote_file(content, message.author.display_name, message.author.display_avatar.url, message.created_at)
+    await interaction.channel.send(file=quote_file)
     await interaction.delete_original_response()
 
 @bot.tree.command(name="quote", description="Quote the last message in this channel")
@@ -6265,8 +6328,8 @@ async def quote_last(interaction: discord.Interaction):
         await interaction.followup.send("no quotable message found.", ephemeral=True)
         return
     content = target.content or "(no text)"
-    embed = _build_quote_embed(content, target.author.display_name, target.author.display_avatar.url, target.created_at)
-    await interaction.channel.send(embed=embed)
+    quote_file = await _build_quote_file(content, target.author.display_name, target.author.display_avatar.url, target.created_at)
+    await interaction.channel.send(file=quote_file)
     await interaction.delete_original_response()
 
 @bot.command(name="quote")
@@ -6287,13 +6350,13 @@ async def quote_reply(ctx: commands.Context):
             await ctx.send("i couldn't retrieve that message.")
             return
 
-    embed = _build_quote_embed(
+    quote_file = await _build_quote_file(
         target.content or "(no text)",
         target.author.display_name,
         target.author.display_avatar.url,
         target.created_at,
     )
-    await ctx.send(embed=embed)
+    await ctx.send(file=quote_file)
 
 @bot.tree.command(name="creator", description="Meet the creator of Grim")
 async def creator(interaction: discord.Interaction):
@@ -6719,13 +6782,13 @@ async def on_message(message):
 
         # 0.1% chance to immortalize the message as a fancy quote embed
         elif random.random() < 0.001 and message.channel.type in (discord.ChannelType.text, discord.ChannelType.news) and len(message.content) > 10:
-            quote_embed = _build_quote_embed(
+            quote_file = await _build_quote_file(
                 message.content,
                 message.author.display_name,
                 message.author.display_avatar.url,
                 message.created_at,
             )
-            await message.channel.send(embed=quote_embed)
+            await message.channel.send(file=quote_file)
 
     if bot.user in message.mentions:
         # Reset counter — Grim is already responding, no need to also proactively chime
