@@ -52,7 +52,7 @@ Grim is a Discord bot for Seclude & Affiliates. Built with Python and discord.py
 - Explicit text translation into any requested language; no voice or speech features are included
 - Persistent, server-scoped member identity and lifecycle history with staff-only paginated profile review and configurable departure cards; it stores no message contents in the tracker
 - VPS-only weekly encrypted backups of `~/.grim_data` to a separate private GitHub repository; see `BACKUP_RESTORE.md`
-- `/grim_updates` channels receive deployment patch notes and offline after-reports with approximate Pacific-time outage windows
+- `/grim_updates` channels receive deployment patch notes and after-reports for unexpected process or Discord connection outages; normal update restarts are excluded
 
 ## Setup
 1. Add your `DISCORD_TOKEN` as a secret

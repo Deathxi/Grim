@@ -332,6 +332,15 @@ class SecurityControlsTests(unittest.TestCase):
         self.assertEqual(outage["kind"], "Unexpected outage")
         self.assertEqual(outage["duration"], 120)
 
+        planned_restart = {
+            "session_id": "previous-session",
+            "last_seen": recovered_at - 30,
+            "status": "stopped",
+        }
+        self.assertIsNone(
+            main._build_process_outage(planned_restart, recovered_at)
+        )
+
         embed = main._build_outage_report_embed(outage)
         fields = {field.name: field.value for field in embed.fields}
         self.assertEqual(fields["Approx. Downtime"], "`2m`")

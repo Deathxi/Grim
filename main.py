@@ -1601,6 +1601,10 @@ def _write_runtime_heartbeat(status: str = "online", timestamp: float | None = N
 def _build_process_outage(previous: dict, recovered_at: float) -> dict | None:
     if not previous or previous.get("session_id") == RUNTIME_SESSION_ID:
         return None
+    # A stopped heartbeat means the previous process shut down cleanly, such as
+    # during a normal deployment. Only a vanished online session is an outage.
+    if previous.get("status") != "online":
+        return None
     try:
         started_at = float(previous["last_seen"])
     except (KeyError, TypeError, ValueError):
@@ -1612,11 +1616,7 @@ def _build_process_outage(previous: dict, recovered_at: float) -> dict | None:
         "started_at": started_at,
         "recovered_at": recovered_at,
         "duration": duration,
-        "kind": (
-            "Unexpected outage"
-            if previous.get("status") == "online"
-            else "Restart / offline period"
-        ),
+        "kind": "Unexpected outage",
     }
 
 def _build_gateway_outage(started_at: float, recovered_at: float) -> dict | None:
@@ -1645,6 +1645,11 @@ def _load_outage_report_state() -> dict:
             raise ValueError("outage report state must be an object")
         state.setdefault("pending", {})
         state.setdefault("delivered_ids", [])
+        state["pending"] = {
+            report_id: pending
+            for report_id, pending in state["pending"].items()
+            if pending.get("outage", {}).get("kind") != "Restart / offline period"
+        }
         return state
     except:
         return {"pending": {}, "delivered_ids": []}
