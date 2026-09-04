@@ -6295,9 +6295,7 @@ def _render_quote_card(
         try:
             avatar = Image.open(BytesIO(avatar_bytes)).convert("RGB")
             avatar = avatar.resize((avatar_size, avatar_size), Image.Resampling.LANCZOS)
-            mask = Image.new("L", (avatar_size, avatar_size), 0)
-            ImageDraw.Draw(mask).ellipse((0, 0, avatar_size, avatar_size), fill=255)
-            image.paste(avatar, (width - padding - avatar_size, padding), mask)
+            image.paste(avatar, (width - padding - avatar_size, padding))
         except Exception:
             pass
 
