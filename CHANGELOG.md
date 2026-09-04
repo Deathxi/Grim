@@ -1,3 +1,4 @@
+- Split the offline after-report introduction into two lines for easier reading.
 # Grim — Changelog
 
 All notable changes to this project are documented here, organized by month.

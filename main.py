@@ -1692,8 +1692,8 @@ def _build_outage_report_embed(outage: dict) -> discord.Embed:
     embed = discord.Embed(
         title="Grim · Offline After-Report",
         description=(
-            "Grim is back online. Times are approximate and based on the last "
-            "successful heartbeat."
+            "Grim is back online.\n"
+            "Times are approximate and based on the last successful heartbeat."
         ),
         color=discord.Color.from_rgb(18, 18, 18),
     )
