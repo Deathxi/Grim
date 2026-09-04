@@ -12,12 +12,25 @@ import psutil
 import hashlib
 import re
 import threading
+import subprocess
+import sys
 import discord
 from discord.ext import commands, tasks
 from discord import ui
 from openai import OpenAI
 import tweepy
-from PIL import Image, ImageDraw, ImageFont
+try:
+    from PIL import Image, ImageDraw, ImageFont
+except ImportError:
+    subprocess.run(
+        [
+            sys.executable, "-m", "pip", "install",
+            "--quiet", "--disable-pip-version-check", "--break-system-packages",
+            "Pillow==12.3.0",
+        ],
+        check=True,
+    )
+    from PIL import Image, ImageDraw, ImageFont
 from zoneinfo import ZoneInfo
 
 BOT_START_TIME = None

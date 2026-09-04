@@ -5,4 +5,4 @@ tweepy==4.16.0
 python-dotenv==1.2.1
 PyNaCl==1.5.0
 psutil==7.2.2
-Pillow
+Pillow==12.3.0
