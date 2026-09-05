@@ -14,6 +14,7 @@ import re
 import threading
 import subprocess
 import sys
+import fcntl
 import discord
 from discord.ext import commands, tasks
 from discord import ui
@@ -2332,6 +2333,76 @@ GIF_REACTION_CHANCE = 0.08
 GIF_REACTION_COOLDOWN_SECONDS = 600
 _gif_reaction_last_posted: dict[str, float] = {}
 _gif_reaction_locks: dict[str, asyncio.Lock] = {}
+GIF_COMMAND_HISTORY_FILE = _data_path("gif_command_history.json")
+_gif_command_locks: dict[str, asyncio.Lock] = {}
+GIF_COMMAND_GUILD_RATE_LIMIT_MAX = 30
+GIF_COMMAND_GUILD_RATE_LIMIT_WINDOW = 60
+_gif_command_guild_rate_limits: dict[str, list[float]] = {}
+
+def _load_gif_command_history() -> dict[str, dict[str, list[str]]]:
+    try:
+        with open(GIF_COMMAND_HISTORY_FILE, "r") as handle:
+            data = json.load(handle)
+        if not isinstance(data, dict):
+            return {}
+        return {
+            str(guild_id): {
+                str(topic): [str(value) for value in values if isinstance(value, str)]
+                for topic, values in topics.items()
+                if isinstance(topics, dict) and isinstance(values, list)
+            }
+            for guild_id, topics in data.items()
+            if isinstance(topics, dict)
+        }
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {}
+
+_gif_command_history = _load_gif_command_history()
+
+def _normalize_gif_topic(topic: str) -> str:
+    return " ".join(topic.split()).strip().lower()
+
+def _gif_url_fingerprint(url: str) -> str:
+    return hashlib.sha256(url.encode("utf-8")).hexdigest()
+
+def _gif_command_guild_rate_limit_allows(guild_id: str) -> bool:
+    now = time.time()
+    cutoff = now - GIF_COMMAND_GUILD_RATE_LIMIT_WINDOW
+    recent = [
+        timestamp
+        for timestamp in _gif_command_guild_rate_limits.get(guild_id, [])
+        if timestamp > cutoff
+    ]
+    if len(recent) >= GIF_COMMAND_GUILD_RATE_LIMIT_MAX:
+        _gif_command_guild_rate_limits[guild_id] = recent
+        return False
+    recent.append(now)
+    _gif_command_guild_rate_limits[guild_id] = recent
+    return True
+
+def _reserve_gif_command_result(
+    guild_id: str, topic: str, identities: list[str]
+) -> bool:
+    lock_path = f"{GIF_COMMAND_HISTORY_FILE}.lock"
+    os.makedirs(os.path.dirname(lock_path) or ".", exist_ok=True)
+    with open(lock_path, "a+") as lock_handle:
+        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+        try:
+            disk_history = _load_gif_command_history()
+            guild_history = disk_history.setdefault(guild_id, {})
+            seen = guild_history.setdefault(topic, [])
+            if any(identity in seen for identity in identities):
+                _gif_command_history.clear()
+                _gif_command_history.update(disk_history)
+                return False
+            seen.extend(identities)
+            _atomic_json_write(GIF_COMMAND_HISTORY_FILE, disk_history)
+            _gif_command_history.clear()
+            _gif_command_history.update(disk_history)
+            return True
+        finally:
+            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+
 _GIF_SERIOUS_TERMS = {
     "suicide", "kill myself", "self harm", "self-harm", "overdose", "funeral",
     "died", "death in the family", "abuse", "assault", "emergency", "911",
@@ -2411,49 +2482,118 @@ async def _decide_gif_reaction(message_text: str, reply: str) -> dict | None:
         print(f"[GIF] Decision failed: {e}")
         return None
 
-async def _search_klipy_gif(session: aiohttp.ClientSession, query: str) -> str | None:
+async def _search_klipy_gifs(
+    session: aiohttp.ClientSession, query: str, limit: int = 5
+) -> list[str]:
+    candidates = await _search_klipy_gif_candidates(session, query, limit)
+    return [candidate["url"] for candidate in candidates]
+
+async def _search_klipy_gif_candidates(
+    session: aiohttp.ClientSession, query: str, limit: int = 5
+) -> list[dict[str, object]]:
     api_key = os.environ.get("KLIPY_API_KEY")
     if not api_key:
-        return None
+        return []
     try:
         async with session.get(
             f"https://api.klipy.com/api/v1/{api_key}/gifs/search",
-            params={"q": query, "limit": 5},
+            params={"q": query, "limit": limit},
         ) as response:
             if response.status != 200:
-                return None
+                return []
             items = (await response.json()).get("data", {}).get("data", [])
-        choices = [
-            item.get("file", {}).get("md", {}).get("gif", {}).get("url")
-            for item in items[:5]
-        ]
-        choices = [url for url in choices if url and url.startswith("https://")]
-        return random.choice(choices) if choices else None
+        choices = []
+        seen_ids = set()
+        for item in items[:limit]:
+            url = item.get("file", {}).get("md", {}).get("gif", {}).get("url")
+            if not url or not url.startswith("https://"):
+                continue
+            asset_id = str(item.get("id") or item.get("_id") or _gif_url_fingerprint(url))
+            provider_identity = f"klipy:{asset_id}"
+            if provider_identity in seen_ids:
+                continue
+            seen_ids.add(provider_identity)
+            choices.append({
+                "url": url,
+                "identities": [provider_identity, _gif_url_fingerprint(url)],
+            })
+        return choices
     except Exception as e:
         print(f"[GIF] KLIPY search failed: {e}")
-        return None
+        return []
 
-async def _search_giphy_gif(session: aiohttp.ClientSession, query: str) -> str | None:
+async def _search_klipy_gif(session: aiohttp.ClientSession, query: str) -> str | None:
+    choices = await _search_klipy_gifs(session, query)
+    return random.choice(choices) if choices else None
+
+async def _search_giphy_gifs(
+    session: aiohttp.ClientSession, query: str, limit: int = 5
+) -> list[str]:
+    candidates = await _search_giphy_gif_candidates(session, query, limit)
+    return [candidate["url"] for candidate in candidates]
+
+async def _search_giphy_gif_candidates(
+    session: aiohttp.ClientSession, query: str, limit: int = 5
+) -> list[dict[str, object]]:
     api_key = os.environ.get("GIPHY_API_KEY")
     if not api_key:
-        return None
+        return []
     try:
         async with session.get(
             "https://api.giphy.com/v1/gifs/search",
-            params={"api_key": api_key, "q": query, "limit": 5, "rating": "pg-13"},
+            params={
+                "api_key": api_key,
+                "q": query,
+                "limit": limit,
+                "offset": random.randint(0, 100),
+                "rating": "pg-13",
+            },
         ) as response:
             if response.status != 200:
-                return None
+                return []
             items = (await response.json()).get("data", [])
-        choices = [
-            item.get("images", {}).get("fixed_height", {}).get("url")
-            for item in items[:5]
-        ]
-        choices = [url for url in choices if url and url.startswith("https://")]
-        return random.choice(choices) if choices else None
+        choices = []
+        seen_ids = set()
+        for item in items[:limit]:
+            url = item.get("images", {}).get("fixed_height", {}).get("url")
+            if not url or not url.startswith("https://"):
+                continue
+            asset_id = str(item.get("id") or _gif_url_fingerprint(url))
+            provider_identity = f"giphy:{asset_id}"
+            if provider_identity in seen_ids:
+                continue
+            seen_ids.add(provider_identity)
+            choices.append({
+                "url": url,
+                "identities": [provider_identity, _gif_url_fingerprint(url)],
+            })
+        return choices
     except Exception as e:
         print(f"[GIF] GIPHY search failed: {e}")
-        return None
+        return []
+
+async def _search_giphy_gif(session: aiohttp.ClientSession, query: str) -> str | None:
+    choices = await _search_giphy_gifs(session, query)
+    return random.choice(choices) if choices else None
+
+async def _search_unseen_command_gif(
+    session: aiohttp.ClientSession, guild_id: str, topic: str
+) -> tuple[str, str, list[str]] | None:
+    seen = set(_gif_command_history.get(guild_id, {}).get(topic, []))
+    for provider, search in (
+        ("KLIPY", _search_klipy_gif_candidates),
+        ("GIPHY", _search_giphy_gif_candidates),
+    ):
+        choices = await search(session, topic, limit=40)
+        unseen = [
+            candidate
+            for candidate in choices
+            if not seen.intersection(candidate["identities"])
+        ]
+        if unseen:
+            candidate = random.choice(unseen)
+            return candidate["url"], provider, candidate["identities"]
+    return None
 
 async def _search_reaction_gif(
     session: aiohttp.ClientSession, query: str
@@ -4941,6 +5081,87 @@ async def howdie(interaction: discord.Interaction, user: discord.Member):
     embed.set_footer(text=f"{interaction.user.name} · {VERSION}")
     
     await interaction.followup.send(embed=embed)
+
+@bot.tree.command(name="gif", description="Pull a random GIF for a topic")
+@discord.app_commands.describe(topic="What kind of GIF should Grim find?")
+async def gif(interaction: discord.Interaction, topic: str):
+    if interaction.guild_id is None:
+        await interaction.response.send_message(
+            "Use `/gif` inside a server so Grim can track that server's pulls.",
+            ephemeral=True,
+        )
+        return
+    if not await require_external_action(interaction, "gif_command"):
+        return
+    guild_id = str(interaction.guild_id)
+    if not _gif_command_guild_rate_limit_allows(guild_id):
+        await interaction.response.send_message(
+            "This server has pulled a lot of GIFs this minute. Try again shortly.",
+            ephemeral=True,
+        )
+        return
+
+    normalized_topic = _normalize_gif_topic(topic)
+    if not normalized_topic or len(normalized_topic) > 80:
+        await interaction.response.send_message(
+            "Give Grim a GIF topic between 1 and 80 characters.",
+            ephemeral=True,
+        )
+        return
+    if not os.environ.get("KLIPY_API_KEY") and not os.environ.get("GIPHY_API_KEY"):
+        await interaction.response.send_message(
+            "GIF search is not configured right now.",
+            ephemeral=True,
+        )
+        return
+
+    await interaction.response.defer()
+    lock = _gif_command_locks.setdefault(guild_id, asyncio.Lock())
+    async with lock:
+        result = None
+        for _ in range(2):
+            async with aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=8)
+            ) as session:
+                candidate = await _search_unseen_command_gif(
+                    session, guild_id, normalized_topic
+                )
+            if not candidate:
+                break
+            gif_url, provider, identities = candidate
+            try:
+                reserved = await asyncio.to_thread(
+                    _reserve_gif_command_result,
+                    guild_id,
+                    normalized_topic,
+                    identities,
+                )
+            except OSError as e:
+                print(f"[GIF] Could not persist command result reservation: {e}")
+                await interaction.followup.send(
+                    "I found a GIF, but couldn't safely save its no-repeat record. "
+                    "Nothing was posted."
+                )
+                return
+            if reserved:
+                result = (gif_url, provider)
+                break
+
+        if not result:
+            await interaction.followup.send(
+                f"I couldn't find a new unseen GIF for **{normalized_topic}**. "
+                "Try a more specific search."
+            )
+            return
+
+        gif_url, provider = result
+        embed = discord.Embed(
+            title=f"GIF · {normalized_topic}",
+            color=discord.Color.from_rgb(18, 18, 18),
+        )
+        embed.set_image(url=gif_url)
+        embed.set_footer(text=f"Pulled via {provider} · unique in this server")
+        await interaction.followup.send(embed=embed)
 
 @bot.tree.command(name="8ball", description="Ask the existentially dread-filled Magic 8-ball")
 async def eightball(interaction: discord.Interaction, question: str):

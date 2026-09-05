@@ -52,10 +52,16 @@ class SecurityControlsTests(unittest.TestCase):
         self.original_member_log_file = main.MEMBER_LOG_CHANNELS_FILE
         self.original_member_log_channels = main.member_log_channels
         self.original_outage_state_file = main.OUTAGE_REPORT_STATE_FILE
+        self.original_gif_history_file = main.GIF_COMMAND_HISTORY_FILE
+        self.original_gif_history = main._gif_command_history
         main.CHAT_DB_FILE = str(Path(self.temp_dir.name) / "chat_history.db")
         main.MODERATION_FILE = str(Path(self.temp_dir.name) / "moderation_data.json")
         main.MEMBER_LOG_CHANNELS_FILE = str(Path(self.temp_dir.name) / "member_log_channels.json")
         main.OUTAGE_REPORT_STATE_FILE = str(Path(self.temp_dir.name) / "outage_report_state.json")
+        main.GIF_COMMAND_HISTORY_FILE = str(Path(self.temp_dir.name) / "gif_command_history.json")
+        main._gif_command_history = {}
+        main._gif_command_locks.clear()
+        main._gif_command_guild_rate_limits.clear()
         main.member_log_channels = {}
         main.moderation_data = {"guilds": {}, "legacy_unassigned_words": []}
         main._COMMAND_RATE_LIMITS.clear()
@@ -86,6 +92,10 @@ class SecurityControlsTests(unittest.TestCase):
         main.MEMBER_LOG_CHANNELS_FILE = self.original_member_log_file
         main.member_log_channels = self.original_member_log_channels
         main.OUTAGE_REPORT_STATE_FILE = self.original_outage_state_file
+        main.GIF_COMMAND_HISTORY_FILE = self.original_gif_history_file
+        main._gif_command_history = self.original_gif_history
+        main._gif_command_locks.clear()
+        main._gif_command_guild_rate_limits.clear()
         main._COMMAND_RATE_LIMITS.clear()
         self.temp_dir.cleanup()
 
@@ -463,6 +473,110 @@ class SecurityControlsTests(unittest.TestCase):
             giphy.assert_awaited_once()
 
         asyncio.run(run())
+
+    def test_manual_gif_history_is_scoped_by_server_and_topic(self):
+        url = "https://media.example/one.gif"
+        identities = ["klipy:asset-one", main._gif_url_fingerprint(url)]
+        self.assertTrue(
+            main._reserve_gif_command_result("50", "side eye", identities)
+        )
+
+        fingerprint = main._gif_url_fingerprint(url)
+        self.assertIn(fingerprint, main._gif_command_history["50"]["side eye"])
+        self.assertIn("klipy:asset-one", main._gif_command_history["50"]["side eye"])
+        self.assertNotIn("51", main._gif_command_history)
+        self.assertNotIn("victory", main._gif_command_history["50"])
+        self.assertNotIn(url, json.dumps(main._gif_command_history))
+
+    def test_manual_gif_search_skips_seen_and_falls_back_to_giphy(self):
+        async def run():
+            seen_url = "https://media.example/seen.gif"
+            fresh_url = "https://media.example/fresh.gif"
+            self.assertTrue(
+                main._reserve_gif_command_result(
+                    "50",
+                    "side eye",
+                    ["klipy:seen", main._gif_url_fingerprint(seen_url)],
+                )
+            )
+            with patch.object(
+                main,
+                "_search_klipy_gif_candidates",
+                return_value=[{
+                    "url": seen_url,
+                    "identities": ["klipy:seen", main._gif_url_fingerprint(seen_url)],
+                }],
+            ) as klipy, patch.object(
+                main,
+                "_search_giphy_gif_candidates",
+                return_value=[{
+                    "url": fresh_url,
+                    "identities": ["giphy:fresh", main._gif_url_fingerprint(fresh_url)],
+                }],
+            ) as giphy:
+                result = await main._search_unseen_command_gif(
+                    object(), "50", "side eye"
+                )
+
+            self.assertEqual(
+                result,
+                (
+                    fresh_url,
+                    "GIPHY",
+                    ["giphy:fresh", main._gif_url_fingerprint(fresh_url)],
+                ),
+            )
+            klipy.assert_awaited_once()
+            giphy.assert_awaited_once()
+
+        asyncio.run(run())
+
+    def test_manual_gif_history_survives_reload(self):
+        url = "https://media.example/persisted.gif"
+        self.assertTrue(
+            main._reserve_gif_command_result(
+                "50",
+                "celebration",
+                ["giphy:persisted", main._gif_url_fingerprint(url)],
+            )
+        )
+
+        reloaded = main._load_gif_command_history()
+
+        self.assertEqual(reloaded, main._gif_command_history)
+
+    def test_manual_gif_reservation_rolls_back_when_persistence_fails(self):
+        with patch.object(
+            main, "_atomic_json_write", side_effect=OSError("disk unavailable")
+        ):
+            with self.assertRaises(OSError):
+                main._reserve_gif_command_result(
+                    "50", "reaction", ["giphy:reserved", "url-hash"]
+                )
+
+        self.assertNotIn("50", main._gif_command_history)
+
+    def test_manual_gif_reservation_rejects_cross_process_collision(self):
+        identities = ["giphy:same-asset", "same-url-hash"]
+        self.assertTrue(
+            main._reserve_gif_command_result("50", "reaction", identities)
+        )
+        main._gif_command_history = {}
+
+        self.assertFalse(
+            main._reserve_gif_command_result("50", "reaction", identities)
+        )
+        self.assertIn(
+            "giphy:same-asset",
+            main._gif_command_history["50"]["reaction"],
+        )
+
+    def test_manual_gif_guild_rate_limit_is_shared(self):
+        with patch.object(main.time, "time", return_value=1000):
+            for _ in range(main.GIF_COMMAND_GUILD_RATE_LIMIT_MAX):
+                self.assertTrue(main._gif_command_guild_rate_limit_allows("50"))
+            self.assertFalse(main._gif_command_guild_rate_limit_allows("50"))
+            self.assertTrue(main._gif_command_guild_rate_limit_allows("51"))
 
     def test_server_info_uses_grim_layout_and_aggregate_language_data(self):
         main.save_member_language_preference("50", "10", "english")

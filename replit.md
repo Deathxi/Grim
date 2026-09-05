@@ -13,6 +13,7 @@ Grim is a Discord bot for Seclude & Affiliates. Built with Python and discord.py
 ## Commands
 - `/server` - View Grim's server info: identity, structure, language signals, emojis, and banner
 - `/quote` - Quote the latest non-Grim message; right-click a specific message and use Apps → Quote, or reply to it with `!quote`
+- `/gif <topic>` - Pull a random GIF; manual pulls avoid repeating the same result for that topic within the same server
 - `/haiku` - Generate an inspirational haiku
 - `/meme` - Generate creative meme captions
 - `/rizz` - Get pickup lines for the brave
@@ -64,7 +65,7 @@ Grim is a Discord bot for Seclude & Affiliates. Built with Python and discord.py
 ## Dependencies
 - discord.py - Discord API wrapper
 - openai - OpenAI-compatible client for xAI API
-- KLIPY and GIPHY - conversational reaction GIF search with cooldowns and serious-topic exclusions
+- KLIPY and GIPHY - conversational reaction GIFs plus server-scoped `/gif` searches with persistent manual-pull duplicate prevention
 - aiohttp - Async HTTP requests
 - python-dotenv - Environment variable management
 - tweepy - Twitter/X API wrapper
