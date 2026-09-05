@@ -176,6 +176,73 @@ def _atomic_json_write(path: str, data):
         if os.path.exists(temporary_path):
             os.unlink(temporary_path)
 
+DISCORD_MESSAGE_CONTENT_LIMIT = 2000
+DISCORD_CONVERSATION_CHUNK_LIMIT = 1950
+
+def _split_discord_content(
+    content: str, limit: int = DISCORD_CONVERSATION_CHUNK_LIMIT
+) -> list[str]:
+    """Split prose losslessly and keep fenced code valid across messages."""
+    if not content:
+        return []
+    if limit < 80:
+        raise ValueError("Discord content limit must be at least 80 characters")
+    if len(content) <= limit:
+        return [content]
+
+    raw_limit = limit - 40
+    remaining = content
+    raw_chunks = []
+    while len(remaining) > raw_limit:
+        boundary = -1
+        for separator in ("\n\n", "\n", " "):
+            candidate = remaining.rfind(separator, 0, raw_limit + 1)
+            if candidate >= max(1, raw_limit // 2):
+                boundary = candidate + len(separator)
+                break
+        if boundary < 1:
+            boundary = raw_limit
+        raw_chunks.append(remaining[:boundary])
+        remaining = remaining[boundary:]
+    if remaining:
+        raw_chunks.append(remaining)
+
+    rendered_chunks = []
+    open_fence_language = None
+    for raw_chunk in raw_chunks:
+        prefix = f"```{open_fence_language}\n" if open_fence_language is not None else ""
+        fence_language = open_fence_language
+        cursor = 0
+        while True:
+            marker = raw_chunk.find("```", cursor)
+            if marker < 0:
+                break
+            if fence_language is None:
+                line_end = raw_chunk.find("\n", marker + 3)
+                language = (
+                    raw_chunk[marker + 3:line_end].strip()
+                    if line_end >= 0
+                    else ""
+                )
+                fence_language = language[:24]
+            else:
+                fence_language = None
+            cursor = marker + 3
+        suffix = "\n```" if fence_language is not None else ""
+        rendered = f"{prefix}{raw_chunk}{suffix}"
+        if len(rendered) > limit:
+            raise ValueError("Markdown wrapper exceeded Discord content limit")
+        rendered_chunks.append(rendered)
+        open_fence_language = fence_language
+    return rendered_chunks
+
+async def _send_discord_with_retry(send, *args, **kwargs):
+    try:
+        return await send(*args, **kwargs)
+    except Exception:
+        await asyncio.sleep(0.75)
+        return await send(*args, **kwargs)
+
 # Friendly names for common per-member preferences. "auto" means the newest
 # member message determines the response language, without a fixed language list.
 SUPPORTED_LANGUAGES = {
@@ -2861,7 +2928,12 @@ WHAT YOU DON'T DO:
 Never open with greetings, "Ah", affirmations, or any kind of opener — just start talking. Don't end with a question every message, let replies breathe. No em dashes. No bullet points in replies, natural prose only. Don't announce being an AI unless directly and sincerely asked. Don't lean on the Grim Reaper framing — that's just your name, not your whole personality. Never reference your own bot functions, background tasks, monitoring duties, newsfeeds, or anything about "watching the server" — that's internal, not part of your personality. If someone asks a normal question, just answer it.
 
 RESPONSE LENGTH:
-Match what the moment calls for. Short message, short reply. Real conversation, go deeper.{live_context_block}"""
+Match what the moment calls for. Short message, short reply. Real conversation or a
+request that genuinely needs explanation can go deeper and may span multiple Discord
+messages. Length must earn its place: every paragraph should add a distinct useful
+point, example, or insight. Never pad, repeat yourself, or add filler just to be long.
+Finish a substantive answer instead of cutting it off for Discord's message limit.
+{live_context_block}"""
 
     try:
         async with aiohttp.ClientSession() as session:
@@ -2869,7 +2941,7 @@ Match what the moment calls for. Short message, short reply. Real conversation, 
             payload = {
                 "model": model,
                 "messages": [{"role": "system", "content": system_prompt}] + chat_messages,
-                "max_tokens": 600,
+                "max_tokens": 1000,
                 "temperature": 0.85,
             }
             headers = {
@@ -3008,15 +3080,22 @@ Be highly selective. Silence is better than noise. Most of the time should be PA
             print(f"[Proactive] #{channel_name}: PASS")
             return
 
-        sent = await channel.send(response)
+        response_chunks = _split_discord_content(response)
+        sent_messages = []
+        for chunk in response_chunks:
+            try:
+                sent = await _send_discord_with_retry(channel.send, chunk)
+            except Exception as e:
+                print(f"[Proactive] Continuation send failed: {e}")
+                break
+            sent_messages.append(sent)
+            if guild:
+                save_message_to_db(
+                    guild_id, cid, str(sent.id),
+                    BOT_NAME, chunk, sent.created_at.timestamp(), is_grim=True
+                )
         _channel_last_grim_post[cid] = time.time()
         print(f"[Proactive] Chimed in on #{channel_name}: {response[:60]}...")
-
-        if guild:
-            save_message_to_db(
-                guild_id, cid, str(sent.id),
-                BOT_NAME, response, sent.created_at.timestamp(), is_grim=True
-            )
     except Exception as e:
         print(f"[Proactive] Error: {e}")
     finally:
@@ -7208,6 +7287,7 @@ async def on_message(message):
         async with message.channel.typing():
             reply = await generate_contextual_reply(message)
         if reply:
+            reply_chunks = _split_discord_content(reply)
             try:
                 gif_reaction = await asyncio.wait_for(
                     _maybe_build_gif_reaction(
@@ -7218,30 +7298,61 @@ async def on_message(message):
             except Exception as e:
                 print(f"[GIF] Enrichment skipped; sending text only: {e}")
                 gif_reaction = None
+            sent_messages = []
+            visible_chunks = reply_chunks
             if gif_reaction:
                 gif_embed, gif_mode = gif_reaction
-                visible_reply = reply if gif_mode == "with_text" else None
+                first_content = (
+                    reply_chunks[0]
+                    if gif_mode == "with_text" or len(reply_chunks) > 1
+                    else None
+                )
                 try:
-                    sent = await message.reply(
-                        content=visible_reply,
+                    sent_messages.append(await _send_discord_with_retry(
+                        message.reply,
+                        content=first_content,
                         embed=gif_embed,
                         mention_author=False,
-                    )
+                    ))
+                    if first_content is None:
+                        visible_chunks = []
                 except Exception as e:
                     print(f"[GIF] Embed send failed; sending text only: {e}")
-                    visible_reply = reply
-                    sent = await message.reply(reply, mention_author=False)
+                    sent_messages.append(
+                        await _send_discord_with_retry(
+                            message.reply, reply_chunks[0], mention_author=False
+                        )
+                    )
             else:
-                visible_reply = reply
-                sent = await message.reply(reply, mention_author=False)
+                sent_messages.append(
+                    await _send_discord_with_retry(
+                        message.reply, reply_chunks[0], mention_author=False
+                    )
+                )
+
             # Persist Grim's reply so it's part of future context
             if message.guild:
+                first_visible = visible_chunks[0] if visible_chunks else "[reaction GIF]"
+                first_sent = sent_messages[0]
                 save_message_to_db(
                     str(message.guild.id), str(message.channel.id),
-                    str(sent.id), BOT_NAME,
-                    visible_reply or "[reaction GIF]",
-                    sent.created_at.timestamp(), is_grim=True
+                    str(first_sent.id), BOT_NAME, first_visible,
+                    first_sent.created_at.timestamp(), is_grim=True
                 )
+
+            for chunk in reply_chunks[1:]:
+                try:
+                    sent = await _send_discord_with_retry(message.channel.send, chunk)
+                except Exception as e:
+                    print(f"[Grim] Continuation send failed after retry: {e}")
+                    break
+                sent_messages.append(sent)
+                if message.guild:
+                    save_message_to_db(
+                        str(message.guild.id), str(message.channel.id),
+                        str(sent.id), BOT_NAME, chunk,
+                        sent.created_at.timestamp(), is_grim=True
+                    )
         else:
             await message.reply("something went sideways on my end, try again", mention_author=False)
     elif not is_prefix_command:

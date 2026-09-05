@@ -456,6 +456,54 @@ class SecurityControlsTests(unittest.TestCase):
                 main._gif_reaction_is_allowed("that was hilarious", "lol", "gif-test")
             )
 
+    def test_discord_content_splitter_keeps_short_replies_intact(self):
+        self.assertEqual(main._split_discord_content("short but useful"), ["short but useful"])
+
+    def test_discord_content_splitter_preserves_substance_within_limits(self):
+        content = (
+            ("first paragraph has useful context. " * 45)
+            + "\n\n"
+            + ("second paragraph adds a distinct example. " * 45)
+            + "\n\n"
+            + ("final paragraph gives the conclusion. " * 35)
+        )
+
+        chunks = main._split_discord_content(content)
+
+        self.assertGreater(len(chunks), 1)
+        self.assertTrue(all(len(chunk) <= main.DISCORD_CONVERSATION_CHUNK_LIMIT for chunk in chunks))
+        self.assertEqual(
+            "".join(chunks),
+            content,
+        )
+
+    def test_discord_content_splitter_hard_splits_oversized_token(self):
+        content = "x" * (main.DISCORD_CONVERSATION_CHUNK_LIMIT + 25)
+
+        chunks = main._split_discord_content(content)
+
+        self.assertEqual("".join(chunks), content)
+        self.assertEqual(len(chunks), 2)
+
+    def test_discord_content_splitter_preserves_indented_fenced_code(self):
+        code = "```python\n" + ("    print('still indented')\n" * 100) + "```"
+
+        chunks = main._split_discord_content(code)
+
+        self.assertGreater(len(chunks), 1)
+        self.assertTrue(all(chunk.count("```") % 2 == 0 for chunk in chunks))
+        self.assertTrue(all(len(chunk) <= main.DISCORD_CONVERSATION_CHUNK_LIMIT for chunk in chunks))
+        self.assertIn("    print('still indented')", chunks[1])
+
+    def test_discord_content_splitter_sizes_final_open_fence_safely(self):
+        code = "```python\n" + ("x = 'substantive example'\n" * 155) + "```"
+
+        chunks = main._split_discord_content(code)
+
+        self.assertGreater(len(chunks), 1)
+        self.assertTrue(all(len(chunk) <= main.DISCORD_CONVERSATION_CHUNK_LIMIT for chunk in chunks))
+        self.assertTrue(all(chunk.count("```") % 2 == 0 for chunk in chunks))
+
     def test_giphy_is_used_when_klipy_has_no_result(self):
         async def run():
             with patch.object(
