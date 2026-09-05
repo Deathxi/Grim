@@ -1,3 +1,4 @@
+- Stopped lightweight code deployments from generating offline/crash after-reports by classifying heartbeat transitions with source revisions and dropping legacy false-positive reports.
 - Allowed substantive conversational replies to continue across multiple Discord messages instead of failing at the character limit.
 - Added `/gif topic:` for random KLIPY/GIPHY searches with persistent, per-server duplicate prevention for manual pulls.
 - Added restrained conversational reaction GIFs using KLIPY with GIPHY fallback; Grim usually keeps his text and may use GIF-only replies for deliberate jokes.

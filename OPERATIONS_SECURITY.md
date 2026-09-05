@@ -35,6 +35,8 @@ Never elevate someone solely because a display name resembles the creator.
    patch notes and after-reports for unexpected process or Discord connection
    outages. Normal update restarts are excluded. Outage times are approximate
    because an abrupt crash may occur between 30-second heartbeats.
+   Process outages require a vanished online heartbeat on the same source
+   revision; a revision change is treated as a normal code deployment.
 
 ## 3. Routine operations
 

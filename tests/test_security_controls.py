@@ -338,6 +338,7 @@ class SecurityControlsTests(unittest.TestCase):
             "session_id": "previous-session",
             "last_seen": recovered_at - 120,
             "status": "online",
+            "source_revision": main.CURRENT_SOURCE_REVISION,
         }
         outage = main._build_process_outage(previous, recovered_at)
         self.assertEqual(outage["kind"], "Unexpected outage")
@@ -347,9 +348,43 @@ class SecurityControlsTests(unittest.TestCase):
             "session_id": "previous-session",
             "last_seen": recovered_at - 30,
             "status": "stopped",
+            "source_revision": main.CURRENT_SOURCE_REVISION,
         }
         self.assertIsNone(
             main._build_process_outage(planned_restart, recovered_at)
+        )
+        self.assertIsNone(
+            main._build_process_outage(
+                {
+                    "session_id": "deployed-session",
+                    "last_seen": recovered_at - 30,
+                    "status": "online",
+                    "source_revision": "older-deployed-revision",
+                },
+                recovered_at,
+            )
+        )
+        with patch.object(main, "CURRENT_SOURCE_REVISION", None):
+            self.assertIsNone(
+                main._build_process_outage(
+                    {
+                        "session_id": "untrusted-revision-session",
+                        "last_seen": recovered_at - 60,
+                        "status": "online",
+                        "source_revision": "a" * 40,
+                    },
+                    recovered_at,
+                )
+            )
+        self.assertIsNone(
+            main._build_process_outage(
+                {
+                    "session_id": "legacy-session",
+                    "last_seen": recovered_at - 30,
+                    "status": "online",
+                },
+                recovered_at,
+            )
         )
 
         embed = main._build_outage_report_embed(outage)
@@ -370,6 +405,7 @@ class SecurityControlsTests(unittest.TestCase):
             "recovered_at": 1_788_000_120.0,
             "duration": 120.0,
             "kind": "Unexpected outage",
+            "source_revision": main.CURRENT_SOURCE_REVISION,
         }
         report_id = main._queue_outage_report(outage)
         self.assertIsNotNone(report_id)
@@ -384,6 +420,27 @@ class SecurityControlsTests(unittest.TestCase):
 
         main._finish_outage_report(report_id)
         self.assertIsNone(main._queue_outage_report(outage))
+        self.assertEqual(main._load_pending_outage_reports(), [])
+
+    def test_legacy_pending_process_outages_are_not_replayed(self):
+        main._atomic_json_write(
+            main.OUTAGE_REPORT_STATE_FILE,
+            {
+                "pending": {
+                    "legacy": {
+                        "outage": {
+                            "started_at": 1_788_000_000.0,
+                            "recovered_at": 1_788_000_120.0,
+                            "duration": 120.0,
+                            "kind": "Unexpected outage",
+                        },
+                        "delivered_channels": [],
+                    }
+                },
+                "delivered_ids": [],
+            },
+        )
+
         self.assertEqual(main._load_pending_outage_reports(), [])
 
     def test_patch_notes_extract_only_new_changelog_bullets(self):

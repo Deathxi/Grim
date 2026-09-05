@@ -1647,6 +1647,25 @@ OUTAGE_REPORT_MIN_SECONDS = 5
 _gateway_disconnected_at = None
 _active_outage_reports = set()
 
+def _get_source_revision() -> str | None:
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=os.path.dirname(os.path.abspath(__file__)),
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=True,
+        )
+        revision = result.stdout.strip()
+        if re.fullmatch(r"[0-9a-fA-F]{40,64}", revision):
+            return revision
+    except Exception:
+        pass
+    return None
+
+CURRENT_SOURCE_REVISION = _get_source_revision()
+
 def _load_runtime_heartbeat() -> dict:
     try:
         with open(RUNTIME_HEARTBEAT_FILE, "r") as f:
@@ -1663,11 +1682,21 @@ def _write_runtime_heartbeat(status: str = "online", timestamp: float | None = N
             "session_id": RUNTIME_SESSION_ID,
             "last_seen": recorded_at,
             "status": status,
+            "source_revision": CURRENT_SOURCE_REVISION,
         },
     )
 
 def _build_process_outage(previous: dict, recovered_at: float) -> dict | None:
     if not previous or previous.get("session_id") == RUNTIME_SESSION_ID:
+        return None
+    previous_revision = previous.get("source_revision")
+    # Heartbeats created before revision-aware classification are not reliable
+    # enough to call crashes. A changed revision is a normal code deployment.
+    if (
+        not CURRENT_SOURCE_REVISION
+        or not previous_revision
+        or previous_revision != CURRENT_SOURCE_REVISION
+    ):
         return None
     # A stopped heartbeat means the previous process shut down cleanly, such as
     # during a normal deployment. Only a vanished online session is an outage.
@@ -1685,6 +1714,7 @@ def _build_process_outage(previous: dict, recovered_at: float) -> dict | None:
         "recovered_at": recovered_at,
         "duration": duration,
         "kind": "Unexpected outage",
+        "source_revision": CURRENT_SOURCE_REVISION,
     }
 
 def _build_gateway_outage(started_at: float, recovered_at: float) -> dict | None:
@@ -1716,7 +1746,13 @@ def _load_outage_report_state() -> dict:
         state["pending"] = {
             report_id: pending
             for report_id, pending in state["pending"].items()
-            if pending.get("outage", {}).get("kind") != "Restart / offline period"
+            if (
+                pending.get("outage", {}).get("kind") != "Restart / offline period"
+                and (
+                    pending.get("outage", {}).get("kind") != "Unexpected outage"
+                    or pending.get("outage", {}).get("source_revision")
+                )
+            )
         }
         return state
     except:
