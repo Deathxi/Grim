@@ -2744,6 +2744,115 @@ async def _maybe_build_gif_reaction(
             ):
                 _gif_reaction_last_posted.pop(channel_id, None)
 
+def _attachment_media_kind(attachment) -> str | None:
+    content_type = str(getattr(attachment, "content_type", "") or "").lower()
+    media_type = content_type.split(";", 1)[0].strip()
+    if media_type in {"image/png", "image/jpeg"}:
+        return "image"
+    if media_type.startswith("video/"):
+        return "video"
+
+    url_path = str(getattr(attachment, "url", "")).lower().split("?", 1)[0]
+    if any(url_path.endswith(ext) for ext in {".png", ".jpg", ".jpeg"}):
+        return "image"
+    if any(url_path.endswith(ext) for ext in {".mp4", ".mov", ".webm", ".avi", ".mkv"}):
+        return "video"
+    return None
+
+async def _post_contextual_completion(
+    session: aiohttp.ClientSession,
+    headers: dict,
+    payload: dict,
+    label: str,
+    timeout_seconds: int,
+) -> str | None:
+    try:
+        async with session.post(
+            "https://api.x.ai/v1/chat/completions",
+            json=payload,
+            headers=headers,
+            timeout=aiohttp.ClientTimeout(total=timeout_seconds),
+        ) as response:
+            if response.status != 200:
+                error = (await response.text())[:500]
+                print(
+                    f"[Grim] {label} API error {response.status} "
+                    f"with model {payload.get('model')}: {error}"
+                )
+                return None
+            data = await response.json()
+            content = data["choices"][0]["message"]["content"]
+            return content.strip() if isinstance(content, str) and content.strip() else None
+    except Exception as e:
+        print(f"[Grim] {label} request error: {e}")
+        return None
+
+async def _complete_contextual_reply(
+    session: aiohttp.ClientSession,
+    headers: dict,
+    system_prompt: str,
+    chat_messages: list,
+    text_fallback_messages: list,
+    has_images: bool,
+) -> str | None:
+    base_payload = {
+        "messages": [{"role": "system", "content": system_prompt}] + chat_messages,
+        "max_tokens": 1000,
+        "temperature": 0.85,
+    }
+    if not has_images:
+        return await _post_contextual_completion(
+            session,
+            headers,
+            {**base_payload, "model": os.environ.get("XAI_TEXT_MODEL", "grok-3")},
+            "text",
+            20,
+        )
+
+    vision_payload = {
+        **base_payload,
+        "model": os.environ.get("XAI_VISION_MODEL", "grok-4.3"),
+    }
+    result = await _post_contextual_completion(
+        session, headers, vision_payload, "vision", 10
+    )
+    if result:
+        return result
+
+    fallback_payload = {
+        **base_payload,
+        "model": os.environ.get("XAI_TEXT_MODEL", "grok-3"),
+        "messages": (
+            [{"role": "system", "content": system_prompt}]
+            + text_fallback_messages
+        ),
+    }
+    return await _post_contextual_completion(
+        session, headers, fallback_payload, "vision text fallback", 15
+    )
+
+DISCORD_REPLY_FETCH_TIMEOUT_SECONDS = 3
+
+async def _resolve_replied_message(message) -> tuple[discord.Message | None, bool]:
+    reference = getattr(message, "reference", None)
+    if not reference:
+        return None, False
+    resolved = getattr(reference, "resolved", None)
+    if isinstance(resolved, discord.Message):
+        return resolved, False
+    message_id = getattr(reference, "message_id", None)
+    if not message_id:
+        return None, True
+    try:
+        fetched = await asyncio.wait_for(
+            message.channel.fetch_message(message_id),
+            timeout=DISCORD_REPLY_FETCH_TIMEOUT_SECONDS,
+        )
+        return fetched, False
+    except Exception as e:
+        print(f"[Grim] Could not fetch replied message: {e}")
+        return None, True
+
 async def generate_contextual_reply(message: discord.Message) -> str | None:
     """Full contextual @Grim mention handler — pulls channel history, injects server context and memories."""
     api_key = os.environ.get("XAI_API_KEY")
@@ -2810,18 +2919,15 @@ async def generate_contextual_reply(message: discord.Message) -> str | None:
     current_text = message.content.replace(f"<@{bot.user.id}>", "").replace(f"<@!{bot.user.id}>", "").strip()
 
     # Collect image and video URLs from attachments, embeds, and referenced message
-    IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
-    VIDEO_EXTS = {".mp4", ".mov", ".webm", ".avi", ".mkv"}
-
     image_urls = []
     video_urls = []
 
     def _collect_media(msg):
         for att in msg.attachments:
-            url_lower = att.url.lower().split("?")[0]
-            if any(url_lower.endswith(ext) for ext in IMAGE_EXTS):
+            kind = _attachment_media_kind(att)
+            if kind == "image":
                 image_urls.append(att.url)
-            elif any(url_lower.endswith(ext) for ext in VIDEO_EXTS):
+            elif kind == "video":
                 video_urls.append(att.url)
         for embed in msg.embeds:
             if embed.image and embed.image.url:
@@ -2833,12 +2939,32 @@ async def generate_contextual_reply(message: discord.Message) -> str | None:
 
     # Also check the message being replied to (user may ask "what does this show?")
     ref_context = ""
-    if message.reference and message.reference.resolved and isinstance(message.reference.resolved, discord.Message):
-        ref_msg = message.reference.resolved
+    ref_msg, ref_unavailable = await _resolve_replied_message(message)
+    if ref_msg:
         _collect_media(ref_msg)
         ref_text = ref_msg.content.strip()
         if ref_text:
             ref_context = f"\n\n[Replying to {ref_msg.author.display_name}: \"{ref_text}\"]"
+        elif ref_msg.attachments:
+            supported_image = any(
+                _attachment_media_kind(attachment) == "image"
+                for attachment in ref_msg.attachments
+            )
+            if supported_image:
+                ref_context = f"\n\n[Replying to an image from {ref_msg.author.display_name}.]"
+            else:
+                ref_context = (
+                    f"\n\n[Replying to an attachment from {ref_msg.author.display_name}, "
+                    "but its format cannot be inspected. Be transparent about that.]"
+                )
+    elif ref_unavailable:
+        ref_context = (
+            "\n\n[The user replied to a message Grim could not access. Do not guess "
+            "what it contained; clearly say the replied content is unavailable.]"
+        )
+
+    image_urls = list(dict.fromkeys(image_urls))[:4]
+    video_urls = list(dict.fromkeys(video_urls))
 
     # Build the final user content block
     video_note = ""
@@ -2856,6 +2982,14 @@ async def generate_contextual_reply(message: discord.Message) -> str | None:
         chat_messages.append({"role": "user", "content": vision_content})
     else:
         chat_messages.append({"role": "user", "content": full_text})
+    text_fallback_messages = chat_messages[:-1] + [{
+        "role": "user",
+        "content": (
+            f"{full_text}\n\n"
+            "[The attached image could not be analyzed right now. Be transparent "
+            "about that limitation and still respond helpfully to the available context.]"
+        ),
+    }]
 
     # Member profile — inject what Grim knows about the person talking to it
     member_profile = get_member_profile(guild_id, str(author.id))
@@ -2972,29 +3106,24 @@ Finish a substantive answer instead of cutting it off for Discord's message limi
 {live_context_block}"""
 
     try:
-        async with aiohttp.ClientSession() as session:
-            model = "grok-2-vision-1212" if image_urls else "grok-3"
-            payload = {
-                "model": model,
-                "messages": [{"role": "system", "content": system_prompt}] + chat_messages,
-                "max_tokens": 1000,
-                "temperature": 0.85,
-            }
+        async with aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=30)
+        ) as session:
             headers = {
                 "Authorization": f"Bearer {api_key}",
                 "Content-Type": "application/json",
             }
-            async with session.post(
-                "https://api.x.ai/v1/chat/completions",
-                json=payload,
-                headers=headers,
-            ) as r:
-                if r.status != 200:
-                    err = await r.text()
-                    print(f"[Grim] API error {r.status}: {err}")
-                    return None
-                data = await r.json()
-                return data["choices"][0]["message"]["content"].strip()
+            return await asyncio.wait_for(
+                _complete_contextual_reply(
+                    session,
+                    headers,
+                    system_prompt,
+                    chat_messages,
+                    text_fallback_messages,
+                    bool(image_urls),
+                ),
+                timeout=26,
+            )
     except Exception as e:
         print(f"[Grim] Contextual reply error: {e}")
         return None

@@ -51,6 +51,8 @@ Grim is a Discord bot for Seclude & Affiliates. Built with Python and discord.py
 - Live NFT listing monitor with image, price, token ID, and rarity data from OpenSea API
 - Multilingual text replies automatically match the language of each member's message in every server; an optional per-member preference overrides auto-detection
 - Substantive conversational answers can continue across multiple Discord-safe messages; short exchanges remain concise
+- Image-reply conversations use current xAI vision support, including uncached replied messages and safe text fallback when image analysis is unavailable
+- Image URLs and the user's accompanying context are sent to xAI only when the user directly asks Grim to respond; inaccessible or unsupported attachments are never guessed at
 - Explicit text translation into any requested language; no voice or speech features are included
 - Persistent, server-scoped member identity and lifecycle history with staff-only paginated profile review and configurable departure cards; it stores no message contents in the tracker
 - VPS-only weekly encrypted backups of `~/.grim_data` to a separate private GitHub repository; see `BACKUP_RESTORE.md`

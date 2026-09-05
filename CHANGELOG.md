@@ -1,3 +1,4 @@
+- Fixed tagged replies to image messages by upgrading the xAI vision model, fetching uncached reply targets, recognizing Discord image MIME types, and using a bounded, transparent text fallback.
 - Stopped lightweight code deployments from generating offline/crash after-reports by classifying heartbeat transitions with source revisions and dropping legacy false-positive reports.
 - Allowed substantive conversational replies to continue across multiple Discord messages instead of failing at the character limit.
 - Added `/gif topic:` for random KLIPY/GIPHY searches with persistent, per-server duplicate prevention for manual pulls.

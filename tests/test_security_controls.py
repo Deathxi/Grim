@@ -5,7 +5,7 @@ import tempfile
 import threading
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -560,6 +560,104 @@ class SecurityControlsTests(unittest.TestCase):
         self.assertGreater(len(chunks), 1)
         self.assertTrue(all(len(chunk) <= main.DISCORD_CONVERSATION_CHUNK_LIMIT for chunk in chunks))
         self.assertTrue(all(chunk.count("```") % 2 == 0 for chunk in chunks))
+
+    def test_extensionless_discord_image_uses_content_type(self):
+        attachment = SimpleNamespace(
+            url="https://cdn.discordapp.com/attachments/123/456/upload",
+            content_type="image/png",
+        )
+        self.assertEqual(main._attachment_media_kind(attachment), "image")
+
+    def test_unsupported_image_type_is_not_sent_to_vision_model(self):
+        attachment = SimpleNamespace(
+            url="https://cdn.discordapp.com/attachments/123/456/animated.gif",
+            content_type="image/gif",
+        )
+        self.assertIsNone(main._attachment_media_kind(attachment))
+
+    def test_vision_failure_falls_back_to_text_model(self):
+        async def run():
+            with patch.dict(
+                main.os.environ,
+                {"XAI_VISION_MODEL": "grok-4.3", "XAI_TEXT_MODEL": "grok-3"},
+            ), patch.object(
+                main,
+                "_post_contextual_completion",
+                side_effect=[None, "i couldn't inspect it, but i can still help."],
+            ) as complete:
+                result = await main._complete_contextual_reply(
+                    object(),
+                    {"Authorization": "redacted"},
+                    "system",
+                    [{"role": "user", "content": [{"type": "image_url"}]}],
+                    [{"role": "user", "content": "text fallback"}],
+                    True,
+                )
+
+            self.assertEqual(result, "i couldn't inspect it, but i can still help.")
+            self.assertEqual(complete.await_count, 2)
+            self.assertEqual(complete.await_args_list[0].args[2]["model"], "grok-4.3")
+            self.assertEqual(complete.await_args_list[1].args[2]["model"], "grok-3")
+            self.assertEqual(complete.await_args_list[0].args[4], 10)
+            self.assertEqual(complete.await_args_list[1].args[4], 15)
+            self.assertEqual(
+                complete.await_args_list[1].args[2]["messages"][-1]["content"],
+                "text fallback",
+            )
+
+        asyncio.run(run())
+
+    def test_unresolved_reply_is_fetched_from_discord(self):
+        async def run():
+            fetched = object()
+            message = SimpleNamespace(
+                reference=SimpleNamespace(resolved=None, message_id=123),
+                channel=SimpleNamespace(fetch_message=AsyncMock(return_value=fetched)),
+            )
+
+            result, unavailable = await main._resolve_replied_message(message)
+
+            self.assertIs(result, fetched)
+            self.assertFalse(unavailable)
+            message.channel.fetch_message.assert_awaited_once_with(123)
+
+        asyncio.run(run())
+
+    def test_denied_reply_fetch_is_marked_unavailable(self):
+        async def run():
+            message = SimpleNamespace(
+                reference=SimpleNamespace(resolved=None, message_id=123),
+                channel=SimpleNamespace(
+                    fetch_message=AsyncMock(side_effect=PermissionError("denied"))
+                ),
+            )
+
+            result, unavailable = await main._resolve_replied_message(message)
+
+            self.assertIsNone(result)
+            self.assertTrue(unavailable)
+
+        asyncio.run(run())
+
+    def test_stalled_reply_fetch_times_out_as_unavailable(self):
+        async def run():
+            async def stalled_fetch(_message_id):
+                await asyncio.sleep(0.05)
+                return object()
+
+            message = SimpleNamespace(
+                reference=SimpleNamespace(resolved=None, message_id=123),
+                channel=SimpleNamespace(fetch_message=stalled_fetch),
+            )
+            with patch.object(
+                main, "DISCORD_REPLY_FETCH_TIMEOUT_SECONDS", 0.001
+            ):
+                result, unavailable = await main._resolve_replied_message(message)
+
+            self.assertIsNone(result)
+            self.assertTrue(unavailable)
+
+        asyncio.run(run())
 
     def test_giphy_is_used_when_klipy_has_no_result(self):
         async def run():
