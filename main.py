@@ -2328,6 +2328,179 @@ async def translate_text(text: str, target_language: str) -> str | None:
         print(f"[Translation] Request error: {e}")
         return None
 
+GIF_REACTION_CHANCE = 0.08
+GIF_REACTION_COOLDOWN_SECONDS = 600
+_gif_reaction_last_posted: dict[str, float] = {}
+_gif_reaction_locks: dict[str, asyncio.Lock] = {}
+_GIF_SERIOUS_TERMS = {
+    "suicide", "kill myself", "self harm", "self-harm", "overdose", "funeral",
+    "died", "death in the family", "abuse", "assault", "emergency", "911",
+    "moderation", "ban appeal", "security incident", "outage", "deployment",
+    "hospital", "diagnosed", "cancer", "grief", "depressed", "depression",
+    "panic attack", "crisis", "i'm not okay", "im not okay", "need help",
+    "legal advice", "medical advice",
+    "database", "credentials", "api key", "token", "server down", "service down",
+    "not responding", "error", "exception", "bug", "broken", "restart",
+    "github", "vps", "permission", "banned", "laid off", "lost my job",
+    "divorce", "breakup", "therapy", "trauma",
+    "chest pain", "can't breathe", "cant breathe", "difficulty breathing",
+    "heart attack", "stroke", "seizure", "bleeding", "unconscious",
+    "injured", "injury", "severe pain", "very sick", "seriously ill",
+    "ambulance", "poisoned", "allergic reaction", "domestic violence",
+}
+_GIF_CASUAL_SIGNALS = {
+    "lol", "lmao", "lmfao", "haha", "funny", "joke", "joking", "kidding",
+    "meme", "roast", "bruh", "bro", "wtf", "no way", "damn", "wild",
+    "chaos", "vibe", "mood", "cooked", "goofy", "hilarious", "reaction",
+    "imagine", "💀", "😂", "🤣",
+}
+
+def _gif_reaction_is_allowed(message_text: str, reply: str, channel_id: str) -> bool:
+    if not os.environ.get("KLIPY_API_KEY") and not os.environ.get("GIPHY_API_KEY"):
+        return False
+    if time.time() - _gif_reaction_last_posted.get(channel_id, 0) < GIF_REACTION_COOLDOWN_SECONDS:
+        return False
+    combined = f"{message_text} {reply}".lower()
+    if any(term in combined for term in _GIF_SERIOUS_TERMS):
+        return False
+    return any(signal in combined for signal in _GIF_CASUAL_SIGNALS)
+
+async def _decide_gif_reaction(message_text: str, reply: str) -> dict | None:
+    api_key = os.environ.get("XAI_API_KEY")
+    if not api_key:
+        return None
+    payload = {
+        "model": "grok-3",
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    "Decide whether a reaction GIF would naturally improve this Discord "
+                    "exchange. Return JSON only with use (boolean), mode (with_text or "
+                    "gif_only), and query (2-6 concrete search words). Usually preserve "
+                    "the text. Use gif_only only when the GIF itself is the complete joke. "
+                    "Decline for serious, sensitive, factual, support, moderation, or "
+                    "operational conversations."
+                ),
+            },
+            {"role": "user", "content": f"USER: {message_text}\nGRIM: {reply}"},
+        ],
+        "response_format": {"type": "json_object"},
+        "max_tokens": 100,
+        "temperature": 0.3,
+    }
+    try:
+        async with aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=3)
+        ) as session:
+            async with session.post(
+                "https://api.x.ai/v1/chat/completions",
+                json=payload,
+                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            ) as response:
+                if response.status != 200:
+                    return None
+                raw = (await response.json())["choices"][0]["message"]["content"]
+                decision = json.loads(raw)
+        query = " ".join(str(decision.get("query", "")).split())[:80]
+        mode = decision.get("mode")
+        if decision.get("use") is not True or mode not in {"with_text", "gif_only"} or not query:
+            return None
+        return {"mode": mode, "query": query}
+    except Exception as e:
+        print(f"[GIF] Decision failed: {e}")
+        return None
+
+async def _search_klipy_gif(session: aiohttp.ClientSession, query: str) -> str | None:
+    api_key = os.environ.get("KLIPY_API_KEY")
+    if not api_key:
+        return None
+    try:
+        async with session.get(
+            f"https://api.klipy.com/api/v1/{api_key}/gifs/search",
+            params={"q": query, "limit": 5},
+        ) as response:
+            if response.status != 200:
+                return None
+            items = (await response.json()).get("data", {}).get("data", [])
+        choices = [
+            item.get("file", {}).get("md", {}).get("gif", {}).get("url")
+            for item in items[:5]
+        ]
+        choices = [url for url in choices if url and url.startswith("https://")]
+        return random.choice(choices) if choices else None
+    except Exception as e:
+        print(f"[GIF] KLIPY search failed: {e}")
+        return None
+
+async def _search_giphy_gif(session: aiohttp.ClientSession, query: str) -> str | None:
+    api_key = os.environ.get("GIPHY_API_KEY")
+    if not api_key:
+        return None
+    try:
+        async with session.get(
+            "https://api.giphy.com/v1/gifs/search",
+            params={"api_key": api_key, "q": query, "limit": 5, "rating": "pg-13"},
+        ) as response:
+            if response.status != 200:
+                return None
+            items = (await response.json()).get("data", [])
+        choices = [
+            item.get("images", {}).get("fixed_height", {}).get("url")
+            for item in items[:5]
+        ]
+        choices = [url for url in choices if url and url.startswith("https://")]
+        return random.choice(choices) if choices else None
+    except Exception as e:
+        print(f"[GIF] GIPHY search failed: {e}")
+        return None
+
+async def _search_reaction_gif(
+    session: aiohttp.ClientSession, query: str
+) -> tuple[str, str] | None:
+    gif_url = await _search_klipy_gif(session, query)
+    if gif_url:
+        return gif_url, "KLIPY"
+    gif_url = await _search_giphy_gif(session, query)
+    if gif_url:
+        return gif_url, "GIPHY"
+    return None
+
+async def _maybe_build_gif_reaction(
+    message_text: str, reply: str, channel_id: str
+) -> tuple[discord.Embed, str] | None:
+    if random.random() >= GIF_REACTION_CHANCE:
+        return None
+    lock = _gif_reaction_locks.setdefault(channel_id, asyncio.Lock())
+    async with lock:
+        if not _gif_reaction_is_allowed(message_text, reply, channel_id):
+            return None
+        reservation = time.time()
+        _gif_reaction_last_posted[channel_id] = reservation
+        found_reaction = False
+        try:
+            decision = await _decide_gif_reaction(message_text, reply)
+            if not decision:
+                return None
+            async with aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=3)
+            ) as session:
+                result = await _search_reaction_gif(session, decision["query"])
+            if not result:
+                return None
+            gif_url, provider = result
+            embed = discord.Embed(color=discord.Color.from_rgb(18, 18, 18))
+            embed.set_image(url=gif_url)
+            embed.set_footer(text=f"Reaction via {provider}")
+            found_reaction = True
+            return embed, decision["mode"]
+        finally:
+            if (
+                _gif_reaction_last_posted.get(channel_id) == reservation
+                and not found_reaction
+            ):
+                _gif_reaction_last_posted.pop(channel_id, None)
+
 async def generate_contextual_reply(message: discord.Message) -> str | None:
     """Full contextual @Grim mention handler — pulls channel history, injects server context and memories."""
     api_key = os.environ.get("XAI_API_KEY")
@@ -6806,24 +6979,51 @@ async def on_message(message):
             )
             await message.channel.send(file=quote_file)
 
-    if bot.user in message.mentions:
+    is_prefix_command = message.content.lstrip().startswith("!")
+    if bot.user in message.mentions and not is_prefix_command:
         # Reset counter — Grim is already responding, no need to also proactively chime
         _channel_msg_counter[str(message.channel.id)] = 0
         _channel_last_grim_post[str(message.channel.id)] = time.time()
         async with message.channel.typing():
             reply = await generate_contextual_reply(message)
         if reply:
-            sent = await message.reply(reply, mention_author=False)
+            try:
+                gif_reaction = await asyncio.wait_for(
+                    _maybe_build_gif_reaction(
+                        message.content, reply, str(message.channel.id)
+                    ),
+                    timeout=10,
+                )
+            except Exception as e:
+                print(f"[GIF] Enrichment skipped; sending text only: {e}")
+                gif_reaction = None
+            if gif_reaction:
+                gif_embed, gif_mode = gif_reaction
+                visible_reply = reply if gif_mode == "with_text" else None
+                try:
+                    sent = await message.reply(
+                        content=visible_reply,
+                        embed=gif_embed,
+                        mention_author=False,
+                    )
+                except Exception as e:
+                    print(f"[GIF] Embed send failed; sending text only: {e}")
+                    visible_reply = reply
+                    sent = await message.reply(reply, mention_author=False)
+            else:
+                visible_reply = reply
+                sent = await message.reply(reply, mention_author=False)
             # Persist Grim's reply so it's part of future context
             if message.guild:
                 save_message_to_db(
                     str(message.guild.id), str(message.channel.id),
                     str(sent.id), BOT_NAME,
-                    reply, sent.created_at.timestamp(), is_grim=True
+                    visible_reply or "[reaction GIF]",
+                    sent.created_at.timestamp(), is_grim=True
                 )
         else:
             await message.reply("something went sideways on my end, try again", mention_author=False)
-    else:
+    elif not is_prefix_command:
         # Not @mentioned — let Grim decide if it wants to drop in
         await maybe_chime_in(message)
 

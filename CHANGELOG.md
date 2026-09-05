@@ -1,3 +1,4 @@
+- Added restrained conversational reaction GIFs using KLIPY with GIPHY fallback; Grim usually keeps his text and may use GIF-only replies for deliberate jokes.
 - Stopped classifying graceful update deployments as outages; after-reports now cover only unexpected process or Discord connection failures.
 - Changed rendered quote-card avatars from circular to square while preserving the random quote trigger.
 - Render quoted messages as custom image cards with regular 24px text and the member avatar on the right.

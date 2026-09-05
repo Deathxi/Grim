@@ -5,6 +5,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -405,6 +406,63 @@ class SecurityControlsTests(unittest.TestCase):
         main.clear_member_language_preference(guild_id, creator_id)
         auto_instruction = main.get_language_reply_instruction(guild_id, creator_id)
         self.assertIn("Automatically identify the language", auto_instruction)
+
+    def test_gif_reactions_exclude_serious_topics_and_recent_channels(self):
+        with patch.dict(
+            main.os.environ,
+            {"KLIPY_API_KEY": "configured", "GIPHY_API_KEY": "configured"},
+        ):
+            self.assertFalse(
+                main._gif_reaction_is_allowed(
+                    "there was a security incident", "i'll look into it", "gif-test"
+                )
+            )
+            self.assertFalse(
+                main._gif_reaction_is_allowed(
+                    "the database is down", "that's wild, checking it", "gif-test"
+                )
+            )
+            self.assertFalse(
+                main._gif_reaction_is_allowed(
+                    "i was laid off", "damn, i'm sorry", "gif-test"
+                )
+            )
+            self.assertFalse(
+                main._gif_reaction_is_allowed(
+                    "i'm having chest pain 😂", "that sounds rough", "gif-test"
+                )
+            )
+            self.assertFalse(
+                main._gif_reaction_is_allowed(
+                    "what time is it", "it is midnight", "gif-test"
+                )
+            )
+            main._gif_reaction_last_posted["gif-test"] = main.time.time()
+            self.assertFalse(
+                main._gif_reaction_is_allowed("that was hilarious", "agreed", "gif-test")
+            )
+            main._gif_reaction_last_posted.pop("gif-test", None)
+            self.assertTrue(
+                main._gif_reaction_is_allowed("that was hilarious", "lol", "gif-test")
+            )
+
+    def test_giphy_is_used_when_klipy_has_no_result(self):
+        async def run():
+            with patch.object(
+                main, "_search_klipy_gif", return_value=None
+            ) as klipy, patch.object(
+                main,
+                "_search_giphy_gif",
+                return_value="https://media.giphy.com/reaction.gif",
+            ) as giphy:
+                result = await main._search_reaction_gif(object(), "side eye")
+            self.assertEqual(
+                result, ("https://media.giphy.com/reaction.gif", "GIPHY")
+            )
+            klipy.assert_awaited_once()
+            giphy.assert_awaited_once()
+
+        asyncio.run(run())
 
     def test_server_info_uses_grim_layout_and_aggregate_language_data(self):
         main.save_member_language_preference("50", "10", "english")

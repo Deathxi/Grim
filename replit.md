@@ -64,6 +64,7 @@ Grim is a Discord bot for Seclude & Affiliates. Built with Python and discord.py
 ## Dependencies
 - discord.py - Discord API wrapper
 - openai - OpenAI-compatible client for xAI API
+- KLIPY and GIPHY - conversational reaction GIF search with cooldowns and serious-topic exclusions
 - aiohttp - Async HTTP requests
 - python-dotenv - Environment variable management
 - tweepy - Twitter/X API wrapper
