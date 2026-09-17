@@ -5304,6 +5304,138 @@ async def server_info(interaction: discord.Interaction):
     )
     await interaction.followup.send(embed=embed)
 
+async def _clear_messages_before(channel, before, amount: int) -> tuple[int, int]:
+    messages = [
+        message
+        async for message in channel.history(limit=amount, before=before)
+    ]
+    if not messages:
+        return 0, 0
+
+    now = datetime.now(timezone.utc)
+    recent = [
+        message
+        for message in messages
+        if getattr(message, "created_at", now) >= now - timedelta(days=14, seconds=-10)
+    ]
+    older = [message for message in messages if message not in recent]
+    deleted = []
+    failed = []
+
+    if recent and hasattr(channel, "delete_messages"):
+        for start in range(0, len(recent), 100):
+            batch = recent[start:start + 100]
+            if len(batch) == 1:
+                for message in batch:
+                    try:
+                        await message.delete()
+                        deleted.append(message)
+                    except Exception as error:
+                        failed.append(message)
+                        print(f"[Clear] Could not delete message {message.id}: {error}")
+                continue
+            try:
+                await channel.delete_messages(batch)
+                deleted.extend(batch)
+            except Exception as bulk_error:
+                print(f"[Clear] Bulk delete failed, retrying individually: {bulk_error}")
+                for message in batch:
+                    try:
+                        await message.delete()
+                        deleted.append(message)
+                    except Exception as error:
+                        failed.append(message)
+                        print(f"[Clear] Could not delete message {message.id}: {error}")
+    else:
+        older = messages
+
+    for message in older:
+        try:
+            await message.delete()
+            deleted.append(message)
+        except Exception as error:
+            failed.append(message)
+            print(f"[Clear] Could not delete message {message.id}: {error}")
+    return len(deleted), len(failed)
+
+async def _delete_clear_confirmation(message):
+    await asyncio.sleep(5)
+    try:
+        await message.delete()
+    except Exception as error:
+        print(f"[Clear] Could not remove confirmation message: {error}")
+
+@bot.tree.command(name="clear", description="Delete recent messages from this channel or forum post")
+@discord.app_commands.describe(number="How many messages to delete before this command (1–100)")
+async def clear(
+    interaction: discord.Interaction,
+    number: discord.app_commands.Range[int, 1, 100],
+):
+    if not await require_permission(interaction, "manage_messages", "clear"):
+        return
+
+    channel = interaction.channel
+    if channel is None or not hasattr(channel, "history"):
+        await interaction.response.send_message(
+            "This command can only be used in a text channel or forum post.",
+            ephemeral=True,
+        )
+        return
+
+    await interaction.response.defer(ephemeral=True)
+    try:
+        deleted_count, failed_count = await _clear_messages_before(
+            channel,
+            interaction.created_at,
+            int(number),
+        )
+    except Exception as error:
+        print(f"[Clear] Cleanup failed in channel {channel.id}: {error}")
+        await interaction.followup.send(
+            "I couldn't finish clearing that channel. Check Grim's message-management permission.",
+            ephemeral=True,
+        )
+        return
+
+    record_security_event(
+        interaction,
+        "clear",
+        "partial" if failed_count else "success",
+        {
+            "deleted_count": deleted_count,
+            "failed_count": failed_count,
+            "channel_id": str(channel.id),
+        },
+    )
+    clearer = getattr(interaction.user, "mention", interaction.user.display_name)
+    confirmation_text = (
+        f"🧹 Cleared {deleted_count} message"
+        f"{'' if deleted_count == 1 else 's'} · {clearer}."
+    )
+    if failed_count:
+        confirmation_text += (
+            f" {failed_count} message{'' if failed_count == 1 else 's'}"
+            " could not be deleted."
+        )
+    try:
+        confirmation = await channel.send(
+            confirmation_text,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+        asyncio.create_task(_delete_clear_confirmation(confirmation))
+    except Exception as error:
+        print(f"[Clear] Could not post confirmation message: {error}")
+    await interaction.followup.send(
+        f"Cleared {deleted_count} message"
+        f"{'' if deleted_count == 1 else 's'}."
+        + (
+            f" {failed_count} could not be deleted."
+            if failed_count
+            else ""
+        ),
+        ephemeral=True,
+    )
+
 @bot.tree.command(name="howdie", description="How will someone meet their dramatic end?")
 async def howdie(interaction: discord.Interaction, user: discord.Member):
     if not await require_external_action(interaction):

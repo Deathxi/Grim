@@ -29,10 +29,18 @@ class FakeContext:
         self.messages.append(message if message is not None else kwargs)
 
 
-def interaction(*, user_id=10, owner_id=1, administrator=False, manage_channels=False):
+def interaction(
+    *,
+    user_id=10,
+    owner_id=1,
+    administrator=False,
+    manage_channels=False,
+    manage_messages=False,
+):
     permissions = SimpleNamespace(
         administrator=administrator,
         manage_channels=manage_channels,
+        manage_messages=manage_messages,
         move_members=False,
     )
     return SimpleNamespace(
@@ -202,6 +210,19 @@ class SecurityControlsTests(unittest.TestCase):
         self.assertFalse(allowed)
         self.assertTrue(event.response.messages)
 
+    def test_clear_requires_manage_messages(self):
+        event = interaction()
+        self.assertFalse(
+            asyncio.run(main.require_permission(event, "manage_messages", "clear"))
+        )
+        self.assertTrue(event.response.messages)
+
+    def test_clear_allows_manage_messages(self):
+        event = interaction(manage_messages=True)
+        self.assertTrue(
+            asyncio.run(main.require_permission(event, "manage_messages", "clear"))
+        )
+
     def test_moderator_can_manage_channels_but_not_administrator_controls(self):
         moderator = interaction(manage_channels=True)
         self.assertTrue(
@@ -311,6 +332,7 @@ class SecurityControlsTests(unittest.TestCase):
         slash_names = {command.name for command in main.bot.tree.get_commands()}
         prefix_names = {command.name for command in main.bot.commands}
         self.assertIn("server", slash_names)
+        self.assertIn("clear", slash_names)
         self.assertIn("members", slash_names)
         self.assertIn("memberlog", slash_names)
         self.assertIn("language", slash_names)
@@ -323,6 +345,16 @@ class SecurityControlsTests(unittest.TestCase):
         self.assertNotIn("grim_memberlog", slash_names)
         self.assertIn("server", prefix_names)
         self.assertNotIn("info", prefix_names)
+        clear_command = next(
+            command for command in main.bot.tree.get_commands()
+            if command.name == "clear"
+        )
+        number_parameter = next(
+            parameter for parameter in clear_command.parameters
+            if parameter.name == "number"
+        )
+        self.assertEqual(number_parameter.min_value, 1)
+        self.assertEqual(number_parameter.max_value, 100)
 
     def test_quote_card_uses_regular_24px_text_and_png_output(self):
         created = main.datetime(2026, 8, 27, tzinfo=main.timezone.utc)
@@ -560,6 +592,99 @@ class SecurityControlsTests(unittest.TestCase):
         self.assertGreater(len(chunks), 1)
         self.assertTrue(all(len(chunk) <= main.DISCORD_CONVERSATION_CHUNK_LIMIT for chunk in chunks))
         self.assertTrue(all(chunk.count("```") % 2 == 0 for chunk in chunks))
+
+    def test_clear_deletes_requested_messages_before_interaction(self):
+        async def run():
+            class FakeMessage:
+                def __init__(self, message_id):
+                    self.id = message_id
+                    self.created_at = main.datetime.now(main.timezone.utc)
+                    self.deleted = False
+
+                async def delete(self):
+                    self.deleted = True
+
+            messages = [FakeMessage(1), FakeMessage(2), FakeMessage(3)]
+
+            class FakeChannel:
+                id = 777
+
+                async def history(self, limit, before):
+                    for message in messages[:limit]:
+                        yield message
+
+                async def delete_messages(self, batch):
+                    for message in batch:
+                        message.deleted = True
+
+            count, failed = await main._clear_messages_before(
+                FakeChannel(), main.datetime.now(main.timezone.utc), 2
+            )
+
+            self.assertEqual(count, 2)
+            self.assertEqual(failed, 0)
+            self.assertTrue(all(message.deleted for message in messages[:2]))
+            self.assertFalse(messages[2].deleted)
+
+        asyncio.run(run())
+
+    def test_clear_falls_back_to_individual_deletion_for_old_messages(self):
+        async def run():
+            old_message = SimpleNamespace(
+                id=9,
+                created_at=main.datetime.now(main.timezone.utc) - main.timedelta(days=15),
+                delete=AsyncMock(),
+            )
+
+            class OldMessageChannel:
+                async def history(self, limit, before):
+                    yield old_message
+
+            count, failed = await main._clear_messages_before(
+                OldMessageChannel(),
+                main.datetime.now(main.timezone.utc),
+                1,
+            )
+
+            self.assertEqual(count, 1)
+            self.assertEqual(failed, 0)
+            old_message.delete.assert_awaited_once()
+
+        asyncio.run(run())
+
+    def test_clear_reports_messages_that_could_not_be_deleted(self):
+        async def run():
+            failed_message = SimpleNamespace(
+                id=10,
+                created_at=main.datetime.now(main.timezone.utc),
+                delete=AsyncMock(side_effect=RuntimeError("denied")),
+            )
+
+            class FakeChannel:
+                async def history(self, limit, before):
+                    yield failed_message
+
+            deleted, failed = await main._clear_messages_before(
+                FakeChannel(),
+                main.datetime.now(main.timezone.utc),
+                1,
+            )
+
+            self.assertEqual(deleted, 0)
+            self.assertEqual(failed, 1)
+
+        asyncio.run(run())
+
+    def test_clear_confirmation_is_auto_dismissed(self):
+        async def run():
+            confirmation = SimpleNamespace(delete=AsyncMock())
+            with patch.object(main.asyncio, "sleep", new=AsyncMock()) as sleep:
+                await main._delete_clear_confirmation(confirmation)
+
+            sleep.assert_awaited_once_with(5)
+            confirmation.delete.assert_awaited_once()
+
+        asyncio.run(run())
 
     def test_extensionless_discord_image_uses_content_type(self):
         attachment = SimpleNamespace(

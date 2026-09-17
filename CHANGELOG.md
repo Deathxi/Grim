@@ -1,3 +1,4 @@
+- Added moderator-only `/clear number` for removing up to 100 messages from the current channel or forum post, with an auto-dismissed confirmation naming the clearer.
 - Fixed tagged replies to image messages by upgrading the xAI vision model, fetching uncached reply targets, recognizing Discord image MIME types, and using a bounded, transparent text fallback.
 - Stopped lightweight code deployments from generating offline/crash after-reports by classifying heartbeat transitions with source revisions and dropping legacy false-positive reports.
 - Allowed substantive conversational replies to continue across multiple Discord messages instead of failing at the character limit.
