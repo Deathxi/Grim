@@ -5304,13 +5304,100 @@ async def server_info(interaction: discord.Interaction):
     )
     await interaction.followup.send(embed=embed)
 
-async def _clear_messages_before(channel, before, amount: int) -> tuple[int, int]:
+def _snapshot_cleared_message(message) -> dict:
+    author = getattr(message, "author", None)
+    author_id = getattr(author, "id", None)
+    author_name = (
+        getattr(author, "display_name", None)
+        or getattr(author, "name", None)
+        or "Unknown user"
+    )
+    content = str(getattr(message, "content", "") or "").strip()
+    attachment_names = [
+        str(getattr(attachment, "filename", "attachment"))
+        for attachment in getattr(message, "attachments", [])
+    ]
+    sticker_names = [
+        str(getattr(sticker, "name", "sticker"))
+        for sticker in getattr(message, "stickers", [])
+    ]
+    extras = [
+        *(f"[attachment: {name}]" for name in attachment_names),
+        *(f"[sticker: {name}]" for name in sticker_names),
+    ]
+    if extras:
+        content = "\n".join(filter(None, [content, *extras]))
+    return {
+        "author_id": str(author_id) if author_id is not None else None,
+        "author_name": str(author_name),
+        "content": content or "[no text content]",
+    }
+
+def _format_clear_log_chunks(
+    deleted_messages: list[dict],
+    clearer_mention: str,
+    source_mention: str,
+    failed_count: int = 0,
+) -> list[str]:
+    deleted_count = len(deleted_messages)
+    header = (
+        f"**({deleted_count}) messages cleared by ({clearer_mention}) "
+        f"in ({source_mention})**"
+    )
+    if failed_count:
+        header += (
+            f"\n⚠️ {failed_count} selected message"
+            f"{'' if failed_count == 1 else 's'} could not be deleted."
+        )
+
+    entries = []
+    for index, snapshot in enumerate(deleted_messages, start=1):
+        author_id = snapshot.get("author_id")
+        author = (
+            f"<@{author_id}>"
+            if author_id
+            else f"@{discord.utils.escape_markdown(snapshot['author_name'])}"
+        )
+        body = discord.utils.escape_mentions(
+            discord.utils.escape_markdown(str(snapshot.get("content") or "[no text content]"))
+        )
+        body_parts = [
+            body[start:start + 1400]
+            for start in range(0, len(body), 1400)
+        ] or ["[no text content]"]
+        for part_index, body_part in enumerate(body_parts):
+            continuation = " *(continued)*" if part_index else ""
+            entries.append(
+                f"**{index}. {author}**{continuation}\n> "
+                + body_part.replace("\n", "\n> ")
+            )
+
+    if not entries:
+        entries.append("*No messages were available to delete.*")
+
+    chunks = []
+    current = header
+    for entry in entries:
+        candidate = f"{current}\n\n{entry}"
+        if len(candidate) <= DISCORD_CONVERSATION_CHUNK_LIMIT:
+            current = candidate
+            continue
+        chunks.append(current)
+        current = f"**Deleted message log continued**\n\n{entry}"
+    chunks.append(current)
+    return chunks
+
+async def _clear_messages_before(channel, before, amount: int) -> tuple[list[dict], int]:
     messages = [
         message
         async for message in channel.history(limit=amount, before=before)
     ]
     if not messages:
-        return 0, 0
+        return [], 0
+    snapshots = {
+        message.id: _snapshot_cleared_message(message)
+        for message in messages
+    }
 
     now = datetime.now(timezone.utc)
     recent = [
@@ -5319,7 +5406,7 @@ async def _clear_messages_before(channel, before, amount: int) -> tuple[int, int
         if getattr(message, "created_at", now) >= now - timedelta(days=14, seconds=-10)
     ]
     older = [message for message in messages if message not in recent]
-    deleted = []
+    deleted_ids = set()
     failed = []
 
     if recent and hasattr(channel, "delete_messages"):
@@ -5329,20 +5416,20 @@ async def _clear_messages_before(channel, before, amount: int) -> tuple[int, int
                 for message in batch:
                     try:
                         await message.delete()
-                        deleted.append(message)
+                        deleted_ids.add(message.id)
                     except Exception as error:
                         failed.append(message)
                         print(f"[Clear] Could not delete message {message.id}: {error}")
                 continue
             try:
                 await channel.delete_messages(batch)
-                deleted.extend(batch)
+                deleted_ids.update(message.id for message in batch)
             except Exception as bulk_error:
                 print(f"[Clear] Bulk delete failed, retrying individually: {bulk_error}")
                 for message in batch:
                     try:
                         await message.delete()
-                        deleted.append(message)
+                        deleted_ids.add(message.id)
                     except Exception as error:
                         failed.append(message)
                         print(f"[Clear] Could not delete message {message.id}: {error}")
@@ -5352,40 +5439,16 @@ async def _clear_messages_before(channel, before, amount: int) -> tuple[int, int
     for message in older:
         try:
             await message.delete()
-            deleted.append(message)
+            deleted_ids.add(message.id)
         except Exception as error:
             failed.append(message)
             print(f"[Clear] Could not delete message {message.id}: {error}")
-    return len(deleted), len(failed)
-
-class ClearConfirmationView(ui.View):
-    def __init__(self):
-        super().__init__(timeout=300)
-
-    async def interaction_check(self, interaction):
-        permissions = interaction.user.guild_permissions
-        allowed = (
-            interaction.guild is not None
-            and (
-                interaction.guild.owner_id == interaction.user.id
-                or permissions.administrator
-                or permissions.manage_messages
-            )
-        )
-        if not allowed:
-            await interaction.response.send_message(
-                "Only moderators can dismiss clear confirmations.",
-                ephemeral=True,
-            )
-        return allowed
-
-    @ui.button(label="Dismiss", style=discord.ButtonStyle.secondary)
-    async def dismiss(self, interaction: discord.Interaction, button: ui.Button):
-        await interaction.response.defer()
-        try:
-            await interaction.message.delete()
-        except Exception as error:
-            print(f"[Clear] Could not dismiss confirmation message: {error}")
+    deleted_messages = [
+        snapshots[message.id]
+        for message in reversed(messages)
+        if message.id in deleted_ids
+    ]
+    return deleted_messages, len(failed)
 
 @bot.tree.command(name="clear", description="Delete recent messages from this channel or forum post")
 @discord.app_commands.default_permissions(manage_messages=True)
@@ -5407,8 +5470,56 @@ async def clear(
         return
 
     await interaction.response.defer(ephemeral=True)
+    updates_config = updates_channels.get(str(interaction.guild_id))
+    if not updates_config:
+        record_security_event(
+            interaction,
+            "clear",
+            "denied",
+            {"reason": "updates_channel_not_configured"},
+        )
+        await interaction.followup.send(
+            "Set an updates channel with `/grim_updates` before using `/clear`.",
+            ephemeral=True,
+        )
+        return
+
     try:
-        deleted_count, failed_count = await _clear_messages_before(
+        updates_channel_id = int(updates_config["channel_id"])
+        updates_channel = (
+            bot.get_channel(updates_channel_id)
+            or await bot.fetch_channel(updates_channel_id)
+        )
+        updates_guild = getattr(updates_channel, "guild", None)
+        if updates_guild and updates_guild.id != interaction.guild_id:
+            raise ValueError("configured updates channel belongs to another server")
+        permissions_for = getattr(updates_channel, "permissions_for", None)
+        guild_me = getattr(interaction.guild, "me", None)
+        if permissions_for and guild_me:
+            permissions = permissions_for(guild_me)
+            can_send = (
+                getattr(permissions, "send_messages", False)
+                or getattr(permissions, "send_messages_in_threads", False)
+            )
+            if not can_send:
+                raise PermissionError("Grim cannot send messages in the updates channel")
+    except Exception as error:
+        print(f"[Clear] Updates channel unavailable: {error}")
+        record_security_event(
+            interaction,
+            "clear",
+            "denied",
+            {"reason": "updates_channel_unavailable"},
+        )
+        await interaction.followup.send(
+            "The configured `/grim_updates` channel is unavailable. "
+            "Re-enable it before using `/clear`.",
+            ephemeral=True,
+        )
+        return
+
+    try:
+        deleted_messages, failed_count = await _clear_messages_before(
             channel,
             interaction.created_at,
             int(number),
@@ -5421,6 +5532,7 @@ async def clear(
         )
         return
 
+    deleted_count = len(deleted_messages)
     record_security_event(
         interaction,
         "clear",
@@ -5431,34 +5543,37 @@ async def clear(
             "channel_id": str(channel.id),
         },
     )
-    clearer = getattr(interaction.user, "mention", interaction.user.display_name)
-    confirmation_text = (
-        f"🧹 Cleared {deleted_count} message"
-        f"{'' if deleted_count == 1 else 's'} · {clearer}."
+    clearer = getattr(interaction.user, "mention", f"<@{interaction.user.id}>")
+    source = getattr(channel, "mention", f"<#{channel.id}>")
+    log_chunks = _format_clear_log_chunks(
+        deleted_messages,
+        clearer,
+        source,
+        failed_count,
     )
-    if failed_count:
-        confirmation_text += (
-            f" {failed_count} message{'' if failed_count == 1 else 's'}"
-            " could not be deleted."
-        )
     try:
-        confirmation = await channel.send(
-            confirmation_text,
-            allowed_mentions=discord.AllowedMentions.none(),
-            view=ClearConfirmationView(),
-        )
+        for chunk in log_chunks:
+            await updates_channel.send(
+                chunk,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
     except Exception as error:
-        print(f"[Clear] Could not post confirmation message: {error}")
-    await interaction.followup.send(
-        f"Cleared {deleted_count} message"
-        f"{'' if deleted_count == 1 else 's'}."
-        + (
-            f" {failed_count} could not be deleted."
-            if failed_count
-            else ""
-        ),
-        ephemeral=True,
-    )
+        print(f"[Clear] Could not post deletion log: {error}")
+        record_security_event(
+            interaction,
+            "clear_log",
+            "failed",
+            {"updates_channel_id": str(updates_channel_id)},
+        )
+        await interaction.followup.send(
+            "Messages were cleared, but Grim could not finish posting the deletion log.",
+            ephemeral=True,
+        )
+        return
+    try:
+        await interaction.delete_original_response()
+    except Exception as error:
+        print(f"[Clear] Could not remove ephemeral command response: {error}")
 
 @bot.tree.command(name="howdie", description="How will someone meet their dramatic end?")
 async def howdie(interaction: discord.Interaction, user: discord.Member):
@@ -7243,7 +7358,7 @@ async def livetweet(interaction: discord.Interaction, username: str):
         print(f"Error setting up livetweet: {e}")
         await interaction.followup.send(f"Error: Could not set up tracking. The X API may be rate limited or the username is invalid.")
 
-@bot.tree.command(name="grim_updates", description="Toggle Grim update announcements in this channel")
+@bot.tree.command(name="grim_updates", description="Toggle Grim operations logs in this channel")
 async def grim_updates(interaction: discord.Interaction):
     if not await require_permission(interaction, "manage_channels", "grim_updates_manage"):
         return
@@ -7256,10 +7371,10 @@ async def grim_updates(interaction: discord.Interaction):
         save_updates_sha(updates_sha)
         record_security_event(interaction, "grim_updates_manage", "disabled")
         embed = discord.Embed(
-            title="Update Announcements Disabled",
+            title="Grim Operations Log Disabled",
             description=(
-                "Grim will no longer post patch notes or offline after-reports "
-                "in this server."
+                "Grim will no longer post patch notes, offline after-reports, "
+                "or `/clear` deletion logs in this server."
             ),
             color=discord.Color.from_rgb(18, 18, 18)
         )
@@ -7271,9 +7386,10 @@ async def grim_updates(interaction: discord.Interaction):
             _schedule_outage_report(pending_outage)
         record_security_event(interaction, "grim_updates_manage", "enabled")
         embed = discord.Embed(
-            title="Update Announcements Enabled",
+            title="Grim Operations Log Enabled",
             description=(
-                f"Grim will post patch notes and offline after-reports in "
+                f"Grim will post patch notes, offline after-reports, and `/clear` "
+                f"deletion logs in "
                 f"<#{interaction.channel_id}>."
             ),
             color=discord.Color.from_rgb(18, 18, 18)

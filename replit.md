@@ -12,7 +12,7 @@ Grim is a Discord bot for Seclude & Affiliates. Built with Python and discord.py
 
 ## Commands
 - `/server` - View Grim's server info: identity, structure, language signals, emojis, and banner
-- `/clear <number>` - Moderators can remove 1–100 recent messages from the current channel or forum post
+- `/clear <number>` - Moderators can remove 1–100 recent messages from the current channel or forum post; deleted-message transcripts go to the configured `/grim_updates` channel
 - `/quote` - Quote the latest non-Grim message; right-click a specific message and use Apps → Quote, or reply to it with `!quote`
 - `/gif <topic>` - Pull a random GIF; manual pulls avoid repeating the same result for that topic within the same server
 - `/haiku` - Generate an inspirational haiku
@@ -57,7 +57,7 @@ Grim is a Discord bot for Seclude & Affiliates. Built with Python and discord.py
 - Explicit text translation into any requested language; no voice or speech features are included
 - Persistent, server-scoped member identity and lifecycle history with staff-only paginated profile review and configurable departure cards; it stores no message contents in the tracker
 - VPS-only weekly encrypted backups of `~/.grim_data` to a separate private GitHub repository; see `BACKUP_RESTORE.md`
-- `/grim_updates` channels receive deployment patch notes and after-reports for unexpected process or Discord connection outages; normal update restarts are excluded
+- `/grim_updates` channels receive deployment patch notes, unexpected-outage after-reports, and ordered `/clear` deletion transcripts; normal update restarts are excluded
 - Process outage reports require a vanished heartbeat on the same source revision, preventing normal code deployments from being classified as crashes
 
 ## Setup

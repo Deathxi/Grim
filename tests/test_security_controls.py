@@ -597,15 +597,26 @@ class SecurityControlsTests(unittest.TestCase):
     def test_clear_deletes_requested_messages_before_interaction(self):
         async def run():
             class FakeMessage:
-                def __init__(self, message_id):
+                def __init__(self, message_id, content):
                     self.id = message_id
+                    self.content = content
                     self.created_at = main.datetime.now(main.timezone.utc)
+                    self.author = SimpleNamespace(
+                        id=message_id + 100,
+                        display_name=f"Member {message_id}",
+                    )
+                    self.attachments = []
+                    self.stickers = []
                     self.deleted = False
 
                 async def delete(self):
                     self.deleted = True
 
-            messages = [FakeMessage(1), FakeMessage(2), FakeMessage(3)]
+            messages = [
+                FakeMessage(1, "newest"),
+                FakeMessage(2, "older"),
+                FakeMessage(3, "oldest"),
+            ]
 
             class FakeChannel:
                 id = 777
@@ -618,11 +629,15 @@ class SecurityControlsTests(unittest.TestCase):
                     for message in batch:
                         message.deleted = True
 
-            count, failed = await main._clear_messages_before(
-                FakeChannel(), main.datetime.now(main.timezone.utc), 2
+            channel = FakeChannel()
+            deleted, failed = await main._clear_messages_before(
+                channel, main.datetime.now(main.timezone.utc), 2
             )
 
-            self.assertEqual(count, 2)
+            self.assertEqual(
+                [message["content"] for message in deleted],
+                ["older", "newest"],
+            )
             self.assertEqual(failed, 0)
             self.assertTrue(all(message.deleted for message in messages[:2]))
             self.assertFalse(messages[2].deleted)
@@ -634,6 +649,10 @@ class SecurityControlsTests(unittest.TestCase):
             old_message = SimpleNamespace(
                 id=9,
                 created_at=main.datetime.now(main.timezone.utc) - main.timedelta(days=15),
+                author=SimpleNamespace(id=109, display_name="Older Member"),
+                content="old message",
+                attachments=[],
+                stickers=[],
                 delete=AsyncMock(),
             )
 
@@ -641,13 +660,14 @@ class SecurityControlsTests(unittest.TestCase):
                 async def history(self, limit, before):
                     yield old_message
 
-            count, failed = await main._clear_messages_before(
+            deleted, failed = await main._clear_messages_before(
                 OldMessageChannel(),
                 main.datetime.now(main.timezone.utc),
                 1,
             )
 
-            self.assertEqual(count, 1)
+            self.assertEqual(len(deleted), 1)
+            self.assertEqual(deleted[0]["content"], "old message")
             self.assertEqual(failed, 0)
             old_message.delete.assert_awaited_once()
 
@@ -658,6 +678,10 @@ class SecurityControlsTests(unittest.TestCase):
             failed_message = SimpleNamespace(
                 id=10,
                 created_at=main.datetime.now(main.timezone.utc),
+                author=SimpleNamespace(id=110, display_name="Member"),
+                content="not deleted",
+                attachments=[],
+                stickers=[],
                 delete=AsyncMock(side_effect=RuntimeError("denied")),
             )
 
@@ -671,37 +695,144 @@ class SecurityControlsTests(unittest.TestCase):
                 1,
             )
 
-            self.assertEqual(deleted, 0)
+            self.assertEqual(deleted, [])
             self.assertEqual(failed, 1)
 
         asyncio.run(run())
 
-    def test_clear_confirmation_is_dismissible_by_moderators(self):
+    def test_clear_log_names_moderator_source_and_messages_in_order(self):
+        chunks = main._format_clear_log_chunks(
+            [
+                {"author_id": "101", "author_name": "First", "content": "first message"},
+                {
+                    "author_id": "102",
+                    "author_name": "Second",
+                    "content": "second **message**\n[attachment: proof.png]",
+                },
+            ],
+            "<@999>",
+            "<#777>",
+        )
+
+        log = "\n".join(chunks)
+        self.assertIn("**(2) messages cleared by (<@999>) in (<#777>)**", log)
+        self.assertLess(log.index("first message"), log.index("second"))
+        self.assertIn("<@101>", log)
+        self.assertIn("<@102>", log)
+        self.assertIn(r"second \*\*message\*\*", log)
+        self.assertIn("[attachment: proof.png]", log)
+        self.assertTrue(
+            all(len(chunk) <= main.DISCORD_CONVERSATION_CHUNK_LIMIT for chunk in chunks)
+        )
+
+    def test_clear_log_splits_long_transcripts_without_losing_entries(self):
+        chunks = main._format_clear_log_chunks(
+            [
+                {
+                    "author_id": str(100 + index),
+                    "author_name": f"Member {index}",
+                    "content": f"message {index} " + ("x" * 700),
+                }
+                for index in range(1, 8)
+            ],
+            "<@999>",
+            "<#777>",
+            failed_count=1,
+        )
+
+        log = "\n".join(chunks)
+        self.assertGreater(len(chunks), 1)
+        self.assertIn("1 selected message could not be deleted", log)
+        for index in range(1, 8):
+            self.assertIn(f"message {index}", log)
+        self.assertTrue(
+            all(len(chunk) <= main.DISCORD_CONVERSATION_CHUNK_LIMIT for chunk in chunks)
+        )
+
+    def test_clear_log_preserves_a_full_long_message(self):
+        long_message = "start " + ("x" * 1900) + " end"
+        chunks = main._format_clear_log_chunks(
+            [
+                {
+                    "author_id": "101",
+                    "author_name": "Member",
+                    "content": long_message,
+                }
+            ],
+            "<@999>",
+            "<#777>",
+        )
+
+        log = "\n".join(chunks)
+        self.assertIn("start ", log)
+        self.assertIn(" end", log)
+        self.assertEqual(log.count("x"), 1900)
+        self.assertIn("*(continued)*", log)
+        self.assertNotIn("[truncated]", log)
+
+    def test_clear_posts_only_to_the_configured_updates_channel(self):
         async def run():
-            view = main.ClearConfirmationView()
-            moderator = interaction(manage_messages=True)
-            moderator.message = SimpleNamespace(delete=AsyncMock())
-            moderator.response.defer = AsyncMock()
+            messages = [
+                SimpleNamespace(
+                    id=index,
+                    created_at=main.datetime.now(main.timezone.utc),
+                    author=SimpleNamespace(
+                        id=100 + index,
+                        display_name=f"Member {index}",
+                    ),
+                    content=f"message {index}",
+                    attachments=[],
+                    stickers=[],
+                    delete=AsyncMock(),
+                )
+                for index in (1, 2)
+            ]
 
-            self.assertTrue(await view.interaction_check(moderator))
-            await view.children[0].callback(moderator)
+            class SourceChannel:
+                id = 777
+                mention = "<#777>"
 
-            moderator.response.defer.assert_awaited_once()
-            moderator.message.delete.assert_awaited_once()
-            self.assertEqual(view.children[0].label, "Dismiss")
+                async def history(self, limit, before):
+                    for message in messages[:limit]:
+                        yield message
 
-        asyncio.run(run())
+                async def delete_messages(self, batch):
+                    return None
 
-    def test_clear_confirmation_cannot_be_dismissed_by_members(self):
-        async def run():
-            view = main.ClearConfirmationView()
-            member = interaction()
-
-            self.assertFalse(await view.interaction_check(member))
-            self.assertEqual(
-                member.response.messages,
-                [("Only moderators can dismiss clear confirmations.", True)],
+            source_channel = SourceChannel()
+            updates_channel = SimpleNamespace(
+                id=888,
+                guild=SimpleNamespace(id=50),
+                permissions_for=lambda member: SimpleNamespace(send_messages=True),
+                send=AsyncMock(),
             )
+            event = interaction(manage_messages=True)
+            event.guild.id = 50
+            event.guild.me = object()
+            event.user.mention = "<@10>"
+            event.channel = source_channel
+            event.created_at = main.datetime.now(main.timezone.utc)
+            event.response.defer = AsyncMock()
+            event.followup = SimpleNamespace(send=AsyncMock())
+            event.delete_original_response = AsyncMock()
+
+            with (
+                patch.dict(
+                    main.updates_channels,
+                    {"50": {"channel_id": "888"}},
+                    clear=True,
+                ),
+                patch.object(main.bot, "get_channel", return_value=updates_channel),
+            ):
+                await main.clear.callback(event, 2)
+
+            event.response.defer.assert_awaited_once_with(ephemeral=True)
+            event.delete_original_response.assert_awaited_once()
+            event.followup.send.assert_not_awaited()
+            updates_channel.send.assert_awaited_once()
+            logged = updates_channel.send.await_args.args[0]
+            self.assertIn("(2) messages cleared by (<@10>) in (<#777>)", logged)
+            self.assertLess(logged.index("message 2"), logged.index("message 1"))
 
         asyncio.run(run())
 
