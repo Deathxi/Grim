@@ -2298,9 +2298,82 @@ ASCII_ART_GALLERY = (
     ),
 )
 
-async def generate_leet_art():
-    title, art = random.choice(ASCII_ART_GALLERY)
-    return art.strip("\n"), title
+ASCII_RANDOM_SUBJECTS = (
+    "alien", "anchor", "bat", "bear", "castle", "cat", "cobra", "crown",
+    "demon mask", "dragon head", "eagle", "flaming skull", "ghost", "griffin",
+    "hourglass", "knight helmet", "lightning bolt", "lion", "moon", "motorcycle",
+    "ninja", "owl", "phoenix", "pirate ship", "raven", "robot", "rocket",
+    "samurai helmet", "scorpion", "shark", "skull", "snake", "spider", "sword",
+    "tank", "tiger", "vampire", "wizard", "wolf", "wyvern",
+)
+
+def _clean_generated_ascii(raw_art: str | None) -> str | None:
+    if not raw_art:
+        return None
+    art = raw_art.strip("\r\n")
+    if art.startswith("```") and art.endswith("```"):
+        lines = art.splitlines()
+        if len(lines) >= 3:
+            art = "\n".join(lines[1:-1]).strip("\r\n")
+    lines = [line.rstrip() for line in art.splitlines()]
+    while lines and not lines[0].strip():
+        lines.pop(0)
+    while lines and not lines[-1].strip():
+        lines.pop()
+    if (
+        len(lines) < 3
+        or len(lines) > 20
+        or max((len(line) for line in lines), default=0) > 52
+        or "```" in art
+    ):
+        return None
+    return "\n".join(lines)
+
+async def generate_leet_art(theme: str | None = None):
+    requested_theme = " ".join(str(theme or "").split())[:60]
+    title = requested_theme or random.choice(ASCII_RANDOM_SUBJECTS)
+    client = get_grok_client()
+    if client:
+        prompt = f"""Create recognizable monospace ASCII art of: {title}
+
+Strict requirements:
+- Output only the artwork, with no title, prose, markdown, or code fences.
+- Make the subject immediately recognizable and visually balanced.
+- Use 6 to 18 lines and no more than 48 characters on any line.
+- Use plain keyboard ASCII characters only.
+- Prefer a clear silhouette over excessive detail.
+- Do not draw a different subject."""
+        for attempt in range(3):
+            try:
+                response = await asyncio.to_thread(
+                    client.chat.completions.create,
+                    model="grok-3",
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": (
+                                "You create compact, accurate ASCII art for Discord. "
+                                "Follow dimensions exactly and return only the art."
+                            ),
+                        },
+                        {
+                            "role": "user",
+                            "content": f"{prompt}\nVariation seed: {random.randint(1, 999999)}",
+                        },
+                    ],
+                    max_tokens=650,
+                    temperature=0.9 if attempt == 0 else 0.6,
+                )
+                art = _clean_generated_ascii(response.choices[0].message.content)
+                if art:
+                    return art, title.title()
+            except Exception as error:
+                print(f"Error generating ASCII art (attempt {attempt + 1}): {error}")
+
+    if requested_theme:
+        return None, title.title()
+    fallback_title, fallback_art = random.choice(ASCII_ART_GALLERY)
+    return fallback_art.strip("\n"), fallback_title
 
 ROAST_STYLES = [
     "focus on their fashion sense and how they probably dress",
@@ -5911,20 +5984,23 @@ async def roast(interaction: discord.Interaction, user: discord.Member):
     
     await interaction.followup.send(embed=embed)
 
-@bot.tree.command(name="ascii", description="Display a random compact ASCII figure")
-async def ascii_art(interaction: discord.Interaction):
+@bot.tree.command(name="ascii", description="Generate compact ASCII art for any theme")
+@discord.app_commands.describe(theme="Optional subject, such as cat, dragon, castle, or Grim")
+async def ascii_art(interaction: discord.Interaction, theme: str | None = None):
     if not await require_external_action(interaction):
         return
     await interaction.response.defer()
     
-    art, theme = await generate_leet_art()
+    art, title = await generate_leet_art(theme)
     
     if art is None:
-        await interaction.followup.send("Grim couldn't load the ASCII gallery.")
+        await interaction.followup.send(
+            f"Grim couldn't create readable ASCII art for **{title}**. Try another theme."
+        )
         return
 
     embed = discord.Embed(
-        title=theme,
+        title=title,
         description=f"```\n{art}\n```",
         color=discord.Color.from_rgb(18, 18, 18),
     )

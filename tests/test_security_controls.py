@@ -797,23 +797,34 @@ class SecurityControlsTests(unittest.TestCase):
 
         self.assertEqual(len(titles), len(main.ASCII_ART_GALLERY))
 
+    def test_ascii_cleaner_accepts_plain_art_and_removes_code_fences(self):
+        plain = " /\\\n/  \\\n\\__/"
+        fenced = f"```text\n{plain}\n```"
+
+        self.assertEqual(main._clean_generated_ascii(plain), plain)
+        self.assertEqual(main._clean_generated_ascii(fenced), plain)
+
+    def test_ascii_cleaner_rejects_malformed_or_oversized_output(self):
+        self.assertIsNone(main._clean_generated_ascii("not enough"))
+        self.assertIsNone(main._clean_generated_ascii("x" * 53 + "\nline\nline"))
+        self.assertIsNone(main._clean_generated_ascii("\n".join("x" for _ in range(21))))
+        self.assertIsNone(main._clean_generated_ascii("```\nart\nstill fenced"))
+
     def test_ascii_command_uses_gallery_title_and_embed(self):
         async def run():
             event = interaction()
             event.response.defer = AsyncMock()
             event.followup = SimpleNamespace(send=AsyncMock())
+            generator = AsyncMock(return_value=(" /\\\n/__\\", "Mountain"))
 
             with (
                 patch.object(main, "require_external_action", AsyncMock(return_value=True)),
-                patch.object(
-                    main,
-                    "generate_leet_art",
-                    AsyncMock(return_value=(" /\\\n/__\\", "Mountain")),
-                ),
+                patch.object(main, "generate_leet_art", generator),
             ):
-                await main.ascii_art.callback(event)
+                await main.ascii_art.callback(event, "mountain")
 
             event.response.defer.assert_awaited_once()
+            generator.assert_awaited_once_with("mountain")
             event.followup.send.assert_awaited_once()
             sent_embed = event.followup.send.await_args.kwargs["embed"]
             self.assertEqual(sent_embed.title, "Mountain")
