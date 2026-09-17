@@ -1,3 +1,4 @@
+- Rebuilt `/ascii` with a curated gallery of compact, accurately titled figures and a clean embed presentation.
 - Routed `/clear` audit transcripts to each server's `/grim_updates` channel, including the moderator, source channel or forum post, and deleted messages in chronological order; removed source-channel confirmations.
 - Added moderator-only `/clear number` for removing up to 100 messages from the current channel or forum post.
 - Fixed tagged replies to image messages by upgrading the xAI vision model, fetching uncached reply targets, recognizing Discord image MIME types, and using a bounded, transparent text fallback.

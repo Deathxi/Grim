@@ -2202,71 +2202,105 @@ async def generate_inspiration():
         print(f"Error generating inspiration: {e}")
         return None
 
-LEET_THEMES = [
-    "a cool skull",
-    "a dragon",
-    "a sword",
-    "a cat",
-    "a doge/shiba",
-    "middle finger",
-    "a gun",
-    "an alien",
-    "a robot",
-    "fire/flames",
-    "a snake",
-    "a demon",
-    "an angel",
-    "a ninja",
-    "a samurai sword",
-    "a tank",
-    "a helicopter",
-    "sunglasses face",
-    "a crown",
-    "a rocket ship",
-    "a wolf",
-    "a spider",
-    "a ghost",
-    "a wizard",
-    "lightning bolt",
-]
+ASCII_ART_GALLERY = (
+    (
+        "Skull",
+        r"""        _______
+     .-'       '-.
+    /             \
+   |   .-     -.   |
+   |  / o\   /o \  |
+   |  \__/   \__/  |
+   |       ^       |
+    \   ._____.   /
+     '.  \___/  .'
+       '-.___.-'""",
+    ),
+    (
+        "Cat",
+        r""" /\_/\
+( o.o )
+ > ^ <
+ /   \
+(__|__)""",
+    ),
+    (
+        "Rocket",
+        r"""       /\
+      /  \
+     /____\
+     |    |
+     |GRIM|
+     |    |
+    /| |  |\
+   /_|_|__|_\
+     /_/\_\
+      /  \
+     / /\ \
+      **""",
+    ),
+    (
+        "Sword",
+        r"""        /\
+       /  \
+       ||||
+       ||||
+       ||||
+       ||||
+    ___||||___
+   /___/  \___\
+       |  |
+       |  |
+       \__/""",
+    ),
+    (
+        "Ghost",
+        r"""      .-.
+    .'   '.
+   /  o o  \
+  |    ^    |
+  |  \___/  |
+  |         |
+  |  /\ /\  |
+   \/  V  \/""",
+    ),
+    (
+        "Robot",
+        r"""     .--------.
+     | 0    0 |
+     |   __   |
+  .--|  |__|  |--.
+ /   '--------'   \
+|   /|  GRIM  |\   |
+|__/ |________| \__|
+     /  |  |  \
+    /___|  |___/""",
+    ),
+    (
+        "Crown",
+        r"""      .       .
+     / \  _  / \
+    /   \/ \/   \
+   |  /\    /\  |
+   | /  \  /  \ |
+   |/____\/____\|
+   |            |
+   '------------'""",
+    ),
+    (
+        "Spider",
+        r""" \  /  .--.  \  /
+  \/  / oo \  \/
+  /\  \_==_/  /\
+ /  \ /    \ /  \
+     /|    |\
+    /_|____|_/""",
+    ),
+)
 
 async def generate_leet_art():
-    client = get_grok_client()
-    if not client:
-        return None, None
-    
-    theme = random.choice(LEET_THEMES)
-    random_seed = random.randint(1, 99999)
-    
-    try:
-        response = client.chat.completions.create(
-            model="grok-3",
-            messages=[
-                {
-                    "role": "system",
-                    "content": """You are an ASCII art generator. Create ASCII art that can be displayed in Discord.
-
-Rules:
-- Output ONLY the ASCII art, nothing else
-- Keep it under 25 lines tall so it fits in Discord
-- Make it look SICK and detailed
-- Use characters like: / \\ | _ - = + * # @ $ % ^ & ( ) [ ] { } < > ~ ` ' " : ; , . ! ?
-- Can include some unicode symbols if they look cool
-- NO explanations, NO titles, JUST the art
-- Make sure it displays correctly in monospace font"""
-                },
-                {
-                    "role": "user", 
-                    "content": f"Generate ASCII art of {theme}. Make it look awesome and detailed. Seed: {random_seed}"
-                }
-            ],
-            max_tokens=500,
-            temperature=1.2
-        )
-        return response.choices[0].message.content.strip(), theme
-    except Exception as e:
-        print(f"Error generating leet art: {e}")
-        return None, None
+    title, art = random.choice(ASCII_ART_GALLERY)
+    return art.strip("\n"), title
 
 ROAST_STYLES = [
     "focus on their fashion sense and how they probably dress",
@@ -5877,7 +5911,7 @@ async def roast(interaction: discord.Interaction, user: discord.Member):
     
     await interaction.followup.send(embed=embed)
 
-@bot.tree.command(name="ascii", description="Get a random ASCII art masterpiece")
+@bot.tree.command(name="ascii", description="Display a random compact ASCII figure")
 async def ascii_art(interaction: discord.Interaction):
     if not await require_external_action(interaction):
         return
@@ -5886,10 +5920,21 @@ async def ascii_art(interaction: discord.Interaction):
     art, theme = await generate_leet_art()
     
     if art is None:
-        await interaction.followup.send("xAI API key not configured. Please add XAI_API_KEY to secrets.")
+        await interaction.followup.send("Grim couldn't load the ASCII gallery.")
         return
-    
-    await interaction.followup.send(f"**{theme.upper()}**\n```\n{art}\n```")
+
+    embed = discord.Embed(
+        title=theme,
+        description=f"```\n{art}\n```",
+        color=discord.Color.from_rgb(18, 18, 18),
+    )
+    requester = (
+        getattr(interaction.user, "display_name", None)
+        or getattr(interaction.user, "name", None)
+        or "Discord user"
+    )
+    embed.set_footer(text=f"Requested by {requester} • {VERSION}")
+    await interaction.followup.send(embed=embed)
 
 @bot.tree.command(name="ghostwrite", description="Generate a tweet in someone's X writing style")
 async def ghostwrite(interaction: discord.Interaction, username: str, topics: str):

@@ -783,6 +783,44 @@ class SecurityControlsTests(unittest.TestCase):
         self.assertEqual(embeds[0].color.value, 0x121212)
         self.assertIn("Powered by", embeds[0].footer.text)
 
+    def test_ascii_gallery_titles_match_compact_curated_art(self):
+        self.assertGreaterEqual(len(main.ASCII_ART_GALLERY), 8)
+        titles = set()
+
+        for title, art in main.ASCII_ART_GALLERY:
+            titles.add(title)
+            lines = art.strip("\n").splitlines()
+            self.assertTrue(title)
+            self.assertNotIn("```", art)
+            self.assertLessEqual(len(lines), 16)
+            self.assertLessEqual(max(map(len, lines)), 44)
+
+        self.assertEqual(len(titles), len(main.ASCII_ART_GALLERY))
+
+    def test_ascii_command_uses_gallery_title_and_embed(self):
+        async def run():
+            event = interaction()
+            event.response.defer = AsyncMock()
+            event.followup = SimpleNamespace(send=AsyncMock())
+
+            with (
+                patch.object(main, "require_external_action", AsyncMock(return_value=True)),
+                patch.object(
+                    main,
+                    "generate_leet_art",
+                    AsyncMock(return_value=(" /\\\n/__\\", "Mountain")),
+                ),
+            ):
+                await main.ascii_art.callback(event)
+
+            event.response.defer.assert_awaited_once()
+            event.followup.send.assert_awaited_once()
+            sent_embed = event.followup.send.await_args.kwargs["embed"]
+            self.assertEqual(sent_embed.title, "Mountain")
+            self.assertEqual(sent_embed.description, "```\n /\\\n/__\\\n```")
+
+        asyncio.run(run())
+
     def test_clear_posts_only_to_the_configured_updates_channel(self):
         async def run():
             messages = [
