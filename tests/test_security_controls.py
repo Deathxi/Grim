@@ -797,18 +797,31 @@ class SecurityControlsTests(unittest.TestCase):
 
         self.assertEqual(len(titles), len(main.ASCII_ART_GALLERY))
 
-    def test_ascii_cleaner_accepts_plain_art_and_removes_code_fences(self):
-        plain = " /\\\n/  \\\n\\__/"
-        fenced = f"```text\n{plain}\n```"
+    def test_ascii_converter_builds_compact_art_from_a_silhouette(self):
+        image = main.Image.new("L", (120, 120), 255)
+        draw = main.ImageDraw.Draw(image)
+        draw.ellipse((20, 25, 100, 105), fill=0)
+        draw.polygon(((20, 35), (35, 5), (50, 35)), fill=0)
+        draw.polygon(((70, 35), (85, 5), (100, 35)), fill=0)
+        image_bytes = main.BytesIO()
+        image.save(image_bytes, format="PNG")
 
-        self.assertEqual(main._clean_generated_ascii(plain), plain)
-        self.assertEqual(main._clean_generated_ascii(fenced), plain)
+        art = main._image_bytes_to_ascii(image_bytes.getvalue())
 
-    def test_ascii_cleaner_rejects_malformed_or_oversized_output(self):
-        self.assertIsNone(main._clean_generated_ascii("not enough"))
-        self.assertIsNone(main._clean_generated_ascii("x" * 53 + "\nline\nline"))
-        self.assertIsNone(main._clean_generated_ascii("\n".join("x" for _ in range(21))))
-        self.assertIsNone(main._clean_generated_ascii("```\nart\nstill fenced"))
+        self.assertIsNotNone(art)
+        lines = art.splitlines()
+        self.assertGreaterEqual(len(lines), 6)
+        self.assertLessEqual(len(lines), 22)
+        self.assertLessEqual(max(map(len, lines)), 48)
+        self.assertTrue(any("@" in line for line in lines))
+
+    def test_ascii_converter_rejects_invalid_or_blank_images(self):
+        blank = main.Image.new("L", (50, 50), 255)
+        image_bytes = main.BytesIO()
+        blank.save(image_bytes, format="PNG")
+
+        self.assertIsNone(main._image_bytes_to_ascii(b"not an image"))
+        self.assertIsNone(main._image_bytes_to_ascii(image_bytes.getvalue()))
 
     def test_ascii_command_uses_gallery_title_and_embed(self):
         async def run():

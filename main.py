@@ -21,7 +21,7 @@ from discord import ui
 from openai import OpenAI
 import tweepy
 try:
-    from PIL import Image, ImageDraw, ImageFont
+    from PIL import Image, ImageDraw, ImageFont, ImageOps
 except ImportError:
     subprocess.run(
         [
@@ -31,7 +31,7 @@ except ImportError:
         ],
         check=True,
     )
-    from PIL import Image, ImageDraw, ImageFont
+    from PIL import Image, ImageDraw, ImageFont, ImageOps
 from zoneinfo import ZoneInfo
 
 BOT_START_TIME = None
@@ -2307,25 +2307,65 @@ ASCII_RANDOM_SUBJECTS = (
     "tank", "tiger", "vampire", "wizard", "wolf", "wyvern",
 )
 
-def _clean_generated_ascii(raw_art: str | None) -> str | None:
-    if not raw_art:
+def _image_bytes_to_ascii(image_bytes: bytes, width: int = 44) -> str | None:
+    if not image_bytes:
         return None
-    art = raw_art.strip("\r\n")
-    if art.startswith("```") and art.endswith("```"):
-        lines = art.splitlines()
-        if len(lines) >= 3:
-            art = "\n".join(lines[1:-1]).strip("\r\n")
-    lines = [line.rstrip() for line in art.splitlines()]
+    try:
+        image = Image.open(BytesIO(image_bytes)).convert("L")
+    except Exception:
+        return None
+
+    image = ImageOps.autocontrast(image)
+    corners = (
+        image.getpixel((0, 0)),
+        image.getpixel((image.width - 1, 0)),
+        image.getpixel((0, image.height - 1)),
+        image.getpixel((image.width - 1, image.height - 1)),
+    )
+    if sum(corners) / len(corners) < 127:
+        image = ImageOps.invert(image)
+
+    subject_mask = image.point(lambda pixel: 255 if pixel < 238 else 0)
+    bounds = subject_mask.getbbox()
+    if not bounds:
+        return None
+    image = image.crop(bounds)
+    target_width = max(20, min(int(width), 48))
+    target_height = max(
+        6,
+        min(22, round((image.height / max(image.width, 1)) * target_width * 0.48)),
+    )
+    image = image.resize((target_width, target_height), Image.Resampling.LANCZOS)
+
+    def pixel_character(pixel: int) -> str:
+        if pixel < 55:
+            return "@"
+        if pixel < 110:
+            return "#"
+        if pixel < 165:
+            return "*"
+        if pixel < 215:
+            return "."
+        return " "
+
+    pixel_source = (
+        image.get_flattened_data()
+        if hasattr(image, "get_flattened_data")
+        else image.getdata()
+    )
+    flat_pixels = list(pixel_source)
+    lines = [
+        "".join(
+            pixel_character(pixel)
+            for pixel in flat_pixels[start:start + target_width]
+        ).rstrip()
+        for start in range(0, len(flat_pixels), target_width)
+    ]
     while lines and not lines[0].strip():
         lines.pop(0)
     while lines and not lines[-1].strip():
         lines.pop()
-    if (
-        len(lines) < 3
-        or len(lines) > 20
-        or max((len(line) for line in lines), default=0) > 52
-        or "```" in art
-    ):
+    if len(lines) < 3 or not any("#" in line or "@" in line for line in lines):
         return None
     return "\n".join(lines)
 
@@ -2334,41 +2374,28 @@ async def generate_leet_art(theme: str | None = None):
     title = requested_theme or random.choice(ASCII_RANDOM_SUBJECTS)
     client = get_grok_client()
     if client:
-        prompt = f"""Create recognizable monospace ASCII art of: {title}
-
-Strict requirements:
-- Output only the artwork, with no title, prose, markdown, or code fences.
-- Make the subject immediately recognizable and visually balanced.
-- Use 6 to 18 lines and no more than 48 characters on any line.
-- Use plain keyboard ASCII characters only.
-- Prefer a clear silhouette over excessive detail.
-- Do not draw a different subject."""
-        for attempt in range(3):
-            try:
-                response = await asyncio.to_thread(
-                    client.chat.completions.create,
-                    model="grok-3",
-                    messages=[
-                        {
-                            "role": "system",
-                            "content": (
-                                "You create compact, accurate ASCII art for Discord. "
-                                "Follow dimensions exactly and return only the art."
-                            ),
-                        },
-                        {
-                            "role": "user",
-                            "content": f"{prompt}\nVariation seed: {random.randint(1, 999999)}",
-                        },
-                    ],
-                    max_tokens=650,
-                    temperature=0.9 if attempt == 0 else 0.6,
-                )
-                art = _clean_generated_ascii(response.choices[0].message.content)
-                if art:
-                    return art, title.title()
-            except Exception as error:
-                print(f"Error generating ASCII art (attempt {attempt + 1}): {error}")
+        try:
+            response = await asyncio.to_thread(
+                client.images.generate,
+                model="grok-imagine-image-2.0",
+                prompt=(
+                    f"A single {title}, shown as a bold black ink stencil silhouette "
+                    "centered on a pure white square background. The subject must be "
+                    "immediately recognizable, front or three-quarter view, with a "
+                    "clean outer contour and a few strong interior details. No text, "
+                    "no border, no scenery, no shadows, no gradients, no color."
+                ),
+            )
+            image_url = response.data[0].url
+            timeout = aiohttp.ClientTimeout(total=45)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(image_url) as image_response:
+                    image_response.raise_for_status()
+                    art = _image_bytes_to_ascii(await image_response.read())
+            if art:
+                return art, title.title()
+        except Exception as error:
+            print(f"Error generating image-based ASCII art: {error}")
 
     if requested_theme:
         return None, title.title()

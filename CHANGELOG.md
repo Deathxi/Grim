@@ -1,4 +1,4 @@
-- Rebuilt `/ascii` as a hybrid xAI generator with an optional theme input, strict Discord-size validation, retries for malformed art, and curated offline fallbacks.
+- Rebuilt `/ascii` to generate a recognizable xAI stencil image and convert its real silhouette into compact character art, with optional themes and curated offline fallbacks.
 - Routed `/clear` audit transcripts to each server's `/grim_updates` channel, including the moderator, source channel or forum post, and deleted messages in chronological order; removed source-channel confirmations.
 - Added moderator-only `/clear number` for removing up to 100 messages from the current channel or forum post.
 - Fixed tagged replies to image messages by upgrading the xAI vision model, fetching uncached reply targets, recognizing Discord image MIME types, and using a bounded, transparent text fallback.
