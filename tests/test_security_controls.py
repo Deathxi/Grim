@@ -772,6 +772,17 @@ class SecurityControlsTests(unittest.TestCase):
         self.assertIn("*(continued)*", log)
         self.assertNotIn("[truncated]", log)
 
+    def test_clear_log_uses_patch_note_style_embeds(self):
+        embeds = main._build_clear_log_embeds(["first transcript", "continued transcript"])
+
+        self.assertEqual(len(embeds), 2)
+        self.assertEqual(embeds[0].title, "Grim — Clear Log")
+        self.assertEqual(embeds[1].title, "Grim — Clear Log Continued")
+        self.assertEqual(embeds[0].description, "first transcript")
+        self.assertEqual(embeds[1].description, "continued transcript")
+        self.assertEqual(embeds[0].color.value, 0x121212)
+        self.assertIn("Powered by", embeds[0].footer.text)
+
     def test_clear_posts_only_to_the_configured_updates_channel(self):
         async def run():
             messages = [
@@ -832,7 +843,10 @@ class SecurityControlsTests(unittest.TestCase):
             event.delete_original_response.assert_awaited_once()
             event.followup.send.assert_not_awaited()
             updates_channel.send.assert_awaited_once()
-            logged = updates_channel.send.await_args.args[0]
+            self.assertEqual(updates_channel.send.await_args.args, ())
+            logged_embed = updates_channel.send.await_args.kwargs["embed"]
+            self.assertEqual(logged_embed.title, "Grim — Clear Log")
+            logged = logged_embed.description
             self.assertIn("(2) messages cleared by (<@10>) in (<#777>)", logged)
             self.assertLess(logged.index("message 2"), logged.index("message 1"))
 

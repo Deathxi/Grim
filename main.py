@@ -5386,6 +5386,18 @@ def _format_clear_log_chunks(
     chunks.append(current)
     return chunks
 
+def _build_clear_log_embeds(chunks: list[str]) -> list[discord.Embed]:
+    embeds = []
+    for index, chunk in enumerate(chunks):
+        embed = discord.Embed(
+            title="Grim — Clear Log" if index == 0 else "Grim — Clear Log Continued",
+            description=chunk,
+            color=discord.Color.from_rgb(18, 18, 18),
+        )
+        embed.set_footer(text=f"Powered by {BOT_NAME} • {VERSION}")
+        embeds.append(embed)
+    return embeds
+
 async def _clear_messages_before(channel, before, amount: int) -> tuple[list[dict], int]:
     messages = [
         message
@@ -5544,16 +5556,18 @@ async def clear(
     )
     clearer = getattr(interaction.user, "mention", f"<@{interaction.user.id}>")
     source = getattr(channel, "mention", f"<#{channel.id}>")
-    log_chunks = _format_clear_log_chunks(
-        deleted_messages,
-        clearer,
-        source,
-        failed_count,
+    log_embeds = _build_clear_log_embeds(
+        _format_clear_log_chunks(
+            deleted_messages,
+            clearer,
+            source,
+            failed_count,
+        )
     )
     try:
-        for chunk in log_chunks:
+        for embed in log_embeds:
             await updates_channel.send(
-                chunk,
+                embed=embed,
                 allowed_mentions=discord.AllowedMentions.none(),
             )
     except Exception as error:
