@@ -721,6 +721,8 @@ class SecurityControlsTests(unittest.TestCase):
         self.assertIn("<@102>", log)
         self.assertIn(r"second \*\*message\*\*", log)
         self.assertIn("[attachment: proof.png]", log)
+        self.assertNotIn("\n\n", log)
+        self.assertNotIn("\n> ", log)
         self.assertTrue(
             all(len(chunk) <= main.DISCORD_CONVERSATION_CHUNK_LIMIT for chunk in chunks)
         )

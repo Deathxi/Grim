@@ -5368,8 +5368,7 @@ def _format_clear_log_chunks(
         for part_index, body_part in enumerate(body_parts):
             continuation = " *(continued)*" if part_index else ""
             entries.append(
-                f"**{index}. {author}**{continuation}\n> "
-                + body_part.replace("\n", "\n> ")
+                f"**{index}. {author}**{continuation} — {body_part}"
             )
 
     if not entries:
@@ -5378,12 +5377,12 @@ def _format_clear_log_chunks(
     chunks = []
     current = header
     for entry in entries:
-        candidate = f"{current}\n\n{entry}"
+        candidate = f"{current}\n{entry}"
         if len(candidate) <= DISCORD_CONVERSATION_CHUNK_LIMIT:
             current = candidate
             continue
         chunks.append(current)
-        current = f"**Deleted message log continued**\n\n{entry}"
+        current = f"**Deleted message log continued**\n{entry}"
     chunks.append(current)
     return chunks
 
