@@ -5358,14 +5358,38 @@ async def _clear_messages_before(channel, before, amount: int) -> tuple[int, int
             print(f"[Clear] Could not delete message {message.id}: {error}")
     return len(deleted), len(failed)
 
-async def _delete_clear_confirmation(message):
-    await asyncio.sleep(5)
-    try:
-        await message.delete()
-    except Exception as error:
-        print(f"[Clear] Could not remove confirmation message: {error}")
+class ClearConfirmationView(ui.View):
+    def __init__(self):
+        super().__init__(timeout=300)
+
+    async def interaction_check(self, interaction):
+        permissions = interaction.user.guild_permissions
+        allowed = (
+            interaction.guild is not None
+            and (
+                interaction.guild.owner_id == interaction.user.id
+                or permissions.administrator
+                or permissions.manage_messages
+            )
+        )
+        if not allowed:
+            await interaction.response.send_message(
+                "Only moderators can dismiss clear confirmations.",
+                ephemeral=True,
+            )
+        return allowed
+
+    @ui.button(label="Dismiss", style=discord.ButtonStyle.secondary)
+    async def dismiss(self, interaction: discord.Interaction, button: ui.Button):
+        await interaction.response.defer()
+        try:
+            await interaction.message.delete()
+        except Exception as error:
+            print(f"[Clear] Could not dismiss confirmation message: {error}")
 
 @bot.tree.command(name="clear", description="Delete recent messages from this channel or forum post")
+@discord.app_commands.default_permissions(manage_messages=True)
+@discord.app_commands.guild_only()
 @discord.app_commands.describe(number="How many messages to delete before this command (1–100)")
 async def clear(
     interaction: discord.Interaction,
@@ -5421,8 +5445,8 @@ async def clear(
         confirmation = await channel.send(
             confirmation_text,
             allowed_mentions=discord.AllowedMentions.none(),
+            view=ClearConfirmationView(),
         )
-        asyncio.create_task(_delete_clear_confirmation(confirmation))
     except Exception as error:
         print(f"[Clear] Could not post confirmation message: {error}")
     await interaction.followup.send(

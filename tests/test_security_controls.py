@@ -355,6 +355,7 @@ class SecurityControlsTests(unittest.TestCase):
         )
         self.assertEqual(number_parameter.min_value, 1)
         self.assertEqual(number_parameter.max_value, 100)
+        self.assertTrue(clear_command.default_permissions.manage_messages)
 
     def test_quote_card_uses_regular_24px_text_and_png_output(self):
         created = main.datetime(2026, 8, 27, tzinfo=main.timezone.utc)
@@ -675,14 +676,32 @@ class SecurityControlsTests(unittest.TestCase):
 
         asyncio.run(run())
 
-    def test_clear_confirmation_is_auto_dismissed(self):
+    def test_clear_confirmation_is_dismissible_by_moderators(self):
         async def run():
-            confirmation = SimpleNamespace(delete=AsyncMock())
-            with patch.object(main.asyncio, "sleep", new=AsyncMock()) as sleep:
-                await main._delete_clear_confirmation(confirmation)
+            view = main.ClearConfirmationView()
+            moderator = interaction(manage_messages=True)
+            moderator.message = SimpleNamespace(delete=AsyncMock())
+            moderator.response.defer = AsyncMock()
 
-            sleep.assert_awaited_once_with(5)
-            confirmation.delete.assert_awaited_once()
+            self.assertTrue(await view.interaction_check(moderator))
+            await view.children[0].callback(moderator)
+
+            moderator.response.defer.assert_awaited_once()
+            moderator.message.delete.assert_awaited_once()
+            self.assertEqual(view.children[0].label, "Dismiss")
+
+        asyncio.run(run())
+
+    def test_clear_confirmation_cannot_be_dismissed_by_members(self):
+        async def run():
+            view = main.ClearConfirmationView()
+            member = interaction()
+
+            self.assertFalse(await view.interaction_check(member))
+            self.assertEqual(
+                member.response.messages,
+                [("Only moderators can dismiss clear confirmations.", True)],
+            )
 
         asyncio.run(run())
 
