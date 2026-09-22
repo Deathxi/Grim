@@ -1,3 +1,4 @@
+- Added secure autonomous web research to normal Grim conversations, including current-topic follow-ups, verified HTTPS citations, current-channel-only context, bounded timeouts, server/user budgets, and redacted audit outcomes.
 - Rebuilt `/ascii` to generate a recognizable xAI stencil image and convert its real silhouette into compact character art, with optional themes and curated offline fallbacks.
 - Routed `/clear` audit transcripts to each server's `/grim_updates` channel, including the moderator, source channel or forum post, and deleted messages in chronological order; removed source-channel confirmations.
 - Added moderator-only `/clear number` for removing up to 100 messages from the current channel or forum post.

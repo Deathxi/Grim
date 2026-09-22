@@ -73,6 +73,7 @@ class SecurityControlsTests(unittest.TestCase):
         main.member_log_channels = {}
         main.moderation_data = {"guilds": {}, "legacy_unassigned_words": []}
         main._COMMAND_RATE_LIMITS.clear()
+        main._AI_RESEARCH_CACHE.clear()
         main.init_chat_db()
 
     def fake_member(self, *, guild_id=50, member_id=10, name="Noct", display_name="Noct", roles=None):
@@ -105,6 +106,7 @@ class SecurityControlsTests(unittest.TestCase):
         main._gif_command_locks.clear()
         main._gif_command_guild_rate_limits.clear()
         main._COMMAND_RATE_LIMITS.clear()
+        main._AI_RESEARCH_CACHE.clear()
         self.temp_dir.cleanup()
 
     def test_audit_metadata_is_redacted(self):
@@ -122,6 +124,131 @@ class SecurityControlsTests(unittest.TestCase):
         metadata = json.loads(metadata_json)
         self.assertEqual(metadata, {"status": 200})
         self.assertNotIn("must-not-appear", metadata_json)
+
+    def test_security_audit_accepts_discord_messages(self):
+        message = SimpleNamespace(
+            guild=SimpleNamespace(id=88),
+            author=SimpleNamespace(id=99),
+        )
+        main.record_security_event(
+            message,
+            "ai_web_research",
+            "success",
+            {"provider": "xai_web_search", "source_count": 2},
+        )
+        with sqlite3.connect(main.CHAT_DB_FILE) as conn:
+            row = conn.execute(
+                "SELECT guild_id, actor_id, action, outcome "
+                "FROM security_audit_events ORDER BY occurred_at DESC LIMIT 1"
+            ).fetchone()
+        self.assertEqual(row, ("88", "99", "ai_web_research", "success"))
+
+    def test_research_response_extracts_sources_and_search_usage(self):
+        result = main._extract_grok_research_response({
+            "output": [
+                {"type": "web_search_call", "status": "completed"},
+                {
+                    "type": "message",
+                    "content": [{
+                        "type": "output_text",
+                        "text": "Current polling is mixed. [source](https://example.com/poll)",
+                        "annotations": [
+                            {
+                                "type": "url_citation",
+                                "title": "Polling average",
+                                "url": "https://example.com/poll",
+                            },
+                            {
+                                "type": "url_citation",
+                                "title": "Duplicate",
+                                "url": "https://example.com/poll",
+                            },
+                        ],
+                    }],
+                },
+            ],
+        })
+
+        self.assertTrue(result["used_search"])
+        self.assertIn("Current polling", result["text"])
+        self.assertEqual(
+            result["sources"],
+            [{"title": "Polling average", "url": "https://example.com/poll"}],
+        )
+
+    def test_research_response_ignores_no_research_sentinel(self):
+        self.assertIsNone(main._extract_grok_research_response({
+            "output": [{
+                "type": "message",
+                "content": [{
+                    "type": "output_text",
+                    "text": "NO_LIVE_RESEARCH_NEEDED",
+                }],
+            }],
+        }))
+
+    def test_research_response_requires_completed_search_and_sources(self):
+        no_sources = {
+            "output": [
+                {"type": "web_search_call", "status": "completed"},
+                {
+                    "type": "message",
+                    "content": [{"type": "output_text", "text": "Unsupported claim"}],
+                },
+            ],
+        }
+        incomplete = {
+            "output": [
+                {"type": "web_search_call", "status": "failed"},
+                {
+                    "type": "message",
+                    "content": [{
+                        "type": "output_text",
+                        "text": "Claim",
+                        "annotations": [{
+                            "url": "https://example.com",
+                            "title": "Example",
+                        }],
+                    }],
+                },
+            ],
+        }
+        self.assertIsNone(main._extract_grok_research_response(no_sources))
+        self.assertIsNone(main._extract_grok_research_response(incomplete))
+
+    def test_live_research_intent_handles_polling_and_same_channel_followup(self):
+        self.assertTrue(main._should_use_live_research(
+            "how are the midterms looking?",
+            "",
+        ))
+        self.assertTrue(main._should_use_live_research(
+            "go do that rn",
+            "Grim: I would need to check fresh polling numbers.",
+        ))
+        self.assertFalse(main._should_use_live_research(
+            "tell me a joke",
+            "someone mentioned polling yesterday",
+        ))
+        self.assertFalse(main._should_use_live_research(
+            "I live inside this server",
+            "",
+        ))
+
+    def test_research_has_separate_user_and_guild_budgets(self):
+        for _ in range(main.AI_RESEARCH_USER_MAX_REQUESTS):
+            self.assertTrue(main._research_rate_limit_allows("50", "10"))
+        self.assertFalse(main._research_rate_limit_allows("50", "10"))
+        self.assertTrue(main._research_rate_limit_allows("50", "11"))
+
+    def test_research_cache_is_scoped_by_guild_and_channel(self):
+        prompt = "Current request: latest polling"
+        result = {"status": "success", "text": "facts", "sources": []}
+        key = main._research_cache_key("50:777", prompt)
+        main._AI_RESEARCH_CACHE[key] = (time.time(), result)
+
+        self.assertIsNotNone(main._get_cached_research("50:777", prompt))
+        self.assertIsNone(main._get_cached_research("50:888", prompt))
+        self.assertIsNone(main._get_cached_research("60:777", prompt))
 
     def test_rate_limit_blocks_ninth_request(self):
         for _ in range(main.RATE_LIMIT_MAX_REQUESTS):

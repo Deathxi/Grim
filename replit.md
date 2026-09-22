@@ -43,6 +43,7 @@ Grim is a Discord bot for Seclude & Affiliates. Built with Python and discord.py
 - `/help_grim` - Show available commands
 
 ## Features
+- Normal tagged conversations can autonomously use xAI's managed read-only web search for current questions and follow-ups; results require provider citations and never receive hidden-channel context or mutation tools
 - Multiple concurrent newsfeed instances per server/channel
 - Discord Select Menu UI for managing active feeds
 - Image embedding for news posts with fallback system
