@@ -1,0 +1,18 @@
+---
+description: Project-wide guidance for working on Grim in Cursor
+alwaysApply: true
+---
+
+# Grim project guidance
+
+- Grim is a Python Discord bot. Read `CURSOR_HANDOFF.md`, `replit.md`, and `OPERATIONS_SECURITY.md` before making substantial changes.
+- Keep changes focused and preserve established patterns. `main.py` is large; search for the relevant function and inspect only the needed sections before editing.
+- Treat Discord permissions, privacy boundaries, rate limits, audit redaction, and the centralized `safe_http.py` transport as security-critical.
+- Do not add arbitrary URL fetching, shell/filesystem tools, Discord management actions, schedule/feed/watch mutations, or GitHub writes to autonomous AI capabilities without a separate security design.
+- Autonomous web research must remain read-only, use same-channel context only, require provider citations, and never inject untrusted research prose into Grim's main system prompt.
+- Never read, print, paste, commit, or include secrets in prompts, logs, tests, or documentation. Local credentials belong in an ignored `.env`; production credentials remain on the VPS or in GitHub Actions secrets.
+- Do not run a second bot process with the production Discord token. Use a separate test bot/account for live Discord testing.
+- Runtime state belongs to the VPS data directory and encrypted backup process, not the source repository. Do not copy production runtime data into the Cursor workspace.
+- Run `python -m py_compile main.py` and `python -m unittest tests.test_security_controls` after relevant changes. Add focused tests for security-sensitive behavior.
+- Review `git diff` and `git status` before committing; never include runtime files, credentials, local caches, or generated artifacts.
+- **Never push directly to `main` without the user's explicit instruction for that push.** A push to `main` starts the production VPS deployment workflow. Work on a feature branch and review the diff first.
