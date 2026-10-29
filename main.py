@@ -102,43 +102,17 @@ def _bump_version():
     count = max(count, VERSION_BASELINE_COUNT - 1)
     count += 1
     VERSION = _format_version(count)
+    os.makedirs(os.path.dirname(VERSION_COUNT_FILE), exist_ok=True)
     with open(VERSION_COUNT_FILE, "w") as f:
         f.write(str(count))
-    # Keep project-root version.txt in sync for GitHub visibility
-    with open("version.txt", "w") as f:
-        f.write(str(count))
-    # Store the hash so the next restart without code changes won't bump again
+    # Store the hash so the next restart without code changes won't bump again.
+    # Version state lives only under ~/.grim_data — never write it back into the
+    # git checkout or push it to the source repository from the live host.
     if current_hash:
         os.makedirs(os.path.dirname(MAIN_HASH_FILE), exist_ok=True)
         with open(MAIN_HASH_FILE, "w") as f:
             f.write(current_hash)
     print(f"[Version] Deploy #{count} → {VERSION}")
-
-async def _push_version_to_github():
-    """Push the bumped version.txt to GitHub immediately — ensures next deploy always gets the right base count."""
-    token = os.environ.get("GITHUB_PERSONAL_ACCESS_TOKEN")
-    if not token:
-        print("[Version] No token — skipping GitHub version push")
-        return
-    try:
-        with open("version.txt", "rb") as f:
-            content = base64.b64encode(f.read()).decode()
-        headers = {"Authorization": f"token {token}", "Accept": "application/vnd.github.v3+json", "User-Agent": "GrimBot"}
-        async with aiohttp.ClientSession() as session:
-            async with session.get("https://api.github.com/repos/Deathxi/Grim/contents/version.txt?ref=main", headers=headers) as r:
-                existing = await r.json()
-            sha = existing.get("sha")
-            payload = {"message": f"Version bump → {VERSION}", "content": content, "branch": "main"}
-            if sha:
-                payload["sha"] = sha
-            async with session.put("https://api.github.com/repos/Deathxi/Grim/contents/version.txt", headers=headers, json=payload) as r:
-                result = await r.json()
-        if "content" in result:
-            print(f"[Version] Pushed version.txt ({VERSION}) to GitHub ✓")
-        else:
-            print(f"[Version] GitHub version push failed: {result.get('message')}")
-    except Exception as e:
-        print(f"[Version] Could not push version.txt to GitHub: {e}")
 
 VERSION = _load_version()
 
@@ -1640,10 +1614,9 @@ welcome_channels = load_welcome_data()
 # VC session tracking: guild_id -> {"vc": VoiceClient, "empty_since": float|None}
 vc_sessions = {}
 
-# Channel config lives in project root — pushed to GitHub so it survives redeploys
-UPDATES_CONFIG_FILE = _data_path("updates_data.json")  # persistent disk — survives deploys
-UPDATES_CONFIG_FALLBACK = "updates_data.json"           # project-root snapshot (migration fallback)
-# SHA tracking lives in ~/.grim_data/ — ephemeral, resetting on fresh deploy is fine
+# Channel config lives only under ~/.grim_data (encrypted backups cover restore).
+UPDATES_CONFIG_FILE = _data_path("updates_data.json")
+UPDATES_CONFIG_FALLBACK = "updates_data.json"  # legacy project-root copy; migrate once, never rewrite
 UPDATES_SHA_FILE = _data_path("updates_sha.json")
 
 def load_updates_data():
@@ -1656,13 +1629,12 @@ def load_updates_data():
                     return data
     except:
         pass
-    # Fallback: project-root snapshot (first-ever deploy before persistent copy exists)
+    # One-time migration from a legacy project-root snapshot
     try:
         if os.path.exists(UPDATES_CONFIG_FALLBACK):
             with open(UPDATES_CONFIG_FALLBACK, 'r') as f:
                 data = json.load(f)
                 if data:
-                    # Migrate to persistent location immediately
                     save_updates_data(data)
                     print(f"[Updates] Migrated updates_data.json to persistent disk")
                     return data
@@ -1672,11 +1644,6 @@ def load_updates_data():
 
 def save_updates_data(data):
     _atomic_json_write(UPDATES_CONFIG_FILE, data)
-    # Also keep project-root copy in sync so GitHub push has something to push
-    try:
-        _atomic_json_write(UPDATES_CONFIG_FALLBACK, data)
-    except:
-        pass
 
 def load_updates_sha():
     try:
@@ -5130,94 +5097,6 @@ async def check_grim_birthday():
         except Exception as e:
             print(f"[Birthday] Could not post to channel {channel_id} in guild {guild_id}: {e}")
 
-async def sync_from_github():
-    """Pull version.txt and updates_data.json from GitHub before startup — source of truth."""
-    global updates_channels
-    token = os.environ.get("GITHUB_PERSONAL_ACCESS_TOKEN")
-    if not token:
-        return
-    repo = "Deathxi/Grim"
-    headers = {"Authorization": f"token {token}", "Accept": "application/vnd.github.v3+json", "User-Agent": "GrimBot"}
-    files_to_sync = ["version.txt", "updates_data.json"]
-    async with aiohttp.ClientSession() as session:
-        for fname in files_to_sync:
-            try:
-                async with session.get(f"https://api.github.com/repos/{repo}/contents/{fname}?ref=main", headers=headers) as r:
-                    data = await r.json()
-                if "content" not in data:
-                    print(f"[Sync] Could not fetch {fname} from GitHub: {data.get('message')}")
-                    continue
-                content = base64.b64decode(data["content"]).decode()
-                with open(fname, "w") as f:
-                    f.write(content)
-                if fname == "version.txt":
-                    # GitHub is source of truth — use whichever is higher (local or GitHub)
-                    github_count = int(content.strip())
-                    local_count = 0
-                    if os.path.exists(VERSION_COUNT_FILE):
-                        try:
-                            with open(VERSION_COUNT_FILE, "r") as f:
-                                local_count = int(f.read().strip())
-                        except:
-                            pass
-                    if github_count >= local_count:
-                        with open(VERSION_COUNT_FILE, "w") as f:
-                            f.write(str(github_count))
-                        print(f"[Sync] VERSION_COUNT_FILE set from GitHub: {github_count} (local was {local_count})")
-                    else:
-                        print(f"[Sync] Local VERSION_COUNT_FILE ({local_count}) ahead of GitHub ({github_count}) — keeping local")
-                elif fname == "updates_data.json":
-                    # Restore from GitHub if local persistent copy is missing or empty
-                    needs_restore = True
-                    if os.path.exists(UPDATES_CONFIG_FILE):
-                        try:
-                            with open(UPDATES_CONFIG_FILE, "r") as f:
-                                existing = json.load(f)
-                            if existing:  # has real data — trust it over GitHub
-                                needs_restore = False
-                        except:
-                            pass
-                    if needs_restore:
-                        github_updates = json.loads(content)
-                        if not isinstance(github_updates, dict):
-                            raise ValueError("updates_data.json must contain an object")
-                        _atomic_json_write(UPDATES_CONFIG_FILE, github_updates)
-                        print(f"[Sync] Restored persistent updates_data.json from GitHub")
-                    else:
-                        print(f"[Sync] Persistent updates_data.json has data — keeping it")
-                print(f"[Sync] Pulled {fname} from GitHub")
-            except Exception as e:
-                print(f"[Sync] Failed to pull {fname}: {e}")
-    # Reload updates_channels from the freshly pulled file
-    updates_channels = load_updates_data()
-    print(f"[Sync] updates_channels reloaded — {len(updates_channels)} guild(s) registered")
-    # Reconcile the synced file with persistent state without ever downgrading
-    # after a reconnect or a deployment from an older repository snapshot.
-    global VERSION
-    try:
-        with open("version.txt", "r") as f:
-            github_count = int(f.read().strip())
-        persistent_count = 0
-        if os.path.exists(VERSION_COUNT_FILE):
-            try:
-                with open(VERSION_COUNT_FILE, "r") as f:
-                    persistent_count = int(f.read().strip())
-            except:
-                pass
-        current_count = max(
-            github_count, persistent_count, VERSION_BASELINE_COUNT
-        )
-        if current_count != persistent_count:
-            os.makedirs(os.path.dirname(VERSION_COUNT_FILE), exist_ok=True)
-            with open(VERSION_COUNT_FILE, "w") as f:
-                f.write(str(current_count))
-        with open("version.txt", "w") as f:
-            f.write(str(current_count))
-        VERSION = _format_version(current_count)
-        print(f"[Sync] VERSION pre-set to {VERSION}")
-    except Exception as e:
-        print(f"[Sync] Could not pre-set VERSION: {e}")
-
 @bot.event
 async def on_ready():
     global BOT_START_TIME, _gateway_disconnected_at
@@ -5238,7 +5117,8 @@ async def on_ready():
     print(f"{bot.user} has connected to Discord!")
     print(f"Bot is in {len(bot.guilds)} server(s)")
     print(f"[Startup] Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S UTC')}")
-    await sync_from_github()
+    # Runtime state source of truth is ~/.grim_data (and encrypted backups).
+    # The live host never pulls or pushes bot source/state through the Grim repo API.
     member_snapshots = collect_member_snapshots(bot.guilds)
     await asyncio.to_thread(sync_member_directory, member_snapshots)
     
@@ -5305,9 +5185,6 @@ async def on_ready():
         print(f"[VC] Resumed tracking for {len(_vc_active_sessions)} member(s) already in voice")
 
     _bump_version()
-    if os.environ.get("REPL_ID"):
-        await _push_version_to_github()   # atomic — must succeed before notification fires
-        asyncio.create_task(push_to_github_on_startup())
     asyncio.create_task(post_update_notification())
     for pending_outage in _load_pending_outage_reports():
         _schedule_outage_report(pending_outage)
@@ -5333,76 +5210,6 @@ async def on_resumed():
     _gateway_disconnected_at = None
     if outage:
         _schedule_outage_report(outage)
-
-async def push_to_github_on_startup():
-    token = os.environ.get("GITHUB_PERSONAL_ACCESS_TOKEN")
-    if not token:
-        return
-    # Map: GitHub filename -> local path to read from
-    # updates_data.json reads from persistent disk (the real data), not project root snapshot
-    file_map = {
-        "main.py": "main.py",
-        "CHANGELOG.md": "CHANGELOG.md",
-        ".gitignore": ".gitignore",
-        "AGENTS.md": "AGENTS.md",
-        "README.md": "README.md",
-        "version.txt": "version.txt",
-    }
-    # Only push updates_data.json if it actually has channel config — never push empty data
-    try:
-        with open(UPDATES_CONFIG_FILE, "r") as _f:
-            _ud = json.load(_f)
-        if _ud:
-            file_map["updates_data.json"] = UPDATES_CONFIG_FILE
-        else:
-            print("[GitHub Sync] Skipping updates_data.json push — file is empty, not overwriting GitHub copy")
-    except:
-        print("[GitHub Sync] Skipping updates_data.json push — could not read persistent file")
-    repo = "Deathxi/Grim"
-    branch = "main"
-    pushed = []
-    failed = []
-    async with aiohttp.ClientSession() as session:
-        for filepath, local_path in file_map.items():
-            if not os.path.exists(local_path):
-                continue
-            try:
-                with open(local_path, "rb") as f:
-                    content = base64.b64encode(f.read()).decode()
-                headers = {
-                    "Authorization": f"token {token}",
-                    "Accept": "application/vnd.github.v3+json",
-                    "User-Agent": "GrimBot"
-                }
-                async with session.get(
-                    f"https://api.github.com/repos/{repo}/contents/{filepath}?ref={branch}",
-                    headers=headers
-                ) as r:
-                    existing = await r.json()
-                sha = existing.get("sha")
-                payload = {
-                    "message": f"Auto-sync: update {filepath}",
-                    "content": content,
-                    "branch": branch
-                }
-                if sha:
-                    payload["sha"] = sha
-                async with session.put(
-                    f"https://api.github.com/repos/{repo}/contents/{filepath}",
-                    headers=headers,
-                    json=payload
-                ) as r:
-                    result = await r.json()
-                if "content" in result:
-                    pushed.append(filepath)
-                else:
-                    failed.append(filepath)
-            except Exception as e:
-                failed.append(f"{filepath}({e})")
-    if pushed:
-        print(f"[GitHub Sync] Pushed: {', '.join(pushed)}")
-    if failed:
-        print(f"[GitHub Sync] Failed: {', '.join(failed)}")
 
 LAST_ANNOUNCED_VERSION_FILE = _data_path("last_announced_version.txt")
 
@@ -8368,39 +8175,70 @@ async def help_grim(ctx):
     embed.set_footer(text=f"Grim · {VERSION}")
     await ctx.send(embed=embed)
 
-@bot.tree.command(name="grim_github_test", description="Test GitHub connection and token status (admin only)")
+@bot.tree.command(name="grim_github_test", description="Test read-only GitHub access for patch notes (admin only)")
 async def grim_github_test(interaction: discord.Interaction):
     if not await require_permission(interaction, "administrator", "github_diagnostic", administrator=True):
         return
     await interaction.response.defer(ephemeral=True)
     token = os.environ.get("GITHUB_PERSONAL_ACCESS_TOKEN", "")
     if not token:
-        await interaction.followup.send("❌ `GITHUB_PERSONAL_ACCESS_TOKEN` is not set in secrets.", ephemeral=True)
+        await interaction.followup.send(
+            "❌ `GITHUB_PERSONAL_ACCESS_TOKEN` is not set. Optional read-only token for `/grim_updates` patch notes.",
+            ephemeral=True,
+        )
         return
     try:
         async with aiohttp.ClientSession() as session:
-            headers = {"Authorization": f"token {token}", "User-Agent": "GrimBot", "Accept": "application/vnd.github.v3+json"}
+            headers = {
+                "Authorization": f"token {token}",
+                "User-Agent": "GrimBot",
+                "Accept": "application/vnd.github.v3+json",
+            }
             async with session.get("https://api.github.com/user", headers=headers) as r:
-                status = r.status
-                data = await r.json()
-                scopes = r.headers.get("X-OAuth-Scopes", "none")
-        if status == 200:
-            login = data.get("login", "unknown")
-            has_repo = "repo" in scopes
+                user_status = r.status
+                user_data = await r.json()
+                scopes = r.headers.get("X-OAuth-Scopes", "") or ""
+            async with session.get(
+                "https://api.github.com/repos/Deathxi/Grim/commits?per_page=1",
+                headers=headers,
+            ) as r:
+                repo_status = r.status
+                repo_data = await r.json()
+        if user_status == 200 and repo_status == 200:
+            login = user_data.get("login", "unknown")
+            write_like = any(
+                scope.strip() in {"repo", "public_repo", "contents:write"}
+                for scope in scopes.split(",")
+            )
             lines = [
-                f"✅ Token valid — authenticated as **{login}**",
-                f"Repo access: {'✅' if has_repo else '❌ missing `repo` scope'}",
+                f"✅ Read access OK — authenticated as **{login}**",
+                "Purpose: optional commit metadata for `/grim_updates` (no source push).",
             ]
-            record_security_event(interaction, "github_diagnostic", "success", {"repo_access": has_repo})
+            if write_like:
+                lines.append(
+                    "⚠️ Token appears to include write-capable scopes. Prefer Contents: Read only."
+                )
+            record_security_event(
+                interaction,
+                "github_diagnostic",
+                "success",
+                {"repo_read": True, "write_like_scope": write_like},
+            )
             await interaction.followup.send("\n".join(lines), ephemeral=True)
         else:
+            status = repo_status if user_status == 200 else user_status
+            message = (
+                repo_data.get("message")
+                if isinstance(repo_data, dict)
+                else user_data.get("message", "unknown error")
+            )
             record_security_event(interaction, "github_diagnostic", "failed", {"status": status})
             await interaction.followup.send(
-                f"❌ GitHub returned `{status}`: {data.get('message', 'unknown error')}",
+                f"❌ GitHub returned `{status}`: {message}",
                 ephemeral=True,
             )
-    except Exception as e:
-        record_security_event(interaction, "github_diagnostic", "failed", {"reason": type(e).__name__})
+    except Exception:
+        record_security_event(interaction, "github_diagnostic", "failed", {"reason": "request_failed"})
         await interaction.followup.send("❌ GitHub diagnostic request failed.", ephemeral=True)
 
 @bot.tree.command(name="grim_remember", description="Give Grim a permanent memory about this server")

@@ -16,7 +16,7 @@ By inviting or interacting with **Grim** (the Discord bot for Seclude & Affiliat
 ### 2. Content & AI Shenanigans
 - Generated responses (text, vibes, or chaos) are experimental—use at your own risk. No liability for existential crises or bad roasts.
 - Keep inputs SFW; Grim filters the profane, but you're responsible for your server's sanity.
-- We don't store personal data beyond what's needed for bot function. Privacy? Check our [Policy](link-if-you-add-one).
+- Grim stores operational data needed for bot function under the Privacy Policy below.
 
 ### 3. Prohibitions
 - No harassment, scams, doxxing, or illegal summons. Bans are final; appeals go to the ether.
@@ -31,30 +31,41 @@ By proceeding, you enter the pact. Enter if you dare. 🌑
 ## Privacy Policy
 Last updated: October 29, 2026
 
-Grim respects your shadows. Here’s exactly what we do (and don’t do) with your data.
+Grim respects your shadows. Here’s exactly what is collected, where it lives, and how long it stays.
 
 ### 1. What We Collect
-- **Discord User ID** — to know who’s talking to Grim and enforce cooldowns/bans.
-- **Server (Guild) ID** — to remember server-specific settings.
-- **Message content** — only when you directly @Grim or use a slash command. We immediately forward it to xAI (Grok) and throw it away after the response.
-- **Nothing else.** No usernames, no profiles, no DMs, no message history, no logs saved to disk.
+- **Discord user IDs, usernames, display names, and avatar URLs** — for member history, language preferences, stats, and staff directory views.
+- **Server (guild) IDs and channel IDs** — for server-scoped settings, feeds, welcome/updates channels, and schedules.
+- **Message content in guild channels Grim can see** — persisted for conversational context, digests, and member profile synthesis (not only when you @Grim).
+- **Voice-channel presence timing** — aggregate time-in-voice totals for `/stats`.
+- **Command and preference data** — reminders, language preferences, moderation word lists, welcome/member-log settings, feed schedules, and similar bot configuration.
+- **Redacted security audit metadata** — action, outcome, actor/server IDs, and non-secret metadata (no message bodies); retained about 90 days.
+- **Prompts sent to xAI (Grok)** — when Grim generates an AI reply; handled under [xAI's privacy policy](https://x.ai/legal/privacy-policy).
 
 ### 2. How It’s Used
-- Solely to make the bot work and to generate replies via xAI’s API.
-- xAI sees your prompt (that’s how Grok works) and follows their own [privacy policy](https://x.ai/legal/privacy-policy).
+- To operate Grim in authorized servers: replies, schedules, moderation helpers, staff member history, and deployment/outage notices.
+- xAI sees prompt/context required to generate a reply. Discord sees what Grim posts back into the server.
 
-### 3. Storage & Deletion
-- Conversation prompts used for AI replies are handled in-memory for that request and are not kept as a chat archive after the reply.
-- We do not write message contents to a permanent conversation database or chat log.
-- Want everything erased right now? Kick the bot or DM `!gdpr delete` and we forget you instantly.
+### 3. Storage & Backups
+- Runtime state lives on the VPS under `~/.grim_data` (outside the git checkout), including SQLite (`chat_history.db`) and JSON config/state files.
+- **Member history events** are retained about **730 days**, then pruned.
+- **Security audit events** are retained about **90 days**, then pruned.
+- Chat history and other learned state persist across restarts until operators delete or restore them.
+- Weekly **encrypted** archives of `~/.grim_data` are uploaded to a separate private GitHub repository (`grim-private-backups`). Archives exclude `.env`, credential-like filenames, and the backup passphrase. See `BACKUP_RESTORE.md`.
+- The live host does **not** push Grim source code or runtime state into the public/source `Deathxi/Grim` repository.
 
 ### 4. Sharing
-- Never sold, never shared, never leaked.
-- Only exception: xAI temporarily sees your message content to generate a reply (again, see their policy).
+- Never sold.
+- Shared only as needed to run the bot: Discord (messages Grim sends), xAI (prompts for AI replies), and the private encrypted-backup repository operators configure.
+- Staff in a server may see member-directory and departure cards Grim posts to configured staff channels.
 
-### 5. Changes
+### 5. Deletion & Access
+- Leaving a server or kicking Grim does **not** by itself wipe `~/.grim_data` or encrypted backups.
+- For erasure or export requests, contact the operator (Deathxi / Seclude staff). Operators can delete or restore runtime files and manage backup retention per `BACKUP_RESTORE.md` and `OPERATIONS_SECURITY.md`.
+
+### 6. Changes
 We’ll update this section in the repo if anything changes. Continued use after updates = you’re cool with it.
 
-That’s it. No cookies, no trackers, no creepy stuff. Stay hidden. 🌑
+That’s it. No cookies, no trackers, no advertising profiles. Stay hidden. 🌑
 
 — Deathxi & the Deathly Hollows

@@ -43,5 +43,10 @@ Thumbs.db
 .cache/
 *.log
 
-# Bot data files — stored in ~/.grim_data/ to survive deployments
+# Bot data files — runtime lives in ~/.grim_data/; never commit workspace copies
 *_data.json
+updates_data.json
+version_count.txt
+chat_history.db
+*.db
+.env.*

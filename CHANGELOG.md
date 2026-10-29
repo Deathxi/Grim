@@ -1,3 +1,4 @@
+- Hardened the post-Replit path: accurate Privacy Policy for `~/.grim_data` / member history / encrypted backups; deleted Replit-era source sync (`push_to_github.py`, startup Contents:Write sync, GitHub state pull); VPS keeps read-only optional GitHub access for patch notes only; Discord and xAI terms unchanged.
 - Peeled Replit host scaffolding (`.replit`, `replit.md`) and pointed agent/ops notes at Cursor (`AGENTS.md`, README credit); Discord and xAI terms unchanged.
 - Added secure autonomous web research to normal Grim conversations, including current-topic follow-ups, verified HTTPS citations, current-channel-only context, bounded timeouts, server/user budgets, and redacted audit outcomes.
 - Rebuilt `/ascii` to generate a recognizable xAI stencil image and convert its real silhouette into compact character art, with optional themes and curated offline fallbacks.
