@@ -16,8 +16,9 @@ in-progress SQLite update. It never backs up `/root/grim/.env`, provider
 credentials, or files with credential-like names inside the data directory.
 The passphrase file is never uploaded.
 
-The latest sanitized live rehearsal record is
-[`docs/backup-rehearsal-2026-09-03.md`](docs/backup-rehearsal-2026-09-03.md).
+Keep a private operator note of the last successful restore rehearsal
+(date, archive name, and outcome). Do not commit rehearsal logs with
+live channel IDs or member data into this repository.
 
 ## Initial setup
 
