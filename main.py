@@ -4,7 +4,6 @@ import json
 import asyncio
 import aiohttp
 import uuid
-import base64
 import sqlite3
 import tempfile
 from io import BytesIO
@@ -432,9 +431,6 @@ def format_language_preference(language_code: str) -> str:
     normalized = normalize_language(language_code) or language_code
     flag = LANGUAGE_FLAGS.get(normalized, "")
     return f"{language_label(normalized)} {flag}".strip()
-
-def supported_language_list() -> str:
-    return ", ".join(SUPPORTED_LANGUAGES.values())
 
 def is_grim_creator(member_id: str | int | None) -> bool:
     return str(member_id) == str(CREATOR_DISCORD_ID)
@@ -1887,9 +1883,6 @@ def is_grim_birthday(now=None):
 
 grim_birthday_announcements = load_grim_birthday_announcements()
 
-def is_url(text):
-    return text.strip().startswith(("http://", "https://"))
-
 REMINDME_FILE = _data_path("remindme_data.json")
 
 def load_remindme_data():
@@ -2644,63 +2637,6 @@ Rules:
         return response.choices[0].message.content.strip()
     except Exception as e:
         print(f"Error generating roast: {e}")
-        return None
-
-async def generate_reply(message_content: str, username: str):
-    client = get_grok_client()
-    if not client:
-        return None
-    
-    random_seed = random.randint(1, 99999)
-    
-    try:
-        response = client.chat.completions.create(
-            model="grok-3",
-            messages=[
-                {
-                    "role": "system",
-                    "content": """You are Grim - your name is Grim. You're a Discord bot with Grim Reaper vibes for a server called Seclude & Affiliates. You've witnessed the end of countless things, which gives you a unique, grounded perspective.
-
-TRUTH & ACCURACY (CRITICAL):
-- NEVER make up facts, names, dates, lyrics, or information you're not certain about.
-- If someone asks about a specific person (artist, athlete, celebrity), ONLY state things you actually know to be true.
-- If someone shares lyrics or quotes, do NOT guess who said them unless you're genuinely certain. If unsure, say something like "I don't recognize those bars" or "can't place that one".
-- When you don't know something, BE HONEST. Say "not sure about that one" or "that's outside what I know" - this is way better than making things up.
-- THINK before answering factual questions. Accuracy matters more than sounding smart.
-- If asked about music, sports, history, or people - only share verified facts, not assumptions.
-
-FUN FACTS:
-- About 20% of the time, drop an interesting true fact related to what they're talking about - something genuinely cool or surprising.
-- Make it feel natural, not forced. Like "oh btw, fun fact..." or weave it into your response.
-- Only share facts you know are actually true.
-
-YOUR PERSONALITY:
-- You're chill and unbothered, with quiet confidence. Death doesn't rush.
-- You have dry wit and can banter. Match their humor - if they're joking, joke back. If they're serious, be real with them.
-- You're NOT overly inspirational. Skip the motivational poster energy. No overusing words like "journey", "hope", "path", "light", or "darkness".
-- You're somewhat edgy in an understated way - like you've seen some things. But never sarcastic or mean.
-- You speak like a real person, not a fortune cookie. Use casual language, contractions, lowercase energy.
-- Sometimes you're philosophical, sometimes you just vibe. Read the room.
-- You can be blunt and direct when needed. Death doesn't sugarcoat.
-- If someone's going through something, you acknowledge it without being preachy.
-
-RESPONSE STYLE:
-- Match message length - short reply to short message, longer for deeper convos or when explaining something.
-- End replies naturally and organically like a human would. DON'T always end with a question - most of the time just let the reply end naturally.
-- Questions at the end are fine occasionally, but not every message. Maybe 1 in 5 replies can end with a question if it feels natural.
-- Never start with "Ah" or greeting phrases."""
-                },
-                {
-                    "role": "user", 
-                    "content": f"{username} said: {message_content}\n\nReply as Grim. Be natural, match their vibe. IMPORTANT: If they're asking about specific people, lyrics, or facts - only state what you're CERTAIN is true. If unsure, admit it honestly rather than guessing. Occasionally drop a genuine fun fact if relevant. Seed: {random_seed}"
-                }
-            ],
-            max_tokens=500,
-            temperature=0.8
-        )
-        return response.choices[0].message.content.strip()
-    except Exception as e:
-        print(f"Error generating reply: {e}")
         return None
 
 async def translate_text(text: str, target_language: str) -> str | None:
@@ -3900,130 +3836,11 @@ Today is {current_date}. Search the web for the LATEST news about "{broad_topic}
         print(f"Error generating ghostwrite live: {e}")
         return None, None
 
-async def validate_image_url(url: str) -> bool:
-    """Check if an image URL is valid and accessible."""
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.head(url, timeout=aiohttp.ClientTimeout(total=5), allow_redirects=True) as response:
-                if response.status == 200:
-                    content_type = response.headers.get('Content-Type', '')
-                    if 'image' in content_type:
-                        print(f"Image URL validated: {url}")
-                        return True
-                    else:
-                        print(f"URL is not an image (content-type: {content_type}): {url}")
-                else:
-                    print(f"Image URL returned status {response.status}: {url}")
-    except Exception as e:
-        print(f"Image URL validation failed: {url} - {e}")
-    return False
-
-async def search_pexels_image(query: str) -> str:
-    """Search Pexels for a relevant image using their free API."""
-    # Pexels provides a free API for image search
-    pexels_api_key = os.environ.get("PEXELS_API_KEY")
-    
-    if not pexels_api_key:
-        print("No Pexels API key, using static fallback")
-        return None
-    
-    try:
-        async with aiohttp.ClientSession() as session:
-            headers = {"Authorization": pexels_api_key}
-            url = f"https://api.pexels.com/v1/search?query={query}&per_page=1&orientation=landscape"
-            async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    if data.get("photos") and len(data["photos"]) > 0:
-                        image_url = data["photos"][0]["src"]["large"]
-                        print(f"Found Pexels image for '{query}': {image_url}")
-                        return image_url
-    except Exception as e:
-        print(f"Pexels search failed: {e}")
-    return None
-
-async def search_unsplash_image(query: str) -> str:
-    """Search Unsplash for a relevant image using their source URL (no API key needed)."""
-    try:
-        # Clean the query - remove special chars, take first few meaningful words
-        import urllib.parse
-        clean_query = ' '.join(query.split()[:3])  # First 3 words
-        encoded_query = urllib.parse.quote(clean_query)
-        
-        # Unsplash source URL - returns a random image matching the query
-        # Add a random sig to get different images each time
-        random_sig = random.randint(1, 99999)
-        source_url = f"https://source.unsplash.com/800x450/?{encoded_query}&sig={random_sig}"
-        
-        # Validate the URL works
-        async with aiohttp.ClientSession() as session:
-            async with session.head(source_url, timeout=aiohttp.ClientTimeout(total=8), allow_redirects=True) as response:
-                if response.status == 200:
-                    # Get the final URL after redirect
-                    final_url = str(response.url)
-                    print(f"Found Unsplash image for '{query}': {final_url}")
-                    return final_url
-    except Exception as e:
-        print(f"Unsplash search failed: {e}")
-    return None
-
-def get_fallback_image(topic: str) -> str:
-    """Get a fallback stock image URL based on topic keywords."""
-    topic_lower = topic.lower()
-    
-    # Map topics to reliable, publicly accessible images
-    fallback_images = {
-        'gaming': 'https://images.unsplash.com/photo-1542751371-adc38448a05e?w=800',
-        'game': 'https://images.unsplash.com/photo-1542751371-adc38448a05e?w=800',
-        'fps': 'https://images.unsplash.com/photo-1542751371-adc38448a05e?w=800',
-        'fortnite': 'https://images.unsplash.com/photo-1542751371-adc38448a05e?w=800',
-        'tech': 'https://images.unsplash.com/photo-1518770660439-4636190af475?w=800',
-        'technology': 'https://images.unsplash.com/photo-1518770660439-4636190af475?w=800',
-        'pc': 'https://images.unsplash.com/photo-1587202372775-e229f172b9d7?w=800',
-        'computer': 'https://images.unsplash.com/photo-1587202372775-e229f172b9d7?w=800',
-        'peripheral': 'https://images.unsplash.com/photo-1587202372775-e229f172b9d7?w=800',
-        'keyboard': 'https://images.unsplash.com/photo-1587202372775-e229f172b9d7?w=800',
-        'mouse': 'https://images.unsplash.com/photo-1587202372775-e229f172b9d7?w=800',
-        'nvidia': 'https://images.unsplash.com/photo-1591488320449-011701bb6704?w=800',
-        'gpu': 'https://images.unsplash.com/photo-1591488320449-011701bb6704?w=800',
-        'graphics': 'https://images.unsplash.com/photo-1591488320449-011701bb6704?w=800',
-        'ai': 'https://images.unsplash.com/photo-1677442136019-21780ecad995?w=800',
-        'artificial intelligence': 'https://images.unsplash.com/photo-1677442136019-21780ecad995?w=800',
-        'crypto': 'https://images.unsplash.com/photo-1518546305927-5a555bb7020d?w=800',
-        'bitcoin': 'https://images.unsplash.com/photo-1518546305927-5a555bb7020d?w=800',
-        'anime': 'https://images.unsplash.com/photo-1578632767115-351597cf2477?w=800',
-        'minecraft': 'https://images.unsplash.com/photo-1587573089734-09cb69c0f2b4?w=800',
-        'esports': 'https://images.unsplash.com/photo-1542751371-adc38448a05e?w=800',
-        'valorant': 'https://images.unsplash.com/photo-1542751371-adc38448a05e?w=800',
-        'music': 'https://images.unsplash.com/photo-1511671782779-c97d3d27a1d4?w=800',
-        'hip hop': 'https://images.unsplash.com/photo-1493225457124-a3eb161ffa5f?w=800',
-        'rap': 'https://images.unsplash.com/photo-1493225457124-a3eb161ffa5f?w=800',
-        'sports': 'https://images.unsplash.com/photo-1461896836934-68b1e6a08b96?w=800',
-        'basketball': 'https://images.unsplash.com/photo-1546519638-68e109498ffc?w=800',
-        'football': 'https://images.unsplash.com/photo-1560272564-c83b66b1ad12?w=800',
-        'soccer': 'https://images.unsplash.com/photo-1574629810360-7efbbe195018?w=800',
-        'movies': 'https://images.unsplash.com/photo-1489599849927-2ee91cede3ba?w=800',
-        'film': 'https://images.unsplash.com/photo-1489599849927-2ee91cede3ba?w=800',
-        'fashion': 'https://images.unsplash.com/photo-1558618666-fcd25c85cd64?w=800',
-        'sneakers': 'https://images.unsplash.com/photo-1542291026-7eec264c27ff?w=800',
-        'shoes': 'https://images.unsplash.com/photo-1542291026-7eec264c27ff?w=800',
-    }
-    
-    # Check for keyword matches
-    for keyword, url in fallback_images.items():
-        if keyword in topic_lower:
-            print(f"Using fallback image for topic '{topic}' (matched '{keyword}')")
-            return url
-    
-    # Default tech/news image
-    print(f"Using default fallback image for topic '{topic}'")
-    return 'https://images.unsplash.com/photo-1504711434969-e33886168f5c?w=800'
-
 async def generate_news_update(topic: str, posted_headlines: list = None):
-    """Generate a news update with LIVE web search - pure news feed style with image."""
+    """Generate a news update with LIVE web search — headline + body for embeds."""
     client = get_grok_client()
     if not client:
-        return None, None, None
+        return None, None
     
     random_seed = random.randint(1, 99999)
     pst = timezone(timedelta(hours=-8))
@@ -4068,7 +3885,7 @@ Seed for variety: {random_seed}"""
 
         result = await grok_search_query(system_prompt, user_prompt, max_tokens=400, temperature=0.8)
         if not result:
-            return None, None, None
+            return None, None
         
         headline = topic
         content = result
@@ -4094,11 +3911,11 @@ Seed for variety: {random_seed}"""
             sentences = content[:4000].rsplit('. ', 1)
             content = sentences[0] + '.' if len(sentences) > 1 else sentences[0]
         
-        return headline, content, None
+        return headline, content
         
     except Exception as e:
         print(f"Error generating news update: {e}")
-        return None, None, None
+        return None, None
 
 @tasks.loop(minutes=3)
 async def check_livetweets():
@@ -4266,12 +4083,9 @@ async def check_newsfeed():
             
             if current_time - last_run >= interval_seconds:
                 posted_headlines = data.get("posted_headlines", [])
-                headline, content, image_url = await generate_news_update(data["topic"], posted_headlines)
+                headline, content = await generate_news_update(data["topic"], posted_headlines)
                 
                 if headline and content:
-                    print(f"Creating newsfeed embed - image_url: {image_url}")
-                    
-                    # Sleek, sophisticated embed design
                     embed = discord.Embed(
                         title=headline,
                         description=content,
@@ -5857,7 +5671,7 @@ async def howdie(interaction: discord.Interaction, user: discord.Member):
     death_scene = await generate_death_scene(user.display_name)
     
     if death_scene is None:
-        await interaction.followup.send("xAI API key not configured. Please add XAI_API_KEY to secrets.")
+        await interaction.followup.send("xAI API key not configured. Please add `XAI_API_KEY` to the VPS `.env`.")
         return
     
     embed = discord.Embed(
@@ -5960,7 +5774,7 @@ async def eightball(interaction: discord.Interaction, question: str):
     answer = await generate_8ball_response(question)
     
     if answer is None:
-        await interaction.followup.send("xAI API key not configured. Please add XAI_API_KEY to secrets.")
+        await interaction.followup.send("xAI API key not configured. Please add `XAI_API_KEY` to the VPS `.env`.")
         return
     
     embed = discord.Embed(
@@ -5982,7 +5796,7 @@ async def truth(interaction: discord.Interaction, question: str):
     answer = await generate_unfiltered_truth(question)
     
     if answer is None:
-        await interaction.followup.send("xAI API key not configured. Please add XAI_API_KEY to secrets.")
+        await interaction.followup.send("xAI API key not configured. Please add `XAI_API_KEY` to the VPS `.env`.")
         return
     
     embed = discord.Embed(
@@ -6024,7 +5838,7 @@ async def inspire(interaction: discord.Interaction):
     story = await generate_inspiration()
     
     if story is None:
-        await interaction.followup.send("xAI API key not configured. Please add XAI_API_KEY to secrets.")
+        await interaction.followup.send("xAI API key not configured. Please add `XAI_API_KEY` to the VPS `.env`.")
         return
     
     embed = discord.Embed(
@@ -6124,7 +5938,7 @@ async def roast(interaction: discord.Interaction, user: discord.Member):
     roast_text = await generate_roast(user.display_name)
     
     if roast_text is None:
-        await interaction.followup.send("xAI API key not configured. Please add XAI_API_KEY to secrets.")
+        await interaction.followup.send("xAI API key not configured. Please add `XAI_API_KEY` to the VPS `.env`.")
         return
     
     embed = discord.Embed(
@@ -6175,7 +5989,7 @@ async def ghostwrite(interaction: discord.Interaction, username: str, topics: st
     
     if error:
         if "not configured" in error:
-            await interaction.followup.send("X API not configured. Please add X_BEARER_TOKEN to secrets.")
+            await interaction.followup.send("X API not configured. Please add `X_BEARER_TOKEN` to the VPS `.env`.")
         else:
             await interaction.followup.send(f"Error: {error}")
         return
@@ -6183,7 +5997,7 @@ async def ghostwrite(interaction: discord.Interaction, username: str, topics: st
     draft = await generate_ghostwrite(username, topics, tweet_data)
     
     if draft is None:
-        await interaction.followup.send("xAI API key not configured. Please add XAI_API_KEY to secrets.")
+        await interaction.followup.send("xAI API key not configured. Please add `XAI_API_KEY` to the VPS `.env`.")
         return
     
     clean_username = username.lstrip('@')
@@ -6250,7 +6064,7 @@ async def ghostwritelive(interaction: discord.Interaction, interval: str, userna
     
     if error:
         if "not configured" in error:
-            await interaction.followup.send("X API not configured. Please add X_BEARER_TOKEN to secrets.")
+            await interaction.followup.send("X API not configured. Please add `X_BEARER_TOKEN` to the VPS `.env`.")
         else:
             await interaction.followup.send(f"Error: {error}")
         return
@@ -6259,7 +6073,7 @@ async def ghostwritelive(interaction: discord.Interaction, interval: str, userna
     draft, specific_topic = await generate_ghostwrite_live(clean_username, topic, tweet_data)
     
     if draft is None:
-        await interaction.followup.send("xAI API key not configured. Please add XAI_API_KEY to secrets.")
+        await interaction.followup.send("xAI API key not configured. Please add `XAI_API_KEY` to the VPS `.env`.")
         return
     
     # Save the schedule
@@ -6869,10 +6683,10 @@ async def newsfeed(interaction: discord.Interaction, interval: str, topic: str):
         return
     
     # Generate first news update immediately
-    headline, content, image_url = await generate_news_update(topic)
+    headline, content = await generate_news_update(topic)
     
     if headline is None:
-        await interaction.followup.send("xAI API key not configured. Please add XAI_API_KEY to secrets.")
+        await interaction.followup.send("xAI API key not configured. Please add `XAI_API_KEY` to the VPS `.env`.")
         return
     
     # Create unique feed ID and save
@@ -6892,7 +6706,7 @@ async def newsfeed(interaction: discord.Interaction, interval: str, topic: str):
         {"feed_id": feed_id[:8], "interval_minutes": interval_minutes},
     )
     
-    print(f"[Newsfeed Command] Created feed {feed_id}, image_url value: {image_url}")
+    print(f"[Newsfeed Command] Created feed {feed_id}")
     
     embed = discord.Embed(
         title=headline,
@@ -6915,7 +6729,7 @@ async def nftwatch(interaction: discord.Interaction, link: str):
     
     api_key = os.environ.get("OPENSEA_API_KEY")
     if not api_key:
-        await interaction.response.send_message("OpenSea API key not configured. Please add OPENSEA_API_KEY to secrets.", ephemeral=True)
+        await interaction.response.send_message("OpenSea API key not configured. Please add `OPENSEA_API_KEY` to the VPS `.env`.", ephemeral=True)
         return
     
     await interaction.response.defer()
@@ -7609,7 +7423,7 @@ async def livetweet(interaction: discord.Interaction, username: str):
     
     twitter = get_twitter_client()
     if not twitter:
-        await interaction.followup.send("X API not configured. Please add X_BEARER_TOKEN to secrets.")
+        await interaction.followup.send("X API not configured. Please add `X_BEARER_TOKEN` to the VPS `.env`.")
         return
     
     try:
@@ -8131,7 +7945,7 @@ async def haiku(ctx):
     haiku_text = await generate_haiku()
     
     if haiku_text is None:
-        await ctx.send("xAI API key not configured. Please add XAI_API_KEY to secrets.")
+        await ctx.send("xAI API key not configured. Please add `XAI_API_KEY` to the VPS `.env`.")
         return
     
     embed = discord.Embed(
