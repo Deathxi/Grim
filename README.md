@@ -51,7 +51,7 @@ Grim respects your shadows. Here’s exactly what is collected, where it lives, 
 - **Member history events** are retained about **730 days**, then pruned.
 - **Security audit events** are retained about **90 days**, then pruned.
 - Chat history and other learned state persist across restarts until operators delete or restore them.
-- Weekly **encrypted** archives of `~/.grim_data` are uploaded to a separate private GitHub repository (`grim-private-backups`). Archives exclude `.env`, credential-like filenames, and the backup passphrase. See `BACKUP_RESTORE.md`.
+- Weekly **encrypted** archives of `~/.grim_data` are uploaded to a separate private GitHub repository configured by the operator. Archives exclude `.env`, credential-like filenames, and the backup passphrase. See `BACKUP_RESTORE.md`.
 - The live host does **not** push Grim source code or runtime state into the public/source `Deathxi/Grim` repository.
 
 ### 4. Sharing

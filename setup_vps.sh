@@ -16,8 +16,13 @@ apt-get install -y -q python3 python3-pip python3-venv git ffmpeg libopus-dev op
 echo ""
 echo "[2/7] Cloning Grim from GitHub..."
 if [ -d "/root/grim" ]; then
-    echo "  /root/grim already exists — pulling latest..."
-    cd /root/grim && git pull origin main
+    echo "  /root/grim already exists — fetching latest..."
+    cd /root/grim
+    git fetch origin main
+    GIT_CONFIG_COUNT=1 \
+      GIT_CONFIG_KEY_0=core.hooksPath \
+      GIT_CONFIG_VALUE_0=/dev/null \
+      git reset --hard origin/main
 else
     git clone https://github.com/Deathxi/Grim.git /root/grim
     cd /root/grim
@@ -29,7 +34,7 @@ install -d -m 700 /root/.grim_data
 # ── Python dependencies ────────────────────────────────
 echo ""
 echo "[3/7] Installing Python packages..."
-pip3 install -q -r /root/grim/requirements.txt
+PIP_NO_INPUT=1 pip3 install -q -r /root/grim/requirements.txt
 
 # ── Secrets / environment file ─────────────────────────
 echo ""
@@ -39,6 +44,14 @@ echo ""
 
 read -r -s -p "  DISCORD_TOKEN: " DISCORD_TOKEN
 echo ""
+if [ -z "${DISCORD_TOKEN}" ]; then
+    echo "  DISCORD_TOKEN is required; aborting."
+    exit 1
+fi
+if [[ "${DISCORD_TOKEN}" == *$'\n'* ]] || [[ "${DISCORD_TOKEN}" == *$'\r'* ]]; then
+    echo "  DISCORD_TOKEN must be a single line; aborting."
+    exit 1
+fi
 read -r -s -p "  XAI_API_KEY: " XAI_API_KEY
 echo ""
 read -r -s -p "  X_BEARER_TOKEN: " X_BEARER_TOKEN
@@ -52,18 +65,17 @@ read -r -s -p "  OPENSEA_API_KEY (optional, press Enter to skip): " OPENSEA_KEY
 echo ""
 
 umask 077
-cat > /root/grim/.env <<EOF
-DISCORD_TOKEN=$DISCORD_TOKEN
-XAI_API_KEY=$XAI_API_KEY
-X_BEARER_TOKEN=$X_BEARER_TOKEN
-EOF
+: > /root/grim/.env
+printf 'DISCORD_TOKEN=%s\n' "${DISCORD_TOKEN}" >> /root/grim/.env
+printf 'XAI_API_KEY=%s\n' "${XAI_API_KEY}" >> /root/grim/.env
+printf 'X_BEARER_TOKEN=%s\n' "${X_BEARER_TOKEN}" >> /root/grim/.env
 
 if [ -n "${GITHUB_PAT}" ]; then
-    echo "GITHUB_PERSONAL_ACCESS_TOKEN=$GITHUB_PAT" >> /root/grim/.env
+    printf 'GITHUB_PERSONAL_ACCESS_TOKEN=%s\n' "${GITHUB_PAT}" >> /root/grim/.env
 fi
 
 if [ -n "${OPENSEA_KEY}" ]; then
-    echo "OPENSEA_API_KEY=$OPENSEA_KEY" >> /root/grim/.env
+    printf 'OPENSEA_API_KEY=%s\n' "${OPENSEA_KEY}" >> /root/grim/.env
 fi
 
 chmod 600 /root/grim/.env
@@ -95,12 +107,11 @@ if [ -n "$BACKUP_REPO" ]; then
     chmod 600 /root/.config/grim-backup/passphrase
     unset BACKUP_PASSPHRASE
 
-    cat > /etc/grim-backup.env <<EOF
-GRIM_BACKUP_GITHUB_REPO=$BACKUP_REPO
-GRIM_BACKUP_GITHUB_TOKEN=$BACKUP_TOKEN
-GRIM_BACKUP_PASSPHRASE_FILE=/root/.config/grim-backup/passphrase
-GRIM_BACKUP_RETENTION=8
-EOF
+    : > /etc/grim-backup.env
+    printf 'GRIM_BACKUP_GITHUB_REPO=%s\n' "$BACKUP_REPO" >> /etc/grim-backup.env
+    printf 'GRIM_BACKUP_GITHUB_TOKEN=%s\n' "$BACKUP_TOKEN" >> /etc/grim-backup.env
+    printf 'GRIM_BACKUP_PASSPHRASE_FILE=%s\n' "/root/.config/grim-backup/passphrase" >> /etc/grim-backup.env
+    printf 'GRIM_BACKUP_RETENTION=%s\n' "8" >> /etc/grim-backup.env
     chmod 600 /etc/grim-backup.env
     unset BACKUP_TOKEN
 
@@ -141,10 +152,26 @@ chmod 600 /root/.ssh/github_deploy
 chmod 644 /root/.ssh/github_deploy.pub
 touch /root/.ssh/authorized_keys
 chmod 600 /root/.ssh/authorized_keys
-# Idempotent: do not append the same public key twice on re-runs.
-if ! grep -qxF "$(cat /root/.ssh/github_deploy.pub)" /root/.ssh/authorized_keys; then
-    cat /root/.ssh/github_deploy.pub >> /root/.ssh/authorized_keys
+
+DEPLOY_PUB="$(cat /root/.ssh/github_deploy.pub)"
+# Restrict forwarding/pty; leave interactive shell possible until a forced-command
+# deploy user is approved (command= bricks deploys if the script path drifts).
+DEPLOY_OPTS="no-agent-forwarding,no-port-forwarding,no-X11-forwarding,no-pty"
+DEPLOY_LINE="${DEPLOY_OPTS} ${DEPLOY_PUB}"
+if ! grep -qxF "${DEPLOY_LINE}" /root/.ssh/authorized_keys \
+    && ! grep -qxF "${DEPLOY_PUB}" /root/.ssh/authorized_keys; then
+    printf '%s\n' "${DEPLOY_LINE}" >> /root/.ssh/authorized_keys
+elif grep -qxF "${DEPLOY_PUB}" /root/.ssh/authorized_keys \
+    && ! grep -qxF "${DEPLOY_LINE}" /root/.ssh/authorized_keys; then
+    # Upgrade a bare pubkey line from an older setup to restricted options.
+    grep -vxF "${DEPLOY_PUB}" /root/.ssh/authorized_keys > /root/.ssh/authorized_keys.tmp
+    printf '%s\n' "${DEPLOY_LINE}" >> /root/.ssh/authorized_keys.tmp
+    mv /root/.ssh/authorized_keys.tmp /root/.ssh/authorized_keys
+    chmod 600 /root/.ssh/authorized_keys
 fi
+
+HOST_FINGERPRINT="$(ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub 2>/dev/null | awk '{print $2}' || true)"
+PUBLIC_IP="$(curl -fsS https://ifconfig.me/ip 2>/dev/null || curl -fsS https://icanhazip.com 2>/dev/null || true)"
 
 echo ""
 echo "======================================"
@@ -161,18 +188,29 @@ echo "======================================"
 echo "  IMPORTANT — GitHub Actions Setup"
 echo "======================================"
 echo ""
-echo "Add these two secrets to your GitHub repo"
+echo "Add these secrets to your GitHub repo"
 echo "(github.com/Deathxi/Grim → Settings → Secrets → Actions):"
 echo ""
 echo "  Secret name:  VPS_HOST"
-echo "  Secret value: $(curl -fsS ifconfig.me || curl -fsS icanhazip.com)"
+echo "  Secret value: ${PUBLIC_IP:-<droplet public IPv4>}"
 echo ""
 echo "  Secret name:  VPS_SSH_KEY"
-echo "  Secret value: (copy everything below, including the header/footer lines)"
+echo "  Secret value: contents of /root/.ssh/github_deploy"
+echo "  (run:  cat /root/.ssh/github_deploy )"
+echo "  WARNING: that private key grants root SSH. Store it only in Actions"
+echo "  secrets — never in chat, issues, or commits."
 echo ""
-echo "  WARNING: The private key below grants root SSH. Store it only in GitHub"
-echo "  Actions secrets, never in chat, issues, or commits. Prefer rotating it"
-echo "  after first paste if this terminal session may be logged."
+echo "  Secret name:  VPS_SSH_FINGERPRINT  (recommended)"
+echo "  Secret value: ${HOST_FINGERPRINT:-<run: ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub>}"
 echo ""
-cat /root/.ssh/github_deploy
-echo ""
+if [ "${CONFIRM:-}" = "print-key" ]; then
+    echo "  CONFIRM=print-key set — printing private key once:"
+    echo ""
+    cat /root/.ssh/github_deploy
+    echo ""
+else
+    echo "  Private key is NOT printed by default. Copy it yourself when ready:"
+    echo "    cat /root/.ssh/github_deploy"
+    echo "  Or re-print after setup with: CONFIRM=print-key /root/grim/scripts/print-deploy-key.sh"
+    echo ""
+fi

@@ -9,12 +9,17 @@ and uploads it to the separate private repository configured in
 service; it must not be the optional read-only token Grim may use for
 `/grim_updates` commit metadata, and it is never used for code deployment.
 
-The service keeps the newest eight archives in `archives/`. It briefly stops
-Grim before reading the data directory and restarts it afterward, including
-when a backup fails. This avoids archiving a partially-written JSON file or an
-in-progress SQLite update. It never backs up `/root/grim/.env`, provider
-credentials, or files with credential-like names inside the data directory.
-The passphrase file is never uploaded.
+The service keeps the newest eight archives in the `archives/` tree on the tip
+of `main`. Pruning removes current-tree files only — **git history may still
+contain older encrypted archives**. A leaked passphrase can decrypt every
+historical week still reachable in that history, not just the eight tip files.
+Treat the offline passphrase accordingly.
+
+The service briefly stops Grim before reading the data directory and restarts
+it afterward, including when a backup fails. This avoids archiving a
+partially-written JSON file or an in-progress SQLite update. It never backs up
+`/root/grim/.env`, provider credentials, or files with credential-like names
+inside the data directory. The passphrase file is never uploaded.
 
 Keep a private operator note of the last successful restore rehearsal
 (date, archive name, and outcome). Do not commit rehearsal logs with
@@ -81,15 +86,18 @@ Do not start Grim until the data has been restored and checked.
      | python3 -c 'import json,sys; print("\n".join(x["name"] for x in json.load(sys.stdin) if x.get("name","").endswith(".tar.gz.enc")))'
    ```
 
-4. Download the selected encrypted archive. The raw Contents API response
-   requires the same repository-scoped token:
+4. Download the selected encrypted archive into a private work directory
+   (never world-readable `/tmp`). The raw Contents API response requires the
+   same repository-scoped token:
 
    ```bash
+   umask 077
+   install -d -m 700 /root/restore-work
    curl -fsSL \
      -H "Authorization: Bearer ${GRIM_BACKUP_GITHUB_TOKEN}" \
      -H "Accept: application/vnd.github.raw" \
      "https://api.github.com/repos/${GRIM_BACKUP_GITHUB_REPO}/contents/archives/${ARCHIVE_NAME}?ref=main" \
-     -o "/tmp/${ARCHIVE_NAME}"
+     -o "/root/restore-work/${ARCHIVE_NAME}"
    ```
 
 5. Write the recovered passphrase to the root-only file expected by the
@@ -108,10 +116,11 @@ Do not start Grim until the data has been restored and checked.
    parameters must match the backup utility:
 
    ```bash
+   umask 077
    openssl enc -d -aes-256-cbc -pbkdf2 -iter 600000 -md sha256 \
      -pass file:/root/.config/grim-backup/passphrase \
-     -in "/tmp/${ARCHIVE_NAME}" -out /tmp/grim-data.tar.gz
-   tar -tzf /tmp/grim-data.tar.gz
+     -in "/root/restore-work/${ARCHIVE_NAME}" -out /root/restore-work/grim-data.tar.gz
+   tar -tzf /root/restore-work/grim-data.tar.gz
    ```
 
    The listing should contain only relative runtime-data paths such as
@@ -128,8 +137,10 @@ Do not start Grim until the data has been restored and checked.
      mv /root/.grim_data "/root/.grim_data.before-restore-$(date -u +%Y%m%dT%H%M%SZ)"
    fi
    install -d -m 700 /root/.grim_data
-   tar --no-same-owner -xzf /tmp/grim-data.tar.gz -C /root/.grim_data
+   tar --no-same-owner -xzf /root/restore-work/grim-data.tar.gz -C /root/.grim_data
    chown -R root:root /root/.grim_data
+   shred -u /root/restore-work/grim-data.tar.gz 2>/dev/null \
+     || rm -f /root/restore-work/grim-data.tar.gz
    ```
 
 8. Validate the restored data before starting Grim:

@@ -17,12 +17,15 @@ RestartSec=10
 StandardOutput=journal
 StandardError=journal
 
-# Hardening — Discord bot is outbound-only; keep paths needed for code + runtime data.
+# Hardening — Discord bot is outbound-only.
+# Checkout stays read-only so a compromised process cannot plant .git/hooks that
+# the next unsandboxed deploy `git` command would execute.
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=/root/grim /root/.grim_data
+ReadWritePaths=/root/.grim_data
+ReadOnlyPaths=/root/grim
 ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectControlGroups=true
