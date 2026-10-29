@@ -15,6 +15,7 @@ import threading
 import subprocess
 import sys
 import fcntl
+from safe_http import SafeHttpError, safe_http
 import discord
 from discord.ext import commands, tasks
 from discord import ui
@@ -1168,6 +1169,7 @@ def _research_rate_limit_allows(guild_id: str, actor_id: str) -> bool:
         "ai_web_research_guild",
         AI_RESEARCH_GUILD_MAX_REQUESTS,
     ):
+        # Do not charge the actor for a request blocked by the guild budget.
         user_key = (guild_id, actor_id, "ai_web_research_user")
         if _COMMAND_RATE_LIMITS.get(user_key):
             _COMMAND_RATE_LIMITS[user_key].pop()
@@ -2006,12 +2008,19 @@ async def fetch_opensea_api(session, endpoint, params=None):
     }
     url = f"https://api.opensea.io/api/v2{endpoint}"
     try:
-        async with session.get(url, headers=headers, params=params) as resp:
-            if resp.status == 200:
-                return await resp.json()
-            else:
-                print(f"[NFTWatch] API error {resp.status}: {await resp.text()}")
-                return None
+        resp, data = await safe_http.get_json(
+            url,
+            allowed_hosts={"api.opensea.io"},
+            headers=headers,
+            params=params,
+            max_response_bytes=2 * 1024 * 1024,
+            total_timeout=10,
+        )
+        if resp.status == 200:
+            return data
+        else:
+            print(f"[NFTWatch] API error {resp.status}: {resp.text()[:500]}")
+            return None
     except Exception as e:
         print(f"[NFTWatch] Request error: {e}")
         return None
@@ -2189,47 +2198,48 @@ async def grok_research_query(
 
     async def perform_research():
         async with _AI_RESEARCH_SEMAPHORE:
-            timeout = aiohttp.ClientTimeout(total=18, connect=5)
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                payload = {
-                    "model": os.environ.get("XAI_SEARCH_MODEL", "grok-4-1-fast"),
-                    "tools": [{"type": "web_search"}],
-                    "input": [
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": bounded_prompt},
-                    ],
-                    "max_output_tokens": max_tokens,
-                    "temperature": temperature,
-                }
-                headers = {
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json",
-                }
-                async with session.post(
+            payload = {
+                "model": os.environ.get("XAI_SEARCH_MODEL", "grok-4-1-fast"),
+                "tools": [{"type": "web_search"}],
+                "input": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": bounded_prompt},
+                ],
+                "max_output_tokens": max_tokens,
+                "temperature": temperature,
+            }
+            headers = {
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            }
+            try:
+                resp, data = await safe_http.post_json(
                     "https://api.x.ai/v1/responses",
+                    allowed_hosts={"api.x.ai"},
                     headers=headers,
-                    json=payload,
-                ) as resp:
-                    if resp.status != 200:
-                        print(f"[Grok Search] Provider error {resp.status}")
-                        return {"status": "provider_error", "http_status": resp.status}
-                    try:
-                        data = await resp.json()
-                    except Exception:
-                        return {"status": "parse_error"}
-                    result = _extract_grok_research_response(data)
-                    if result:
-                        result = {**result, "status": "success", "cached": False}
-                        if cache_key:
-                            _AI_RESEARCH_CACHE[cache_key] = (time.time(), result)
-                        if cache_key and len(_AI_RESEARCH_CACHE) > 100:
-                            oldest_key = min(
-                                _AI_RESEARCH_CACHE,
-                                key=lambda key: _AI_RESEARCH_CACHE[key][0],
-                            )
-                            _AI_RESEARCH_CACHE.pop(oldest_key, None)
-                        return result
-                    return {"status": "unverified"}
+                    json_body=payload,
+                    max_response_bytes=2 * 1024 * 1024,
+                    total_timeout=18,
+                )
+                if resp.status != 200:
+                    print(f"[Grok Search] Provider error {resp.status}")
+                    return {"status": "provider_error", "http_status": resp.status}
+            except (SafeHttpError, ValueError, json.JSONDecodeError):
+                return {"status": "parse_error"}
+            else:
+                result = _extract_grok_research_response(data)
+                if result:
+                    result = {**result, "status": "success", "cached": False}
+                    if cache_key:
+                        _AI_RESEARCH_CACHE[cache_key] = (time.time(), result)
+                    if cache_key and len(_AI_RESEARCH_CACHE) > 100:
+                        oldest_key = min(
+                            _AI_RESEARCH_CACHE,
+                            key=lambda key: _AI_RESEARCH_CACHE[key][0],
+                        )
+                        _AI_RESEARCH_CACHE.pop(oldest_key, None)
+                    return result
+                return {"status": "unverified"}
 
     try:
         return await asyncio.wait_for(perform_research(), timeout=20)
@@ -2566,6 +2576,7 @@ def _image_bytes_to_ascii(image_bytes: bytes, width: int = 44) -> str | None:
             return "."
         return " "
 
+    # Pillow returns a flat pixel sequence; regroup it into display rows.
     pixel_source = (
         image.get_flattened_data()
         if hasattr(image, "get_flattened_data")
@@ -2605,11 +2616,19 @@ async def generate_leet_art(theme: str | None = None):
                 ),
             )
             image_url = response.data[0].url
-            timeout = aiohttp.ClientTimeout(total=45)
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.get(image_url) as image_response:
-                    image_response.raise_for_status()
-                    art = _image_bytes_to_ascii(await image_response.read())
+            image_response = await safe_http.request(
+                "GET",
+                image_url,
+                allowed_hosts={"imgen.x.ai", "api.x.ai"},
+                expected_content_types=("image/png", "image/jpeg", "image/webp"),
+                max_response_bytes=10 * 1024 * 1024,
+                total_timeout=45,
+            )
+            if image_response.status != 200:
+                raise SafeHttpError(
+                    f"image provider returned {image_response.status}"
+                )
+            art = _image_bytes_to_ascii(image_response.body)
             if art:
                 return art, title.title()
         except Exception as error:
@@ -2769,17 +2788,18 @@ async def translate_text(text: str, target_language: str) -> str | None:
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
 
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                "https://api.x.ai/v1/chat/completions",
-                json=payload,
-                headers=headers,
-            ) as response:
-                if response.status != 200:
-                    print(f"[Translation] API error {response.status}: {await response.text()}")
-                    return None
-                data = await response.json()
-                return data["choices"][0]["message"]["content"].strip()
+        response, data = await safe_http.post_json(
+            "https://api.x.ai/v1/chat/completions",
+            allowed_hosts={"api.x.ai"},
+            json_body=payload,
+            headers=headers,
+            max_response_bytes=2 * 1024 * 1024,
+            total_timeout=20,
+        )
+        if response.status != 200:
+            print(f"[Translation] API error {response.status}: {response.text()[:500]}")
+            return None
+        return data["choices"][0]["message"]["content"].strip()
     except Exception as e:
         print(f"[Translation] Request error: {e}")
         return None
@@ -2916,18 +2936,21 @@ async def _decide_gif_reaction(message_text: str, reply: str) -> dict | None:
         "temperature": 0.3,
     }
     try:
-        async with aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(total=3)
-        ) as session:
-            async with session.post(
-                "https://api.x.ai/v1/chat/completions",
-                json=payload,
-                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-            ) as response:
-                if response.status != 200:
-                    return None
-                raw = (await response.json())["choices"][0]["message"]["content"]
-                decision = json.loads(raw)
+        response, data = await safe_http.post_json(
+            "https://api.x.ai/v1/chat/completions",
+            allowed_hosts={"api.x.ai"},
+            json_body=payload,
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            max_response_bytes=512 * 1024,
+            total_timeout=3,
+        )
+        if response.status != 200:
+            return None
+        raw = data["choices"][0]["message"]["content"]
+        decision = json.loads(raw)
         query = " ".join(str(decision.get("query", "")).split())[:80]
         mode = decision.get("mode")
         if decision.get("use") is not True or mode not in {"with_text", "gif_only"} or not query:
@@ -2950,13 +2973,16 @@ async def _search_klipy_gif_candidates(
     if not api_key:
         return []
     try:
-        async with session.get(
+        response, payload = await safe_http.get_json(
             f"https://api.klipy.com/api/v1/{api_key}/gifs/search",
+            allowed_hosts={"api.klipy.com"},
             params={"q": query, "limit": limit},
-        ) as response:
-            if response.status != 200:
-                return []
-            items = (await response.json()).get("data", {}).get("data", [])
+            max_response_bytes=2 * 1024 * 1024,
+            total_timeout=8,
+        )
+        if response.status != 200:
+            return []
+        items = payload.get("data", {}).get("data", [])
         choices = []
         seen_ids = set()
         for item in items[:limit]:
@@ -2994,8 +3020,9 @@ async def _search_giphy_gif_candidates(
     if not api_key:
         return []
     try:
-        async with session.get(
+        response, payload = await safe_http.get_json(
             "https://api.giphy.com/v1/gifs/search",
+            allowed_hosts={"api.giphy.com"},
             params={
                 "api_key": api_key,
                 "q": query,
@@ -3003,10 +3030,12 @@ async def _search_giphy_gif_candidates(
                 "offset": random.randint(0, 100),
                 "rating": "pg-13",
             },
-        ) as response:
-            if response.status != 200:
-                return []
-            items = (await response.json()).get("data", [])
+            max_response_bytes=2 * 1024 * 1024,
+            total_timeout=8,
+        )
+        if response.status != 200:
+            return []
+        items = payload.get("data", [])
         choices = []
         seen_ids = set()
         for item in items[:limit]:
@@ -3119,22 +3148,23 @@ async def _post_contextual_completion(
     timeout_seconds: int,
 ) -> str | None:
     try:
-        async with session.post(
+        response, data = await safe_http.post_json(
             "https://api.x.ai/v1/chat/completions",
-            json=payload,
+            allowed_hosts={"api.x.ai"},
+            json_body=payload,
             headers=headers,
-            timeout=aiohttp.ClientTimeout(total=timeout_seconds),
-        ) as response:
-            if response.status != 200:
-                error = (await response.text())[:500]
-                print(
-                    f"[Grim] {label} API error {response.status} "
-                    f"with model {payload.get('model')}: {error}"
-                )
-                return None
-            data = await response.json()
-            content = data["choices"][0]["message"]["content"]
-            return content.strip() if isinstance(content, str) and content.strip() else None
+            max_response_bytes=2 * 1024 * 1024,
+            total_timeout=timeout_seconds,
+        )
+        if response.status != 200:
+            error = response.text()[:500]
+            print(
+                f"[Grim] {label} API error {response.status} "
+                f"with model {payload.get('model')}: {error}"
+            )
+            return None
+        content = data["choices"][0]["message"]["content"]
+        return content.strip() if isinstance(content, str) and content.strip() else None
     except Exception as e:
         print(f"[Grim] {label} request error: {e}")
         return None
@@ -3934,19 +3964,24 @@ Today is {current_date}. Search the web for the LATEST news about "{broad_topic}
         return None, None
 
 async def validate_image_url(url: str) -> bool:
-    """Check if an image URL is valid and accessible."""
+    """Validate only image-provider URLs already approved by Grim."""
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.head(url, timeout=aiohttp.ClientTimeout(total=5), allow_redirects=True) as response:
-                if response.status == 200:
-                    content_type = response.headers.get('Content-Type', '')
-                    if 'image' in content_type:
-                        print(f"Image URL validated: {url}")
-                        return True
-                    else:
-                        print(f"URL is not an image (content-type: {content_type}): {url}")
-                else:
-                    print(f"Image URL returned status {response.status}: {url}")
+        response = await safe_http.request(
+            "HEAD",
+            url,
+            allowed_hosts={
+                "images.unsplash.com",
+                "images.pexels.com",
+                "source.unsplash.com",
+            },
+            expected_content_types=("image/*",),
+            max_response_bytes=1024,
+            total_timeout=5,
+        )
+        if response.status == 200:
+            print(f"Image URL validated: {url}")
+            return True
+        print(f"Image URL returned status {response.status}: {url}")
     except Exception as e:
         print(f"Image URL validation failed: {url} - {e}")
     return False
@@ -3961,16 +3996,19 @@ async def search_pexels_image(query: str) -> str:
         return None
     
     try:
-        async with aiohttp.ClientSession() as session:
-            headers = {"Authorization": pexels_api_key}
-            url = f"https://api.pexels.com/v1/search?query={query}&per_page=1&orientation=landscape"
-            async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    if data.get("photos") and len(data["photos"]) > 0:
-                        image_url = data["photos"][0]["src"]["large"]
-                        print(f"Found Pexels image for '{query}': {image_url}")
-                        return image_url
+        headers = {"Authorization": pexels_api_key}
+        response, data = await safe_http.get_json(
+            "https://api.pexels.com/v1/search",
+            allowed_hosts={"api.pexels.com"},
+            headers=headers,
+            params={"query": query, "per_page": 1, "orientation": "landscape"},
+            max_response_bytes=2 * 1024 * 1024,
+            total_timeout=10,
+        )
+        if response.status == 200 and data.get("photos"):
+            image_url = data["photos"][0]["src"]["large"]
+            print(f"Found Pexels image for '{query}': {image_url}")
+            return image_url
     except Exception as e:
         print(f"Pexels search failed: {e}")
     return None
@@ -3989,13 +4027,18 @@ async def search_unsplash_image(query: str) -> str:
         source_url = f"https://source.unsplash.com/800x450/?{encoded_query}&sig={random_sig}"
         
         # Validate the URL works
-        async with aiohttp.ClientSession() as session:
-            async with session.head(source_url, timeout=aiohttp.ClientTimeout(total=8), allow_redirects=True) as response:
-                if response.status == 200:
-                    # Get the final URL after redirect
-                    final_url = str(response.url)
-                    print(f"Found Unsplash image for '{query}': {final_url}")
-                    return final_url
+        response = await safe_http.request(
+            "HEAD",
+            source_url,
+            allowed_hosts={"source.unsplash.com", "images.unsplash.com"},
+            expected_content_types=("image/*",),
+            max_response_bytes=1024,
+            total_timeout=8,
+        )
+        if response.status == 200:
+            final_url = response.url
+            print(f"Found Unsplash image for '{query}': {final_url}")
+            return final_url
     except Exception as e:
         print(f"Unsplash search failed: {e}")
     return None
@@ -4530,12 +4573,16 @@ async def check_redditfeed():
             url = f"https://www.reddit.com/r/{subreddit}/hot.json?limit=50"
             headers = {"User-Agent": "GrimBot/1.0 (Discord bot; github.com/Deathxi/Grim)"}
 
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as resp:
-                    if resp.status != 200:
-                        print(f"[RedditFeed] r/{subreddit} returned {resp.status}")
-                        continue
-                    raw = await resp.json()
+            resp, raw = await safe_http.get_json(
+                url,
+                allowed_hosts={"www.reddit.com"},
+                headers=headers,
+                max_response_bytes=2 * 1024 * 1024,
+                total_timeout=10,
+            )
+            if resp.status != 200:
+                print(f"[RedditFeed] r/{subreddit} returned {resp.status}")
+                continue
 
             posts = raw.get("data", {}).get("children", [])
             image_posts = [
@@ -5913,6 +5960,158 @@ async def _clear_messages_before(channel, before, amount: int) -> tuple[list[dic
     ]
     return deleted_messages, len(failed)
 
+def _require_live_clear_smoke_test_config() -> int:
+    if os.environ.get("GRIM_LIVE_DISCORD_SMOKE_TEST") != "1":
+        raise RuntimeError(
+            "Live Discord smoke test is disabled; set "
+            "GRIM_LIVE_DISCORD_SMOKE_TEST=1 to enable it."
+        )
+    guild_id = os.environ.get("GRIM_LIVE_TEST_GUILD_ID", "").strip()
+    if not guild_id.isdigit():
+        raise RuntimeError(
+            "Live Discord smoke test requires a numeric "
+            "GRIM_LIVE_TEST_GUILD_ID."
+        )
+    return int(guild_id)
+
+async def run_live_clear_transcript_smoke_test(client) -> None:
+    """Exercise clear-log rendering against temporary live Discord channels."""
+    guild_id = _require_live_clear_smoke_test_config()
+    guild = client.get_guild(guild_id)
+    if guild is None:
+        guild = await client.fetch_guild(guild_id)
+
+    tag = f"grim-clear-smoke-{int(time.time())}-{os.getpid()}"
+    category = None
+    created_channels = []
+    try:
+        overwrites = {
+            guild.default_role: discord.PermissionOverwrite(view_channel=False),
+            guild.me: discord.PermissionOverwrite(
+                view_channel=True,
+                send_messages=True,
+                read_message_history=True,
+                manage_messages=True,
+                manage_channels=True,
+                create_public_threads=True,
+                send_messages_in_threads=True,
+            ),
+        }
+        category = await guild.create_category(
+            tag,
+            overwrites=overwrites,
+            reason="Temporary Grim clear transcript smoke test",
+        )
+        text_source = await guild.create_text_channel(
+            f"{tag}-text", category=category, reason=tag
+        )
+        staff_log = await guild.create_text_channel(
+            f"{tag}-staff-log", category=category, reason=tag
+        )
+        forum = await guild.create_forum(
+            f"{tag}-forum", category=category, reason=tag
+        )
+        created_channels.extend([text_source, staff_log, forum])
+        thread_result = await forum.create_thread(
+            name=f"{tag}-post",
+            content=f"{tag} forum starter",
+            reason=tag,
+        )
+        forum_post = thread_result.thread
+        created_channels.append(forum_post)
+
+        source_cases = [
+            (text_source, "text"),
+            (forum_post, "forum"),
+        ]
+        for source, source_kind in source_cases:
+            baseline_source_ids = {
+                message.id async for message in source.history(limit=10)
+            }
+            complete_texts = [
+                f"{tag} {source_kind} first " + ("a" * 900),
+                f"{tag} {source_kind} second **markdown** " + ("b" * 900),
+                f"{tag} {source_kind} third " + ("c" * 900),
+            ]
+            source_messages = [
+                await source.send(text, allowed_mentions=discord.AllowedMentions.none())
+                for text in complete_texts
+            ]
+            before = datetime.now(timezone.utc) + timedelta(seconds=1)
+            deleted, failed_count = await _clear_messages_before(
+                source, before, len(source_messages)
+            )
+            if failed_count:
+                raise AssertionError(
+                    f"{source_kind} source had {failed_count} deletion failures"
+                )
+
+            chunks = _format_clear_log_chunks(
+                deleted,
+                guild.me.mention,
+                source.mention,
+            )
+            sent_logs = [
+                await staff_log.send(
+                    chunk,
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+                for chunk in chunks
+            ]
+            fetched_logs = [
+                await staff_log.fetch_message(message.id) for message in sent_logs
+            ]
+            if len(fetched_logs) != len(chunks):
+                raise AssertionError("Discord did not preserve the staff-log message count")
+            rendered = "\n".join(message.content for message in fetched_logs)
+            if guild.me.mention not in rendered or source.mention not in rendered:
+                raise AssertionError("Moderator or source reference is missing")
+            resolved_member_ids = {
+                member.id for message in fetched_logs for member in message.mentions
+            }
+            resolved_channel_ids = {
+                channel.id
+                for message in fetched_logs
+                for channel in message.channel_mentions
+            }
+            if guild.me.id not in resolved_member_ids or source.id not in resolved_channel_ids:
+                raise AssertionError("Discord did not resolve moderator or source references")
+            positions = [rendered.find(discord.utils.escape_markdown(text)) for text in complete_texts]
+            if any(position < 0 for position in positions):
+                raise AssertionError("Staff log did not preserve complete source text")
+            if positions != sorted(positions):
+                raise AssertionError("Staff log entries are out of source order")
+            if any(message.content != chunk for message, chunk in zip(fetched_logs, chunks)):
+                raise AssertionError("Discord changed the rendered staff-log content")
+
+            unexpected_source = [
+                message
+                async for message in source.history(limit=10)
+                if message.id not in baseline_source_ids
+            ]
+            if unexpected_source:
+                raise AssertionError("Clear left source messages or source confirmations behind")
+    finally:
+        cleanup_errors = []
+        for channel in reversed(created_channels):
+            try:
+                await channel.delete(reason=f"Cleanup {tag}")
+            except discord.NotFound:
+                pass
+            except Exception as error:
+                cleanup_errors.append(f"{getattr(channel, 'id', 'unknown')}: {error}")
+        if category is not None:
+            try:
+                await category.delete(reason=f"Cleanup {tag}")
+            except discord.NotFound:
+                pass
+            except Exception as error:
+                cleanup_errors.append(f"{getattr(category, 'id', 'unknown')}: {error}")
+        if cleanup_errors:
+            raise AssertionError(
+                "Live smoke test cleanup failed: " + "; ".join(cleanup_errors)
+            )
+
 @bot.tree.command(name="clear", description="Delete recent messages from this channel or forum post")
 @discord.app_commands.default_permissions(manage_messages=True)
 @discord.app_commands.guild_only()
@@ -6278,23 +6477,28 @@ Give a concise TLDR. Cover:
 Write it like a quick briefing — direct, no fluff. Natural prose, no bullet points."""
 
     try:
-        async with aiohttp.ClientSession() as session:
-            payload = {
-                "model": "grok-3",
-                "messages": [
-                    {"role": "system", "content": "You summarize Discord conversations accurately and concisely. Name the participants. No filler, no markdown headers."},
-                    {"role": "user", "content": prompt}
-                ],
-                "max_tokens": 500,
-                "temperature": 0.4,
-            }
-            headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-            async with session.post("https://api.x.ai/v1/chat/completions", json=payload, headers=headers) as r:
-                if r.status != 200:
-                    await interaction.followup.send("API error — try again.", ephemeral=True)
-                    return
-                data = await r.json()
-                summary = data["choices"][0]["message"]["content"].strip()
+        payload = {
+            "model": "grok-3",
+            "messages": [
+                {"role": "system", "content": "You summarize Discord conversations accurately and concisely. Name the participants. No filler, no markdown headers."},
+                {"role": "user", "content": prompt}
+            ],
+            "max_tokens": 500,
+            "temperature": 0.4,
+        }
+        headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+        response, data = await safe_http.post_json(
+            "https://api.x.ai/v1/chat/completions",
+            allowed_hosts={"api.x.ai"},
+            json_body=payload,
+            headers=headers,
+            max_response_bytes=2 * 1024 * 1024,
+            total_timeout=20,
+        )
+        if response.status != 200:
+            await interaction.followup.send("API error — try again.", ephemeral=True)
+            return
+        summary = data["choices"][0]["message"]["content"].strip()
     except Exception as e:
         await interaction.followup.send("Something went wrong generating the summary.", ephemeral=True)
         return
@@ -7701,10 +7905,16 @@ async def _build_quote_file(
 ) -> discord.File:
     avatar_bytes = None
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(avatar_url, timeout=aiohttp.ClientTimeout(total=10)) as response:
-                if response.status == 200:
-                    avatar_bytes = await response.read()
+        response = await safe_http.request(
+            "GET",
+            str(avatar_url),
+            allowed_hosts={"cdn.discordapp.com", "media.discordapp.net"},
+            expected_content_types=("image/png", "image/jpeg", "image/webp"),
+            max_response_bytes=5 * 1024 * 1024,
+            total_timeout=10,
+        )
+        if response.status == 200:
+            avatar_bytes = response.body
     except Exception:
         pass
     card = await asyncio.to_thread(
