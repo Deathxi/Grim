@@ -14,3 +14,15 @@ ExecStart=/bin/bash /root/grim/run_grim_backup.sh
 TimeoutStartSec=15min
 StandardOutput=journal
 StandardError=journal
+
+# Hardening — still needs root to stop/start grim.service and read runtime data.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictRealtime=true
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6

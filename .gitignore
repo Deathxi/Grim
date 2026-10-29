@@ -50,3 +50,7 @@ version_count.txt
 chat_history.db
 *.db
 .env.*
+grim-backup.env
+**/passphrase
+*.pem
+*.key

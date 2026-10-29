@@ -10,15 +10,33 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Deploy to VPS
-        uses: appleboy/ssh-action@v1.2.0
+        # Pin appleboy/ssh-action@v1.2.0 by commit SHA (supply-chain hardening).
+        uses: appleboy/ssh-action@7eaf76671a0d7eec5d98ee897acda4f968735a17 # v1.2.0
         with:
           host: ${{ secrets.VPS_HOST }}
           username: root
           key: ${{ secrets.VPS_SSH_KEY }}
+          script_stop: true
           script: |
+            set -euo pipefail
             cd /root/grim
             git pull origin main
-            systemctl reset-failed grim
+            # Ensure runtime data path exists before the hardened unit binds it.
+            install -d -m 700 /root/.grim_data
+            # Refresh the unit file when present so sandbox directives stay current.
+            if [ -f /root/grim/systemd/grim.service ]; then
+              install -m 644 /root/grim/systemd/grim.service /etc/systemd/system/grim.service
+              systemctl daemon-reload
+            fi
+            pip3 install -q -r /root/grim/requirements.txt
+            systemctl reset-failed grim || true
             systemctl restart grim
             sleep 5
-            systemctl is-active grim && echo "Grim redeployed successfully" || echo "WARNING: Grim failed to start"
+            if systemctl is-active --quiet grim; then
+              echo "Grim redeployed successfully"
+            else
+              echo "ERROR: Grim failed to start after deploy" >&2
+              systemctl status grim --no-pager || true
+              journalctl -u grim -n 80 --no-pager || true
+              exit 1
+            fi

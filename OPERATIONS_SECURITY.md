@@ -63,10 +63,16 @@ Never elevate someone solely because a display name resembles the creator.
    backup keys, or changes to `.github/workflows`.
 3. Publish source changes from a trusted workstation/CI through the approved
    GitHub path (`main` → Actions deploy). Never commit from the live VPS.
-4. Wait for the deployment workflow to succeed, then check service logs and
-   the bot's normal startup behavior.
+4. Wait for the deployment workflow to succeed (it must fail if `grim` is not
+   active after restart), then check service logs and the bot's normal startup
+   behavior.
 5. Verify one low-risk command and one administrator-only command in a test
    server. Do not use the live bot to display credentials.
+
+On a fresh VPS, prefer `setup_vps.sh` (creates `/root/.grim_data` mode `0700`,
+writes `/root/grim/.env` mode `0600`, installs `systemd/grim.service` with
+sandbox directives). Re-running setup reuses an existing GitHub Actions deploy
+key instead of appending duplicates.
 
 ### Live-host write policy
 - The live VPS must **never** push Grim source, `version.txt`, or runtime JSON
