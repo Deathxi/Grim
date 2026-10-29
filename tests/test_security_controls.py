@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 import sqlite3
 import tempfile
 import threading
@@ -10,6 +11,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import main
+import safe_http
 
 
 class FakeResponse:
@@ -124,6 +126,155 @@ class SecurityControlsTests(unittest.TestCase):
         metadata = json.loads(metadata_json)
         self.assertEqual(metadata, {"status": 200})
         self.assertNotIn("must-not-appear", metadata_json)
+
+    def test_safe_http_rejects_non_https_credentials_and_unapproved_hosts(self):
+        for url in (
+            "http://api.x.ai/v1/responses",
+            "file:///etc/passwd",
+            "https://user:pass@api.x.ai/v1/responses",
+            "https://127.0.0.1/private",
+        ):
+            with self.assertRaises(safe_http.UnsafeDestinationError):
+                safe_http._validate_url(url, {"api.x.ai"})
+        self.assertEqual(
+            safe_http._validate_url(
+                "https://api.x.ai/v1/responses", {"api.x.ai"}
+            ),
+            ("api.x.ai", 443),
+        )
+
+    def test_safe_http_blocks_private_link_local_loopback_and_mixed_dns(self):
+        async def resolve(addresses):
+            records = [
+                (
+                    safe_http.socket.AF_INET6
+                    if ":" in address
+                    else safe_http.socket.AF_INET,
+                    safe_http.socket.SOCK_STREAM,
+                    safe_http.socket.IPPROTO_TCP,
+                    "",
+                    (address, 443),
+                )
+                for address in addresses
+            ]
+            loop = asyncio.get_running_loop()
+            with patch.object(loop, "getaddrinfo", AsyncMock(return_value=records)):
+                return await safe_http._resolve_public_addresses("provider.test", 443)
+
+        for address in ("127.0.0.1", "10.0.0.1", "169.254.169.254", "::1", "fe80::1"):
+            with self.subTest(address=address):
+                with self.assertRaises(safe_http.UnsafeDestinationError):
+                    asyncio.run(resolve([address]))
+        with self.assertRaises(safe_http.UnsafeDestinationError):
+            asyncio.run(resolve(["93.184.216.34", "10.0.0.1"]))
+        records = asyncio.run(resolve(["93.184.216.34"]))
+        self.assertEqual(records[0]["host"], "93.184.216.34")
+
+    def test_safe_http_rechecks_dns_for_each_request_to_resist_rebinding(self):
+        answers = [
+            [(
+                safe_http.socket.AF_INET,
+                safe_http.socket.SOCK_STREAM,
+                safe_http.socket.IPPROTO_TCP,
+                "",
+                ("93.184.216.34", 443),
+            )],
+            [(
+                safe_http.socket.AF_INET,
+                safe_http.socket.SOCK_STREAM,
+                safe_http.socket.IPPROTO_TCP,
+                "",
+                ("127.0.0.1", 443),
+            )],
+        ]
+
+        async def run():
+            loop = asyncio.get_running_loop()
+            with patch.object(
+                loop, "getaddrinfo", AsyncMock(side_effect=answers)
+            ) as resolver:
+                await safe_http._resolve_public_addresses("provider.test", 443)
+                with self.assertRaises(safe_http.UnsafeDestinationError):
+                    await safe_http._resolve_public_addresses("provider.test", 443)
+                self.assertEqual(resolver.await_count, 2)
+
+        asyncio.run(run())
+
+    def test_safe_http_revalidates_redirect_destination(self):
+        class RedirectResponse:
+            status = 302
+            headers = {"Location": "https://127.0.0.1/internal"}
+            url = "https://public.test/start"
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return None
+
+        class FakeSession:
+            def __init__(self, **kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return None
+
+            def request(self, *args, **kwargs):
+                return RedirectResponse()
+
+        async def run():
+            client = safe_http.SafeHttpClient()
+            with (
+                patch.object(
+                    safe_http,
+                    "_resolve_public_addresses",
+                    AsyncMock(side_effect=[
+                        [{
+                            "hostname": "public.test",
+                            "host": "93.184.216.34",
+                            "port": 443,
+                            "family": safe_http.socket.AF_INET,
+                            "proto": safe_http.socket.IPPROTO_TCP,
+                            "flags": safe_http.socket.AI_NUMERICHOST,
+                        }],
+                        safe_http.UnsafeDestinationError(
+                            "hostname resolved to a non-public address"
+                        ),
+                    ]),
+                ),
+                patch.object(safe_http.aiohttp, "ClientSession", FakeSession),
+                patch.object(safe_http.aiohttp, "TCPConnector", lambda **kwargs: object()),
+            ):
+                with self.assertRaises(safe_http.UnsafeDestinationError):
+                    await client.request(
+                        "GET",
+                        "https://public.test/start",
+                        allowed_hosts={"public.test", "127.0.0.1"},
+                        expected_content_types=("application/json",),
+                    )
+
+        asyncio.run(run())
+
+    def test_safe_http_enforces_content_type_and_streamed_size_caps(self):
+        safe_http._validate_content_type(
+            "application/json; charset=utf-8", ("application/json",)
+        )
+        with self.assertRaises(safe_http.UnexpectedContentTypeError):
+            safe_http._validate_content_type("text/html", ("application/json",))
+        body = bytearray()
+        safe_http._append_bounded(body, b"1234", 5)
+        with self.assertRaises(safe_http.ResponseTooLargeError):
+            safe_http._append_bounded(body, b"67", 5)
+
+    def test_safe_http_uses_consistent_bounded_timeouts(self):
+        client = safe_http.SafeHttpClient(total_timeout=12, connect_timeout=4)
+        self.assertEqual(client.total_timeout, 12)
+        self.assertEqual(client.connect_timeout, 4)
+        self.assertEqual(client.max_redirects, 3)
+        self.assertEqual(client.max_response_bytes, 2 * 1024 * 1024)
 
     def test_security_audit_accepts_discord_messages(self):
         message = SimpleNamespace(
@@ -337,19 +488,6 @@ class SecurityControlsTests(unittest.TestCase):
         self.assertFalse(allowed)
         self.assertTrue(event.response.messages)
 
-    def test_clear_requires_manage_messages(self):
-        event = interaction()
-        self.assertFalse(
-            asyncio.run(main.require_permission(event, "manage_messages", "clear"))
-        )
-        self.assertTrue(event.response.messages)
-
-    def test_clear_allows_manage_messages(self):
-        event = interaction(manage_messages=True)
-        self.assertTrue(
-            asyncio.run(main.require_permission(event, "manage_messages", "clear"))
-        )
-
     def test_moderator_can_manage_channels_but_not_administrator_controls(self):
         moderator = interaction(manage_channels=True)
         self.assertTrue(
@@ -363,6 +501,19 @@ class SecurityControlsTests(unittest.TestCase):
                     moderator, "administrator", "moderation_add", administrator=True
                 )
             )
+        )
+
+    def test_clear_requires_manage_messages(self):
+        event = interaction()
+        self.assertFalse(
+            asyncio.run(main.require_permission(event, "manage_messages", "clear"))
+        )
+        self.assertTrue(event.response.messages)
+
+    def test_clear_allows_manage_messages(self):
+        event = interaction(manage_messages=True)
+        self.assertTrue(
+            asyncio.run(main.require_permission(event, "manage_messages", "clear"))
         )
 
     def test_creator_identity_does_not_bypass_discord_admin_permission(self):
@@ -459,9 +610,9 @@ class SecurityControlsTests(unittest.TestCase):
         slash_names = {command.name for command in main.bot.tree.get_commands()}
         prefix_names = {command.name for command in main.bot.commands}
         self.assertIn("server", slash_names)
-        self.assertIn("clear", slash_names)
         self.assertIn("members", slash_names)
         self.assertIn("memberlog", slash_names)
+        self.assertIn("clear", slash_names)
         self.assertIn("language", slash_names)
         self.assertIn("grim_language", slash_names)
         self.assertIn("quote", prefix_names)
@@ -1041,6 +1192,18 @@ class SecurityControlsTests(unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_live_clear_smoke_test_requires_explicit_configuration(self):
+        with patch.dict(main.os.environ, {}, clear=True):
+            with self.assertRaisesRegex(RuntimeError, "disabled"):
+                main._require_live_clear_smoke_test_config()
+        with patch.dict(
+            main.os.environ,
+            {"GRIM_LIVE_DISCORD_SMOKE_TEST": "1"},
+            clear=True,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "GRIM_LIVE_TEST_GUILD_ID"):
+                main._require_live_clear_smoke_test_config()
+
     def test_extensionless_discord_image_uses_content_type(self):
         attachment = SimpleNamespace(
             url="https://cdn.discordapp.com/attachments/123/456/upload",
@@ -1413,6 +1576,41 @@ class SecurityControlsTests(unittest.TestCase):
 
         self.assertEqual(sent_embeds, [])
         self.assertNotIn("50", main.member_log_channels)
+
+
+@unittest.skipUnless(
+    os.environ.get("GRIM_LIVE_DISCORD_SMOKE_TEST") == "1"
+    and os.environ.get("GRIM_LIVE_TEST_GUILD_ID", "").isdigit(),
+    "Set GRIM_LIVE_DISCORD_SMOKE_TEST=1 and GRIM_LIVE_TEST_GUILD_ID to run",
+)
+class LiveDiscordClearTranscriptSmokeTest(unittest.IsolatedAsyncioTestCase):
+    async def test_discord_preserves_clear_transcripts(self):
+        token = os.environ.get("DISCORD_TOKEN")
+        if not token:
+            self.fail("DISCORD_TOKEN is required for the live Discord smoke test")
+
+        intents = main.discord.Intents.none()
+        intents.guilds = True
+        client = main.discord.Client(intents=intents)
+        smoke_task = None
+
+        @client.event
+        async def on_ready():
+            nonlocal smoke_task
+            if smoke_task is not None:
+                return
+
+            async def run_and_close():
+                try:
+                    await main.run_live_clear_transcript_smoke_test(client)
+                finally:
+                    await client.close()
+
+            smoke_task = asyncio.create_task(run_and_close())
+
+        await client.start(token)
+        self.assertIsNotNone(smoke_task)
+        await smoke_task
 
 
 if __name__ == "__main__":
