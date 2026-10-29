@@ -50,6 +50,14 @@ Never elevate someone solely because a display name resembles the creator.
 - Management actions and user-triggered external requests are rate limited.
   If a legitimate action is blocked, wait a minute; do not work around the
   limit by using alternate accounts or commands.
+- Provider HTTP requests use the centralized safe transport. It permits HTTPS
+  only, resolves and rejects any private, loopback, link-local, reserved, or
+  otherwise non-public address, pins the validated DNS result for the
+  connection, and repeats validation for every redirect. Responses have strict
+  content-type, byte-size, redirect-count, and timeout limits.
+- Arbitrary URL fetching remains disabled. Do not add a command or autonomous
+  tool that accepts unrestricted URLs until a separate security review approves
+  its host policy, response types, limits, and audit behavior.
 - Use `/members` only in staff contexts. It is an ephemeral, dismissible
   view of member identity and lifecycle data, not a conversation archive.
   Discord does not always provide a verified reason for departure, so treat a
