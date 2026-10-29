@@ -11,7 +11,9 @@ WorkingDirectory=/root/grim
 EnvironmentFile=/root/grim/.env
 Environment=PYTHONUNBUFFERED=1
 UMask=0077
-ExecStart=/usr/bin/python3 /root/grim/main.py
+# argv0 must be the venv interpreter so site-packages resolve (system
+# /usr/bin/python3 does not see /root/grim/venv).
+ExecStart=/root/grim/venv/bin/python3 /root/grim/main.py
 Restart=always
 RestartSec=10
 StandardOutput=journal

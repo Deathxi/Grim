@@ -31,10 +31,14 @@ fi
 # Runtime data outside the git checkout (survives deploys).
 install -d -m 700 /root/.grim_data
 
-# ── Python dependencies ────────────────────────────────
+# ── Python dependencies (venv — matches grim.service ExecStart) ──
 echo ""
-echo "[3/7] Installing Python packages..."
-PIP_NO_INPUT=1 pip3 install -q -r /root/grim/requirements.txt
+echo "[3/7] Installing Python packages into /root/grim/venv..."
+if [ ! -x /root/grim/venv/bin/python3 ]; then
+    python3 -m venv /root/grim/venv
+fi
+PIP_NO_INPUT=1 /root/grim/venv/bin/pip install -q -U pip
+PIP_NO_INPUT=1 /root/grim/venv/bin/pip install -q -r /root/grim/requirements.txt
 
 # ── Secrets / environment file ─────────────────────────
 echo ""
