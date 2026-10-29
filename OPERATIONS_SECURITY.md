@@ -70,10 +70,12 @@ Never elevate someone solely because a display name resembles the creator.
    server. Do not use the live bot to display credentials.
 
 On a fresh VPS, prefer `setup_vps.sh` (creates `/root/.grim_data` mode `0700`,
-writes `/root/grim/.env` mode `0600`, installs `systemd/grim.service` with
-sandbox directives). Re-running setup reuses an existing GitHub Actions deploy
-key instead of appending duplicates. Deploy keys are installed with
-`no-pty` / no-forwarding options; the private key is not printed unless
+writes `/root/grim/.env` mode `0600`, creates `/root/grim/venv`, installs
+`systemd/grim.service` with sandbox directives). `ExecStart` must use the
+venv interpreter (`/root/grim/venv/bin/python3`); deploys install requirements
+into that venv, not system `pip3`. Re-running setup reuses an existing GitHub
+Actions deploy key instead of appending duplicates. Deploy keys are installed
+with `no-pty` / no-forwarding options; the private key is not printed unless
 `CONFIRM=print-key` is set for `scripts/print-deploy-key.sh`.
 
 Also set GitHub Actions secret `VPS_SSH_FINGERPRINT` to the Droplet host-key
