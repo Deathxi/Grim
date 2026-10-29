@@ -36,15 +36,21 @@ echo ""
 read -p "  DISCORD_TOKEN: " DISCORD_TOKEN
 read -p "  XAI_API_KEY: " XAI_API_KEY
 read -p "  X_BEARER_TOKEN: " X_BEARER_TOKEN
-read -p "  GITHUB_PERSONAL_ACCESS_TOKEN: " GITHUB_PAT
+echo "  GITHUB_PERSONAL_ACCESS_TOKEN is optional and must be READ-ONLY"
+echo "  (Contents: Read on Deathxi/Grim for /grim_updates patch notes)."
+echo "  Do NOT use a token that can push source, and never reuse the backup token."
+read -p "  GITHUB_PERSONAL_ACCESS_TOKEN (optional): " GITHUB_PAT
 read -p "  OPENSEA_API_KEY (optional, press Enter to skip): " OPENSEA_KEY
 
 cat > /root/grim/.env <<EOF
 DISCORD_TOKEN=$DISCORD_TOKEN
 XAI_API_KEY=$XAI_API_KEY
 X_BEARER_TOKEN=$X_BEARER_TOKEN
-GITHUB_PERSONAL_ACCESS_TOKEN=$GITHUB_PAT
 EOF
+
+if [ -n "$GITHUB_PAT" ]; then
+    echo "GITHUB_PERSONAL_ACCESS_TOKEN=$GITHUB_PAT" >> /root/grim/.env
+fi
 
 if [ -n "$OPENSEA_KEY" ]; then
     echo "OPENSEA_API_KEY=$OPENSEA_KEY" >> /root/grim/.env

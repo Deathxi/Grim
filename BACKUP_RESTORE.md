@@ -1,10 +1,13 @@
 # Grim backup and restore
 
-Grim's learned server context, chat history, digests, schedules, and settings
-are stored in `/root/.grim_data` on the VPS. The weekly backup service creates
-an OpenSSL-encrypted archive and uploads it to the separate private repository
-configured in `/etc/grim-backup.env`. The repository token is used only by the
-backup service; it is not the token Grim uses for code deployment.
+Grim's learned server context, chat history, digests, schedules, member history,
+and settings are stored in `/root/.grim_data` on the VPS. That directory is the
+runtime source of truth; the live host never pushes it (or bot source) into
+`Deathxi/Grim`. The weekly backup service creates an OpenSSL-encrypted archive
+and uploads it to the separate private repository configured in
+`/etc/grim-backup.env`. The repository token is used only by the backup
+service; it must not be the optional read-only token Grim may use for
+`/grim_updates` commit metadata, and it is never used for code deployment.
 
 The service keeps the newest eight archives in `archives/`. It briefly stops
 Grim before reading the data directory and restarts it afterward, including

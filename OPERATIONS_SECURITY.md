@@ -61,15 +61,23 @@ Never elevate someone solely because a display name resembles the creator.
 1. Run the focused tests and Python compilation check before publishing.
 2. Review the diff for accidental runtime data, tokens, private chat content,
    backup keys, or changes to `.github/workflows`.
-3. Publish source changes through the approved GitHub deployment path.
+3. Publish source changes from a trusted workstation/CI through the approved
+   GitHub path (`main` → Actions deploy). Never commit from the live VPS.
 4. Wait for the deployment workflow to succeed, then check service logs and
    the bot's normal startup behavior.
 5. Verify one low-risk command and one administrator-only command in a test
    server. Do not use the live bot to display credentials.
 
-The live VPS must not write source changes back to GitHub. Runtime state is
-preserved through its data directory and encrypted backups, avoiding
-deployment loops and unnecessary token exposure.
+### Live-host write policy
+- The live VPS must **never** push Grim source, `version.txt`, or runtime JSON
+  into `Deathxi/Grim`. There is no supported source-sync script; do not recreate
+  `push_to_github.py` or Contents:Write auto-sync from `main.py`.
+- Runtime state lives only under `~/.grim_data` and is recovered via encrypted
+  backups to the separate private backup repository (see `BACKUP_RESTORE.md`).
+- Optional `GITHUB_PERSONAL_ACCESS_TOKEN` in `/root/grim/.env` is **read-only**
+  for `/grim_updates` commit metadata. Prefer a fine-grained token with
+  Contents: Read on `Deathxi/Grim` only. Never put the backup-repo write token
+  in Grim's `.env`.
 
 ## 5. Credential rotation
 
