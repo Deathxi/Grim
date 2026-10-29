@@ -26,7 +26,7 @@ except ImportError as exc:
     # Install via requirements.txt / setup_vps.sh / deploy workflow instead.
     raise SystemExit(
         "Pillow is required but not installed. "
-        "Run: pip3 install -r requirements.txt"
+        "Install into the VPS venv: /root/grim/venv/bin/pip install -r requirements.txt"
     ) from exc
 from zoneinfo import ZoneInfo
 
