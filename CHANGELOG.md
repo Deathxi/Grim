@@ -7,6 +7,7 @@ All notable changes to this project are documented here, organized by month.
 ## October 2026
 
 ### Changed
+- Second VPS hardening pass: drop public `journalctl` on failed deploy, checkout read-only in `grim.service`, hard-reset deploy with hooks disabled, SSH host fingerprint secret, restricted `authorized_keys`, backup unit refresh, restore-work umask docs, backup history retention note.
 - Hardened VPS deploy/setup paths: silent secret prompts, `~/.grim_data` mode `0700`, pinned `appleboy/ssh-action` SHA, deploy fails closed if Grim does not restart, systemd unit hardening, no runtime auto-pip for Pillow.
 - Polished the post-Replit tree: removed unused helpers/imports (legacy `generate_reply`, unused news image search/fallback path, dead language/URL helpers), renamed the project package off `repl-nix-workspace`, dropped unused `python-dotenv`, and pointed missing-key messages at the VPS `.env`.
 - Hardened the post-Replit path: accurate Privacy Policy for `~/.grim_data` / member history / encrypted backups; deleted Replit-era source sync (`push_to_github.py`, startup Contents:Write sync, GitHub state pull); VPS keeps read-only optional GitHub access for patch notes only; Discord and xAI terms unchanged.

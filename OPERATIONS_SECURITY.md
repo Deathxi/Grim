@@ -72,7 +72,13 @@ Never elevate someone solely because a display name resembles the creator.
 On a fresh VPS, prefer `setup_vps.sh` (creates `/root/.grim_data` mode `0700`,
 writes `/root/grim/.env` mode `0600`, installs `systemd/grim.service` with
 sandbox directives). Re-running setup reuses an existing GitHub Actions deploy
-key instead of appending duplicates.
+key instead of appending duplicates. Deploy keys are installed with
+`no-pty` / no-forwarding options; the private key is not printed unless
+`CONFIRM=print-key` is set for `scripts/print-deploy-key.sh`.
+
+Also set GitHub Actions secret `VPS_SSH_FINGERPRINT` to the Droplet host-key
+fingerprint (`ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub`) so deploys
+reject MITM. Leave it empty only until that value is recorded.
 
 ### Live-host write policy
 - The live VPS must **never** push Grim source, `version.txt`, or runtime JSON

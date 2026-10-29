@@ -54,3 +54,7 @@ grim-backup.env
 **/passphrase
 *.pem
 *.key
+*.enc
+github_deploy
+github_deploy.pub
+authorized_keys
