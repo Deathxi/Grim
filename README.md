@@ -2,6 +2,8 @@
 
 Discord Bot for Seclude & Affiliates
 
+Maintained with [Cursor Agent](https://cursor.com) as Death's development scribe.
+
 ## Terms of Service
 
 By inviting or interacting with **Grim** (the Discord bot for Seclude & Affiliates), you agree to these terms. Last updated: November 27, 2025.
@@ -27,7 +29,7 @@ By inviting or interacting with **Grim** (the Discord bot for Seclude & Affiliat
 By proceeding, you enter the pact. Enter if you dare. 🌑
 
 ## Privacy Policy
-Last updated: November 27, 2025
+Last updated: October 29, 2026
 
 Grim respects your shadows. Here’s exactly what we do (and don’t do) with your data.
 
@@ -42,8 +44,8 @@ Grim respects your shadows. Here’s exactly what we do (and don’t do) with yo
 - xAI sees your prompt (that’s how Grok works) and follows their own [privacy policy](https://x.ai/legal/privacy-policy).
 
 ### 3. Storage & Deletion
-- In-memory only (gone when the bot restarts — Replit sleeps = data dies).
-- We do not write anything to permanent databases or logs.
+- Conversation prompts used for AI replies are handled in-memory for that request and are not kept as a chat archive after the reply.
+- We do not write message contents to a permanent conversation database or chat log.
 - Want everything erased right now? Kick the bot or DM `!gdpr delete` and we forget you instantly.
 
 ### 4. Sharing

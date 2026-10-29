@@ -5344,7 +5344,8 @@ async def push_to_github_on_startup():
         "main.py": "main.py",
         "CHANGELOG.md": "CHANGELOG.md",
         ".gitignore": ".gitignore",
-        "replit.md": "replit.md",
+        "AGENTS.md": "AGENTS.md",
+        "README.md": "README.md",
         "version.txt": "version.txt",
     }
     # Only push updates_data.json if it actually has channel config — never push empty data

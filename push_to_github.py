@@ -12,8 +12,8 @@ FILES = [
     "main.py",
     "CHANGELOG.md",
     ".gitignore",
-    ".replit",
-    "replit.md",
+    "AGENTS.md",
+    "README.md",
     "requirements.txt",
     "pyproject.toml",
     "uv.lock",
@@ -68,7 +68,7 @@ def store_hash(h):
 if not TOKEN:
     raise SystemExit(
         "Missing GRIM_GITHUB_SYNC_TOKEN. Add a GitHub classic personal access token "
-        "with the repo scope through Replit Secrets."
+        "with the repo scope via the VPS .env or your local environment."
     )
 else:
     # Collect files that exist locally
