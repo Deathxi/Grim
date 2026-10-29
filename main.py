@@ -21,16 +21,13 @@ from openai import OpenAI
 import tweepy
 try:
     from PIL import Image, ImageDraw, ImageFont, ImageOps
-except ImportError:
-    subprocess.run(
-        [
-            sys.executable, "-m", "pip", "install",
-            "--quiet", "--disable-pip-version-check", "--break-system-packages",
-            "Pillow==12.3.0",
-        ],
-        check=True,
-    )
-    from PIL import Image, ImageDraw, ImageFont, ImageOps
+except ImportError as exc:
+    # Never auto-pip at runtime (supply-chain + break-system-packages risk).
+    # Install via requirements.txt / setup_vps.sh / deploy workflow instead.
+    raise SystemExit(
+        "Pillow is required but not installed. "
+        "Run: pip3 install -r requirements.txt"
+    ) from exc
 from zoneinfo import ZoneInfo
 
 BOT_START_TIME = None
@@ -124,7 +121,11 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 # Data directory outside git workspace — survives deployments without being overwritten by git pull
 DATA_DIR = os.path.expanduser("~/.grim_data")
-os.makedirs(DATA_DIR, exist_ok=True)
+os.makedirs(DATA_DIR, mode=0o700, exist_ok=True)
+try:
+    os.chmod(DATA_DIR, 0o700)
+except OSError:
+    pass
 
 def _data_path(filename):
     return os.path.join(DATA_DIR, filename)
