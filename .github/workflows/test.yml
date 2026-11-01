@@ -33,5 +33,5 @@ jobs:
       - name: Compile and unit tests
         run: |
           python -m py_compile main.py backup_grim_data.py
-          python -m unittest tests.test_security_controls
+          python -m unittest tests.test_security_controls tests.test_trivia
           bash scripts/post-merge.sh
