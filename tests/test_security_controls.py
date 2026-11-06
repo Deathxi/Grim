@@ -908,7 +908,9 @@ class SecurityControlsTests(unittest.TestCase):
         self.assertEqual(embeds[0].description, "first transcript")
         self.assertEqual(embeds[1].description, "continued transcript")
         self.assertEqual(embeds[0].color.value, 0x121212)
-        self.assertIn("Powered by", embeds[0].footer.text)
+        self.assertEqual(embeds[0].footer.text, main.xsi_footer())
+        self.assertEqual(embeds[1].footer.text, main.xsi_footer())
+        self.assertTrue(embeds[0].footer.text.startswith("Powered by XSI"))
 
     def test_ascii_gallery_titles_match_compact_curated_art(self):
         self.assertGreaterEqual(len(main.ASCII_ART_GALLERY), 8)
@@ -1332,6 +1334,7 @@ class SecurityControlsTests(unittest.TestCase):
         )
         self.assertIn("PST", fields["✧ Established"].value)
         self.assertIn("server info", embed.footer.text)
+        self.assertTrue(embed.footer.text.startswith("Powered by XSI"))
 
     def test_server_dossier_refreshes_a_missing_description(self):
         class FakeBot:
