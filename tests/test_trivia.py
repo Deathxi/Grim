@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, PropertyMock, patch
 
 import main
 
@@ -70,6 +70,7 @@ def sample_questions():
             "prompt": f"Question {index} about oceans?",
             "choices": [f"Answer {index}-{choice}" for choice in range(4)],
             "answer": 0,
+            "note": f"Note {index} explains the right answer.",
         }
         for index in range(main.TRIVIA_QUESTION_COUNT)
     ]
@@ -77,6 +78,23 @@ def sample_questions():
 
 def sample_payload():
     return json.dumps({"questions": sample_questions()})
+
+
+def _following_block(source: str, signature: str) -> str:
+    start = source.index(signature)
+    lines = source[start:].splitlines()
+    indent = len(lines[0]) - len(lines[0].lstrip())
+    block = [lines[0]]
+    for line in lines[1:]:
+        if not line.strip():
+            block.append(line)
+            continue
+        line_indent = len(line) - len(line.lstrip())
+        stripped = line.lstrip()
+        if line_indent <= indent and stripped.startswith(("def ", "async def ", "class ", "@")):
+            break
+        block.append(line)
+    return "\n".join(block)
 
 
 class _TriviaHttpResponse:
@@ -185,6 +203,14 @@ class TriviaTests(unittest.TestCase):
         mention[0]["choices"][0] = "hello @everyone"
         empty_prompt = sample_questions()
         empty_prompt[0]["prompt"] = "???"
+        missing_note = sample_questions()
+        del missing_note[0]["note"]
+        blank_note = sample_questions()
+        blank_note[0]["note"] = "   "
+        long_note = sample_questions()
+        long_note[0]["note"] = "n" * 161
+        mention_note = sample_questions()
+        mention_note[0]["note"] = "see @everyone"
 
         for raw in (
             "",
@@ -198,6 +224,10 @@ class TriviaTests(unittest.TestCase):
             json.dumps({"questions": long_choice}),
             json.dumps({"questions": mention}),
             json.dumps({"questions": empty_prompt}),
+            json.dumps({"questions": missing_note}),
+            json.dumps({"questions": blank_note}),
+            json.dumps({"questions": long_note}),
+            json.dumps({"questions": mention_note}),
             json.dumps({"questions": []}),
             "{",
         ):
@@ -210,6 +240,7 @@ class TriviaTests(unittest.TestCase):
         shuffled = main.shuffle_trivia_question(question, rng)
         self.assertEqual(shuffled["choices"][shuffled["answer"]], "Answer 0-2")
         self.assertEqual(sorted(shuffled["choices"]), sorted(question["choices"]))
+        self.assertEqual(shuffled["note"], "Note 0 explains the right answer.")
         self.assertEqual(question["answer"], 2)
 
     def test_score_text_reports_correct_out_of_ten(self):
@@ -336,9 +367,12 @@ class TriviaTests(unittest.TestCase):
             self.assertIsNone(content)
             self.assertTrue(kwargs["ephemeral"])
             self.assertTrue(kwargs["wait"])
-            self.assertEqual(kwargs["embed"].title, "Trivia · oceans")
-            self.assertIn("Question 1 of 10", kwargs["embed"].description)
+            self.assertEqual(kwargs["embed"].title, "01  /  10  ·  oceans")
+            self.assertEqual(kwargs["embed"].description, "Question 0 about oceans?")
+            self.assertNotIn("Note 0", kwargs["embed"].description)
+            self.assertEqual(kwargs["embed"].footer.text, main.xsi_footer())
             self.assertNotIn("/10", kwargs["embed"].description)
+            self.assertEqual(kwargs["embed"].color.value, 0x121212)
             view = kwargs["view"]
             self.assertIsInstance(view, main.TriviaView)
             self.assertEqual(view.actor_id, "10")
@@ -363,7 +397,15 @@ class TriviaTests(unittest.TestCase):
             await first.callback(owner)
             self.assertEqual(view.correct, 1)
             self.assertEqual(view.index, 1)
-            self.assertIn("Question 2 of 10", owner.response.edits[-1]["embed"].description)
+            self.assertEqual(
+                owner.response.edits[-1]["embed"].title, "02  /  10  ·  oceans"
+            )
+            self.assertEqual(
+                owner.response.edits[-1]["embed"].description, "Question 1 about oceans?"
+            )
+            self.assertEqual(
+                owner.response.edits[-1]["embed"].footer.text, main.xsi_footer()
+            )
             self.assertNotIn("/10", owner.response.edits[-1]["embed"].description)
             self.assertIs(owner.response.edits[-1]["view"], view)
             self.assertEqual(len(view.children), 5)
@@ -376,8 +418,24 @@ class TriviaTests(unittest.TestCase):
                 await view.children[1].callback(owner)
 
             final = owner.response.edits[-1]
-            self.assertIn("**7/10**", final["embed"].description)
-            self.assertIn("Noct", final["embed"].footer.text)
+            description = final["embed"].description
+            self.assertEqual(final["embed"].title, "DEBRIEF  ·  oceans")
+            self.assertIn("**7/10**", description)
+            self.assertIn("3 missed", description)
+            self.assertIn("70%", description)
+            self.assertIn("You walked out mostly intact.", description)
+            self.assertIn("**08**  Question 7 about oceans?", description)
+            self.assertIn("You    Answer 7-1", description)
+            self.assertIn("Right  Answer 7-0", description)
+            self.assertIn("Note 7 explains the right answer.", description)
+            self.assertIn("**10**  Question 9 about oceans?", description)
+            self.assertNotIn("Question 0 about oceans?", description)
+            self.assertEqual(
+                description.rstrip().splitlines()[-1],
+                main.trivia_lore_line("oceans", 7),
+            )
+            self.assertEqual(final["embed"].footer.text, main.xsi_footer())
+            self.assertTrue(final["embed"].footer.text.startswith("Powered by XSI"))
             self.assertIsNone(final["view"])
             self.assertTrue(view.finished_round)
             self.assertEqual(view.children, [])
@@ -408,7 +466,8 @@ class TriviaTests(unittest.TestCase):
             expired.message.edit.assert_awaited_once()
             timeout_edit = expired.message.edit.await_args.kwargs
             self.assertIsNone(timeout_edit["view"])
-            self.assertIn("expired", timeout_edit["embed"].footer.text)
+            self.assertIn("Expired.", timeout_edit["embed"].description)
+            self.assertEqual(timeout_edit["embed"].footer.text, main.xsi_footer())
             self.assertNotIn("/10", timeout_edit["embed"].description)
 
             await expired.on_timeout()
@@ -428,6 +487,7 @@ class TriviaTests(unittest.TestCase):
             await view.choose(event, 0)
             self.assertEqual(view.correct, 0)
             self.assertEqual(view.index, 0)
+            self.assertEqual(view.picks, [])
             self.assertFalse(view.finished_round)
             self.assertEqual(event.response.deferred, [{}])
             self.assertEqual(view.children[0].label, "Answer 0-0")
@@ -442,6 +502,192 @@ class TriviaTests(unittest.TestCase):
             await view.choose(event, 0)
             self.assertEqual(view.correct, 0)
             self.assertEqual(view.index, 0)
+            self.assertEqual(view.picks, [])
             self.assertEqual(event.response.deferred, [{}])
+
+        asyncio.run(run())
+
+    def test_debrief_lists_every_miss_with_feedback_and_lore(self):
+        questions = sample_questions()
+        picks = [0, 0, 1, 0, 2, 0, 0, 3, 0, 1]
+        text = main.build_trivia_debrief_text("oceans", questions, picks)
+        embed = main.build_trivia_debrief_embed("oceans", questions, picks)
+
+        self.assertIn("**6/10**", text)
+        self.assertIn("4 missed", text)
+        self.assertIn("60%", text)
+        self.assertIn("Half-remembered. The void is amused.", text)
+        self.assertIn("**03**  Question 2 about oceans?", text)
+        self.assertIn("You    Answer 2-1", text)
+        self.assertIn("Right  Answer 2-0", text)
+        self.assertIn("Note 2 explains the right answer.", text)
+        self.assertIn("**05**  Question 4 about oceans?", text)
+        self.assertIn("You    Answer 4-2", text)
+        self.assertIn("Right  Answer 4-0", text)
+        self.assertIn("**08**  Question 7 about oceans?", text)
+        self.assertIn("You    Answer 7-3", text)
+        self.assertIn("**10**  Question 9 about oceans?", text)
+        self.assertIn("You    Answer 9-1", text)
+        self.assertNotIn("Question 0 about oceans?", text)
+        self.assertNotIn("Question 1 about oceans?", text)
+        self.assertEqual(text.rstrip().splitlines()[-1], main.trivia_lore_line("oceans", 6))
+        self.assertEqual(embed.description, text)
+        self.assertEqual(embed.title, "DEBRIEF  ·  oceans")
+        self.assertEqual(embed.footer.text, main.xsi_footer())
+        self.assertLessEqual(len(embed.description), 4096)
+
+    def test_perfect_debrief_has_score_and_lore_without_misses(self):
+        text = main.build_trivia_debrief_text("oceans", sample_questions(), [0] * 10)
+
+        self.assertIn("**10/10**", text)
+        self.assertIn("0 missed", text)
+        self.assertIn("100%", text)
+        self.assertIn("Perfect. The dark kept nothing from you.", text)
+        self.assertIn("Nothing missed.", text)
+        self.assertNotIn("\nYou    ", text)
+        self.assertEqual(text.rstrip().splitlines()[-1], main.trivia_lore_line("oceans", 10))
+
+    def test_full_length_debrief_stays_inside_one_box(self):
+        questions = [
+            {
+                "prompt": f"Q{index} " + ("p" * 290),
+                "choices": [f"C{index}{choice} " + ("c" * 70) for choice in range(4)],
+                "answer": 0,
+                "note": f"N{index} " + ("n" * 150),
+            }
+            for index in range(main.TRIVIA_QUESTION_COUNT)
+        ]
+        text = main.build_trivia_debrief_text("deep sea", questions, [1] * 10)
+
+        self.assertLessEqual(len(text), 4096)
+        self.assertIn("**0/10**", text)
+        self.assertIn("10 missed", text)
+        self.assertEqual(text.rstrip().splitlines()[-1], main.trivia_lore_line("deep sea", 0))
+        for index in range(10):
+            self.assertIn(f"**{index + 1:02d}**", text)
+            self.assertIn(f"You    C{index}1 ", text)
+            self.assertIn(f"Right  C{index}0 ", text)
+            self.assertIn(f"N{index} ", text)
+
+    def test_xsi_footer_matches_the_historical_credit_line(self):
+        self.assertEqual(main.XSI_CREDIT, "Powered by XSI")
+        self.assertEqual(main.xsi_footer(), f"Powered by XSI • {main.VERSION}")
+        self.assertEqual(
+            main.xsi_footer("KLIPY", "unique in this server"),
+            f"Powered by XSI • KLIPY • unique in this server • {main.VERSION}",
+        )
+        source = Path(main.__file__).read_text()
+        self.assertNotIn("Powered by {BOT_NAME}", source)
+        self.assertNotIn("Powered by Grim", source)
+
+        outage = main._build_outage_report_embed({
+            "kind": "process",
+            "started_at": 1_700_000_000,
+            "recovered_at": 1_700_000_120,
+            "duration": 120,
+        })
+        self.assertEqual(outage.footer.text, main.xsi_footer())
+
+        for signature in (
+            "async def howdie(",
+            "async def gif(",
+            "def question_embed(",
+            "def build_trivia_debrief_embed(",
+            "async def eightball(",
+            "async def truth(",
+            "async def summon(",
+            "async def inspire(",
+            "async def summarize(",
+            "async def roast(",
+            "async def ascii_art(",
+            "async def ghostwrite(",
+            "async def check_livetweets(",
+            "async def check_ghostwrite_live(",
+            "async def check_newsfeed(",
+            "async def check_nftwatch(",
+            "async def check_redditfeed(",
+            "def build_server_info_embed(",
+            "def _build_clear_log_embeds(",
+            "def _build_outage_report_embed(",
+            "async def newsfeed_status(",
+            "async def redditfeed_status(",
+            "async def grim_status(",
+            "async def newsfeed(",
+            "async def nftwatch(",
+            "async def redditfeed(",
+            "async def stats(",
+            "async def haiku(",
+            "async def grim_translate(",
+            "async def grim_updates(",
+            "async def on_member_join(",
+        ):
+            self.assertIn("xsi_footer(", _following_block(source, signature), signature)
+
+    def test_intellect_command_boxes_credit_xsi(self):
+        async def run():
+            member = SimpleNamespace(
+                display_name="Noct",
+                display_avatar=SimpleNamespace(url="https://cdn.example/a.png"),
+            )
+            grim_user = SimpleNamespace(
+                display_avatar=SimpleNamespace(url="https://cdn.example/grim.png")
+            )
+            with (
+                patch.object(main.discord.Client, "user", new_callable=PropertyMock, return_value=grim_user),
+                patch.object(main, "require_external_action", AsyncMock(return_value=True)),
+            ):
+                cases = (
+                    ("howdie", (member,), "generate_death_scene", "a dark end"),
+                    ("eightball", ("will it rain?",), "generate_8ball_response", "No."),
+                    ("truth", ("what is time?",), "generate_unfiltered_truth", "A cut."),
+                    ("summon", (), "generate_summon_message", "I am here."),
+                    ("inspire", (), "generate_inspiration", "A true story."),
+                    ("roast", (member,), "generate_roast", "Uncalled for."),
+                )
+                for command_name, args, generator_name, result in cases:
+                    event = trivia_interaction()
+                    with patch.object(main, generator_name, AsyncMock(return_value=result)):
+                        await getattr(main, command_name).callback(event, *args)
+                    embed = event.followup.sent[-1][1]["embed"]
+                    self.assertEqual(embed.footer.text, main.xsi_footer(), command_name)
+                    self.assertTrue(embed.footer.text.startswith("Powered by XSI"))
+
+                event = trivia_interaction()
+                with patch.object(main, "generate_leet_art", AsyncMock(return_value=("art", "Cat"))):
+                    await main.ascii_art.callback(event, "cat")
+                self.assertEqual(
+                    event.followup.sent[-1][1]["embed"].footer.text, main.xsi_footer()
+                )
+
+                event = trivia_interaction()
+                with (
+                    patch.object(main, "fetch_user_tweets", AsyncMock(return_value=({"id": "1"}, None))),
+                    patch.object(main, "generate_ghostwrite", AsyncMock(return_value="draft line")),
+                ):
+                    await main.ghostwrite.callback(event, "noct", "oceans")
+                self.assertEqual(
+                    event.followup.sent[-1][1]["embed"].footer.text, main.xsi_footer()
+                )
+
+                event = trivia_interaction()
+                with (
+                    patch.dict(main.os.environ, {"XAI_API_KEY": "test-key"}),
+                    patch.object(main, "normalize_language", return_value="es"),
+                    patch.object(main, "language_label", return_value="Spanish"),
+                    patch.object(main, "translate_text", AsyncMock(return_value="hola")),
+                ):
+                    await main.grim_translate.callback(event, "spanish", "hello")
+                self.assertEqual(
+                    event.followup.sent[-1][1]["embed"].footer.text, main.xsi_footer()
+                )
+
+                ctx = SimpleNamespace(
+                    guild=SimpleNamespace(id=50),
+                    author=SimpleNamespace(id=10),
+                    send=AsyncMock(),
+                )
+                with patch.object(main, "generate_haiku", AsyncMock(return_value="one quiet line")):
+                    await main.haiku.callback(ctx)
+                self.assertEqual(ctx.send.await_args.kwargs["embed"].footer.text, main.xsi_footer())
 
         asyncio.run(run())
