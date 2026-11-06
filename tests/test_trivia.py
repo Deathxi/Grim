@@ -80,6 +80,24 @@ def sample_payload():
     return json.dumps({"questions": sample_questions()})
 
 
+def leaked_atheon_question():
+    return {
+        "prompt": "What raid features the final boss Atheon in the Vault of Glass?",
+        "choices": ["Vault of Glass", "Crota's End", "King's Fall", "Last Wish"],
+        "answer": 0,
+        "note": "Atheon is the final boss there.",
+    }
+
+
+def clean_vault_question():
+    return {
+        "prompt": "Who is the final boss of the Vault of Glass raid?",
+        "choices": ["Atheon", "Crota", "Oryx", "Rhulk"],
+        "answer": 0,
+        "note": "Atheon waits at the end of the Vault of Glass.",
+    }
+
+
 def _following_block(source: str, signature: str) -> str:
     start = source.index(signature)
     lines = source[start:].splitlines()
@@ -113,12 +131,15 @@ class _TriviaHttpResponse:
 
 
 class _TriviaHttpSession:
-    def __init__(self, response):
+    def __init__(self, response, responses=None):
         self.response = response
+        self._queue = list(responses) if responses is not None else None
         self.calls = []
 
     def post(self, url, json=None, headers=None):
         self.calls.append({"url": url, "json": json, "headers": headers})
+        if self._queue is not None:
+            return self._queue.pop(0)
         return self.response
 
     async def __aenter__(self):
@@ -264,6 +285,7 @@ class TriviaTests(unittest.TestCase):
                 )
 
             self.assertEqual(len(result), 10)
+            self.assertEqual(len(session.calls), 1)
             self.assertEqual(session.calls[0]["url"], "https://api.x.ai/v1/chat/completions")
             payload = session.calls[0]["json"]
             self.assertEqual(payload["model"], "grok-3")
@@ -299,6 +321,123 @@ class TriviaTests(unittest.TestCase):
                     patch.object(main.aiohttp, "ClientSession", side_effect=AssertionError("network")):
                 self.assertIsNone(await main.generate_trivia_round("oceans"))
             self.assertIsNone(await main.generate_trivia_round("@@@"))
+
+        asyncio.run(run())
+
+    def test_leaked_trivia_answer_is_rejected_and_a_clean_question_passes(self):
+        leaked = leaked_atheon_question()
+        self.assertEqual(
+            main.trivia_question_problem(leaked),
+            "answer leaked in the prompt",
+        )
+        aliased = dict(leaked, choices=["the Vault of Glass", "Crota's End", "King's Fall", "Last Wish"])
+        self.assertEqual(
+            main.trivia_question_problem(aliased),
+            "answer leaked in the prompt",
+        )
+        restated = "Atheon is the final boss of the Vault of Glass."
+        self.assertEqual(
+            main.trivia_question_problem({
+                "prompt": restated,
+                "choices": [restated, "Crota's End", "King's Fall", "Last Wish"],
+                "answer": 0,
+                "note": "Same fact twice.",
+            }),
+            "answer leaked in the prompt",
+        )
+        self.assertEqual(
+            main.trivia_question_problem({
+                "prompt": "Who is the final boss of the Vault of Glass raid?",
+                "choices": ["Atheon", "the Atheon", "Oryx", "Rhulk"],
+                "answer": 0,
+                "note": "The names are not distinct.",
+            }),
+            "choices are not distinct",
+        )
+        self.assertIsNone(main.trivia_question_problem(clean_vault_question()))
+        self.assertIsNone(main.trivia_question_problem({
+            "prompt": "Who is the final boss of the Vault of Glass raid?",
+            "choices": ["Atheon", "Crota", "Vault of Glass", "Rhulk"],
+            "answer": 0,
+            "note": "The raid name is only a distractor.",
+        }))
+        self.assertIsNone(main.trivia_question_problem({
+            "prompt": "Which raid ends with Crota?",
+            "choices": ["Crota's End", "King's Fall", "Last Wish", "Garden of Salvation"],
+            "answer": 0,
+            "note": "The name is close, but it is not written in the stem.",
+        }))
+        self.assertIsNone(main.trivia_question_problem({
+            "prompt": "Which ocean is the largest?",
+            "choices": ["Pacific Ocean", "Atlantic Ocean", "Indian Ocean", "Arctic Ocean"],
+            "answer": 0,
+            "note": "Pacific is the piece the stem does not give away.",
+        }))
+        for question in sample_questions():
+            self.assertIsNone(main.trivia_question_problem(question))
+
+    def test_clean_generation_makes_no_extra_model_call_and_a_leak_is_dropped(self):
+        async def run():
+            clean = {
+                "choices": [{"message": {"content": sample_payload()}}],
+            }
+            session = _TriviaHttpSession(_TriviaHttpResponse(200, clean))
+            with patch.dict(main.os.environ, {"XAI_API_KEY": "test-key", "XAI_TEXT_MODEL": "grok-3"}), \
+                    patch.object(main.aiohttp, "ClientSession", return_value=session):
+                result = await main.generate_trivia_round("oceans")
+            self.assertEqual(len(result), 10)
+            self.assertEqual(len(session.calls), 1)
+
+            with patch.object(main.aiohttp, "ClientSession", side_effect=AssertionError("extra model call")):
+                kept = await main.screen_generated_output(
+                    "The vault keeps its own hours.",
+                    user_text="what time is it",
+                    label="reply",
+                )
+            self.assertEqual(kept, "The vault keeps its own hours.")
+            self.assertEqual(
+                main.generated_output_problem(
+                    "The moon is made of cheese and nothing else.",
+                    user_text="The moon is made of cheese and nothing else.",
+                ),
+                "repeats the user text",
+            )
+            self.assertEqual(
+                main.generated_output_problem("Paris is the capital. Paris is not the capital."),
+                "self-contradiction",
+            )
+            self.assertIsNone(main.generated_output_problem(
+                "The sky is blue. The ocean is not blue.",
+            ))
+
+            broken = sample_questions()
+            broken[4] = leaked_atheon_question()
+            still_bad = json.dumps({"questions": [leaked_atheon_question()]})
+            leaked_session = _TriviaHttpSession(None, responses=[
+                _TriviaHttpResponse(200, {"choices": [{"message": {"content": json.dumps({"questions": broken})}}]}),
+                _TriviaHttpResponse(200, {"choices": [{"message": {"content": still_bad}}]}),
+            ])
+            with patch.dict(main.os.environ, {"XAI_API_KEY": "test-key"}), \
+                    patch.object(main.aiohttp, "ClientSession", return_value=leaked_session):
+                self.assertIsNone(await main.generate_trivia_round("Destiny 2"))
+            self.assertEqual(len(leaked_session.calls), 2)
+            revision = leaked_session.calls[1]["json"]["messages"][1]["content"]
+            self.assertIn("Vault of Glass", revision)
+            self.assertNotIn("Question 0 about oceans?", revision)
+
+            repaired = json.dumps({"questions": [clean_vault_question()]})
+            repaired_session = _TriviaHttpSession(None, responses=[
+                _TriviaHttpResponse(200, {"choices": [{"message": {"content": json.dumps({"questions": broken})}}]}),
+                _TriviaHttpResponse(200, {"choices": [{"message": {"content": repaired}}]}),
+            ])
+            with patch.dict(main.os.environ, {"XAI_API_KEY": "test-key"}), \
+                    patch.object(main.aiohttp, "ClientSession", return_value=repaired_session):
+                repaired_round = await main.generate_trivia_round("Destiny 2")
+            self.assertEqual(len(repaired_round), 10)
+            self.assertEqual(len(repaired_session.calls), 2)
+            prompts = [question["prompt"] for question in repaired_round]
+            self.assertIn(clean_vault_question()["prompt"], prompts)
+            self.assertNotIn(leaked_atheon_question()["prompt"], prompts)
 
         asyncio.run(run())
 

@@ -11,6 +11,7 @@ All notable changes to this project are documented here, organized by month.
 
 ### Changed
 - `/trivia` questions sit in a tighter monochrome box. The round ends on one debrief: the score, each miss with the pick and the right answer, a short note on that answer, and a Grim lore line. Intellect and data boxes use the historical credit line, now reading `Powered by XSI`.
+- Generated replies are checked locally before Grim shows them: a leaked trivia answer, empty or duplicate choices, a reply that repeats the user as fact, or an obvious self-contradiction. A clean reply makes no extra model call. A failure gets one xAI rewrite of that item, then it is dropped if it still fails.
 
 ---
 
