@@ -2437,6 +2437,103 @@ async def screen_generated_output(
         return None
     return revised
 
+_FACT_REQUEST_PHRASES = (
+    "is this true",
+    "is that true",
+    "is it true",
+    "is this accurate",
+    "is that accurate",
+    "is it accurate",
+    "is this right",
+    "is that right",
+    "is it right",
+    "is this correct",
+    "is that correct",
+    "is it correct",
+    "fact check",
+    "factcheck",
+    "verify this",
+    "verify that",
+    "look it up",
+    "look this up",
+    "look that up",
+    "lookup",
+)
+_FACT_QUESTION_STARTS = frozenset({
+    "what", "who", "when", "where", "why", "how", "which",
+    "is", "are", "was", "were", "did", "does", "do", "can", "could",
+    "tell", "explain", "define",
+})
+_CONVERSATION_SMALL_TALK = frozenset({
+    "you", "u", "ya", "your", "youre", "yours", "yourself", "good", "ok",
+    "okay", "lol", "lmao", "lmfao", "haha", "hahaha", "heh", "bro", "dude",
+    "man", "fam", "same", "mood", "real", "based", "damn", "damnn", "nice",
+    "true", "facts", "accurate", "exactly", "precisely", "yup", "yeah",
+    "yes", "yah", "nah", "nope", "wow", "whoa", "oof", "rip", "gg", "valid",
+    "felt", "much", "hard", "agree", "agreed", "fax", "periodt", "though",
+    "tho", "anyway", "still", "then", "there", "here", "serious", "kidding",
+    "joking", "mad", "sad", "happy", "fine", "alright", "right", "correct",
+    "sure", "totally", "absolutely", "literally", "actually", "just", "like",
+    "really", "very", "super", "hella", "thanks", "thank", "appreciate",
+    "love", "loved", "liked", "cool", "sick", "wild", "crazy", "insane",
+    "please", "pls", "grim", "bot", "know", "think", "mean", "feel", "want",
+    "see", "hear", "believe", "kidding", "go", "continue", "more", "again",
+    "bestie", "bruh", "imo", "tbh", "idk", "so",
+})
+
+def _conversation_text(text: str | None) -> str:
+    cleaned = re.sub(r"<@!?\d+>", " ", str(text or ""))
+    cleaned = re.sub(r"(?<!\w)@grim\b", " ", cleaned, flags=re.IGNORECASE)
+    return " ".join(cleaned.split())
+
+def mention_asks_for_facts(text: str | None) -> bool:
+    """True when an @Grim mention asks for accuracy or information.
+
+    A compliment, reaction, or follow-up is conversation unless it asks a
+    question with a concrete topic, or it uses a verification, lookup, or
+    trivia phrase. "Damn accurate" stays conversation. "is this true" does not.
+    """
+    visible = _conversation_text(text)
+    if not visible:
+        return False
+    folded = _output_match_text(visible)
+    if not folded:
+        return False
+    if _contains_research_phrase(folded, _FACT_REQUEST_PHRASES):
+        return True
+    if re.search(r"(?<!\w)(?:trivia|quiz)(?!\w)", folded):
+        return True
+    tokens = folded.split()
+    question_shaped = "?" in visible or tokens[0] in _FACT_QUESTION_STARTS
+    if not question_shaped:
+        return False
+    return any(
+        token not in _OUTPUT_STOPWORDS
+        and token not in _CONVERSATION_SMALL_TALK
+        and len(token) >= 2
+        for token in tokens
+    )
+
+async def screen_conversational_reply(
+    text: str | None,
+    *,
+    user_text: str | None = None,
+) -> str | None:
+    """Send casual talk unchanged. Fact-check an information ask once."""
+    if not isinstance(text, str) or not text.strip():
+        return None
+    if not mention_asks_for_facts(user_text):
+        return text
+    problem = generated_output_problem(text, user_text=user_text)
+    if problem is None:
+        return text
+    print(f"[Output] reply failed a local check: {problem}")
+    revised = await _revise_generated_output(text, problem, user_text=user_text)
+    if revised and generated_output_problem(revised, user_text=user_text) is None:
+        return revised
+    print("[Output] reply kept after a failed rewrite")
+    return text
+
 async def generate_haiku():
     client = get_grok_client()
     if not client:
@@ -3644,10 +3741,9 @@ async def generate_contextual_reply(message: discord.Message) -> str | None:
             "</LIVE_RESEARCH_STATUS>"
         )
     if live_direct_reply:
-        return await screen_generated_output(
+        return await screen_conversational_reply(
             live_direct_reply,
             user_text=current_text,
-            label="reply",
         )
 
     system_prompt = f"""You are Grim — a permanent member of {server_name}. Not a tool people summon, not a bot with a gimmick. You've been here, watching the channels, reading what people say, picking up the dynamics. When someone @s you, they're talking to someone who's been paying attention.
@@ -3736,10 +3832,9 @@ Finish a substantive answer instead of cutting it off for Discord's message limi
                 ),
                 timeout=26,
             )
-            return await screen_generated_output(
+            return await screen_conversational_reply(
                 reply,
                 user_text=current_text,
-                label="reply",
             )
     except Exception as e:
         print(f"[Grim] Contextual reply error: {e}")
