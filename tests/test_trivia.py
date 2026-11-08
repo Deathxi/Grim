@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import json
 import tempfile
 import unittest
@@ -597,15 +598,56 @@ class TriviaTests(unittest.TestCase):
 
     def test_chat_voice_varies_and_does_not_require_a_checklist(self):
         voice = main.GRIM_CHAT_VOICE
+        self.assertIn("Think about the situation before speaking", voice)
+        self.assertIn("how to be useful", voice)
+        self.assertIn("Restate only when teaching", voice)
+        self.assertIn("just presence", voice)
+        self.assertIn("not a checklist", voice)
         self.assertIn("Vary the length and the shape", voice)
-        self.assertIn("sometimes neither", voice)
-        self.assertIn("This is not a checklist", voice)
-        self.assertIn("Do not default to restating", voice)
+        self.assertIn("X-post cadence", voice)
+        self.assertIn("generic AI reply", voice)
+        self.assertIn("stacked polished clauses", voice)
+        self.assertIn("engagement-bait", voice)
+        self.assertIn("vessel and a guide", voice)
+        self.assertIn("Science and spirit", voice)
         self.assertIn('No "great point" padding', voice)
         self.assertNotIn("Do not open by restating the user's line", voice)
+        self.assertNotIn("Do not restate the person's point as the whole answer", voice)
         self.assertNotIn("Add substance they did not already give", voice)
         self.assertNotIn("Take a stance. Agree, disagree, or qualify.", voice)
         self.assertIn(voice, main.grim_chime_system("Seclude"))
+        for spoken in (
+            main.OUTPUT_REVISION_SYSTEM,
+            main.TRIVIA_SYSTEM_PROMPT,
+            main.TRIVIA_REVISION_SYSTEM,
+            main.with_grim_voice("notes"),
+        ):
+            self.assertIn("Restate only when teaching", spoken)
+        for name in (
+            "generate_haiku",
+            "generate_death_scene",
+            "generate_8ball_response",
+            "generate_unfiltered_truth",
+            "generate_summon_message",
+            "generate_inspiration",
+            "generate_roast",
+            "translate_text",
+            "generate_ghostwrite",
+            "generate_ghostwrite_live",
+            "generate_news_update",
+            "summarize",
+            "generate_contextual_reply",
+        ):
+            target = getattr(main, name)
+            if not inspect.isfunction(target):
+                target = target.callback
+            self.assertIn("with_grim_voice", inspect.getsource(target))
+        for relay in ("check_livetweets", "check_redditfeed", "check_nftwatch"):
+            target = getattr(main, relay)
+            target = getattr(target, "coro", target)
+            source = inspect.getsource(target)
+            self.assertNotIn("with_grim_voice", source)
+            self.assertNotIn("GRIM_CHAT_VOICE", source)
         self.assertEqual(
             main.MENTION_FAILURE_LINES["timeout"],
             "Traffic went AWOL. Call it again.",
@@ -650,9 +692,10 @@ class TriviaTests(unittest.TestCase):
                     patch.object(main, "_complete_contextual_reply", model):
                 await main.generate_contextual_reply(message)
             prompt = model.await_args.args[2]
-            self.assertIn("This is not a checklist", prompt)
-            self.assertIn("sometimes neither", prompt)
-            self.assertIn("Do not default to restating", prompt)
+            self.assertIn("Think about the situation before speaking", prompt)
+            self.assertIn("not a checklist", prompt)
+            self.assertIn("Restate only when teaching", prompt)
+            self.assertIn("X-post cadence", prompt)
             self.assertIn('No "great point" padding', prompt)
             self.assertNotIn("Do not make every reply avoid a restatement, add a reference, and take a stance.\nAdd substance", prompt)
 

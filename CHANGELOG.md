@@ -14,7 +14,7 @@ All notable changes to this project are documented here, organized by month.
 - Generated replies are checked locally before Grim shows them: a leaked trivia answer, empty or duplicate choices, a reply that repeats the user as fact, or an obvious self-contradiction. A clean reply makes no extra model call. A failure gets one xAI rewrite of that item, then it is dropped if it still fails.
 - Casual @Grim talk is exempt from that check. Compliments, reactions, and follow-ups that are not asking for facts are sent as written. A factual question, lookup, "is this true", or trivia-like mention is still checked locally, rewritten once if it fails, and kept as the original reply if the rewrite also fails.
 - A conversational @mention still gets the model reply when the shared external AI limit is full, and it never receives a failure line. A real miss on an accuracy ask says which miss it was: traffic, a crowded channel, or an empty model reply.
-- Chat replies stay human and uneven. Length and shape vary. A reference or a stance is optional, not a checklist. Grim does not default to restating the user and does not pad with "great point." The same note is on proactive chimes.
+- Before Grim speaks, the prompt asks what the moment entails and how to be useful. The answer can be empathy, a direct answer, humor, transparency, teaching, or presence. A restate is for teaching. The shape still varies, and it is not a checklist or an X-post cadence. That note is on chat, commands, trivia notes, news, ghostwritten tweets, and chimes. Relayed livetweets, Reddit, and NFT posts are unchanged.
 
 ---
 
