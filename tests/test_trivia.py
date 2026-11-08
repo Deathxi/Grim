@@ -441,6 +441,51 @@ class TriviaTests(unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_casual_compliment_is_not_dropped_and_a_fact_question_is_checked(self):
+        async def run():
+            compliment = "Damn accurate @Grim"
+            self.assertFalse(main.mention_asks_for_facts(compliment))
+            self.assertFalse(main.mention_asks_for_facts("how are you"))
+            self.assertFalse(main.mention_asks_for_facts("why though"))
+            reply = "Paris is the capital. Paris is not the capital."
+            with patch.object(
+                main.aiohttp, "ClientSession", side_effect=AssertionError("extra model call")
+            ):
+                kept = await main.screen_conversational_reply(
+                    reply,
+                    user_text=compliment,
+                )
+            self.assertEqual(kept, reply)
+
+            question = "is this true"
+            self.assertTrue(main.mention_asks_for_facts(question))
+            self.assertTrue(main.mention_asks_for_facts(
+                "who is the final boss of the vault of glass"
+            ))
+            clean = "Atheon is the final boss of that raid."
+            with patch.object(
+                main.aiohttp, "ClientSession", side_effect=AssertionError("extra model call")
+            ):
+                kept_clean = await main.screen_conversational_reply(
+                    clean,
+                    user_text=question,
+                )
+            self.assertEqual(kept_clean, clean)
+
+            session = _TriviaHttpSession(_TriviaHttpResponse(200, {
+                "choices": [{"message": {"content": reply}}],
+            }))
+            with patch.dict(main.os.environ, {"XAI_API_KEY": "test-key"}), \
+                    patch.object(main.aiohttp, "ClientSession", return_value=session):
+                kept_bad = await main.screen_conversational_reply(
+                    reply,
+                    user_text="who is the final boss of the vault of glass?",
+                )
+            self.assertEqual(kept_bad, reply)
+            self.assertEqual(len(session.calls), 1)
+
+        asyncio.run(run())
+
     def test_trivia_rejects_bad_subject_and_missing_key_without_a_quiz(self):
         async def run():
             event = trivia_interaction()
