@@ -1,4 +1,5 @@
 import os
+from typing import NamedTuple
 import random
 import json
 import asyncio
@@ -2534,6 +2535,27 @@ async def screen_conversational_reply(
     print("[Output] reply kept after a failed rewrite")
     return text
 
+def user_denies_prior_failure(text: str | None) -> bool:
+    """True when the member is rejecting Grim's last failure claim."""
+    folded = _output_match_text(_conversation_text(text))
+    if not folded.startswith("no"):
+        return False
+    return "didn t" in folded or "did not" in folded or "didnt" in folded
+
+MENTION_FAILURE_LINES = {
+    "timeout": "Traffic went AWOL. Call it again.",
+    "rate_limit": "Channel's crowded. Hold, then call.",
+    "empty": "No lock. One more.",
+}
+
+def mention_failure_text(user_text: str | None, failure: str | None = None) -> str | None:
+    """Line for a real mention failure. Conversation never gets one."""
+    if not failure or user_denies_prior_failure(user_text):
+        return None
+    if not mention_asks_for_facts(user_text):
+        return None
+    return MENTION_FAILURE_LINES.get(failure)
+
 async def generate_haiku():
     client = get_grok_client()
     if not client:
@@ -3364,6 +3386,16 @@ def _attachment_media_kind(attachment) -> str | None:
         return "video"
     return None
 
+class MentionTransportError(Exception):
+    """The mention call timed out, dropped, or never returned a reply."""
+
+def _mention_transport_error(error: Exception) -> bool:
+    if isinstance(error, MentionTransportError):
+        return True
+    if isinstance(error, (asyncio.TimeoutError, TimeoutError, ConnectionError, OSError)):
+        return True
+    return isinstance(error, aiohttp.ClientError)
+
 async def _post_contextual_completion(
     session: aiohttp.ClientSession,
     headers: dict,
@@ -3384,13 +3416,15 @@ async def _post_contextual_completion(
                     f"[Grim] {label} API error {response.status} "
                     f"with model {payload.get('model')}: {error}"
                 )
-                return None
+                raise MentionTransportError(label)
             data = await response.json()
             content = data["choices"][0]["message"]["content"]
             return content.strip() if isinstance(content, str) and content.strip() else None
     except Exception as e:
-        print(f"[Grim] {label} request error: {e}")
-        return None
+        print(f"[Grim] {label} request error: {type(e).__name__}")
+        if _mention_transport_error(e):
+            raise MentionTransportError(label) from e
+        raise
 
 async def _complete_contextual_reply(
     session: aiohttp.ClientSession,
@@ -3418,9 +3452,12 @@ async def _complete_contextual_reply(
         **base_payload,
         "model": os.environ.get("XAI_VISION_MODEL", "grok-4.3"),
     }
-    result = await _post_contextual_completion(
-        session, headers, vision_payload, "vision", 10
-    )
+    try:
+        result = await _post_contextual_completion(
+            session, headers, vision_payload, "vision", 10
+        )
+    except MentionTransportError:
+        result = None
     if result:
         return result
 
@@ -3458,19 +3495,28 @@ async def _resolve_replied_message(message) -> tuple[discord.Message | None, boo
         print(f"[Grim] Could not fetch replied message: {e}")
         return None, True
 
-async def generate_contextual_reply(message: discord.Message) -> str | None:
+class ContextualReply(NamedTuple):
+    text: str | None = None
+    failure: str | None = None
+
+async def generate_contextual_reply(message: discord.Message) -> ContextualReply:
     """Full contextual @Grim mention handler — pulls channel history, injects server context and memories."""
     api_key = os.environ.get("XAI_API_KEY")
     if not api_key:
-        return None
+        return ContextualReply()
 
     guild = message.guild
     channel = message.channel
     author = message.author
-    if not _rate_limit_allows_actor(
+    mentioned_text = message.content.replace(
+        f"<@{bot.user.id}>", ""
+    ).replace(f"<@!{bot.user.id}>", "").strip()
+    conversational = not mention_asks_for_facts(mentioned_text)
+    within_limit = _rate_limit_allows_actor(
         str(guild.id) if guild else "dm", str(author.id), "external_ai"
-    ):
-        return None
+    )
+    if not within_limit and not conversational:
+        return ContextualReply(failure="rate_limit")
 
     guild_id = str(guild.id) if guild else "dm"
     channel_id = str(channel.id)
@@ -3741,10 +3787,13 @@ async def generate_contextual_reply(message: discord.Message) -> str | None:
             "</LIVE_RESEARCH_STATUS>"
         )
     if live_direct_reply:
-        return await screen_conversational_reply(
+        screened = await screen_conversational_reply(
             live_direct_reply,
             user_text=current_text,
         )
+        if screened:
+            return ContextualReply(text=screened)
+        return ContextualReply(failure=None if conversational else "empty")
 
     system_prompt = f"""You are Grim — a permanent member of {server_name}. Not a tool people summon, not a bot with a gimmick. You've been here, watching the channels, reading what people say, picking up the dynamics. When someone @s you, they're talking to someone who's been paying attention.
 
@@ -3832,13 +3881,18 @@ Finish a substantive answer instead of cutting it off for Discord's message limi
                 ),
                 timeout=26,
             )
-            return await screen_conversational_reply(
+            screened = await screen_conversational_reply(
                 reply,
                 user_text=current_text,
             )
+            if screened:
+                return ContextualReply(text=screened)
+            return ContextualReply(failure=None if conversational else "empty")
     except Exception as e:
-        print(f"[Grim] Contextual reply error: {e}")
-        return None
+        print(f"[Grim] Contextual reply error: {type(e).__name__}")
+        if not conversational and _mention_transport_error(e):
+            return ContextualReply(failure="timeout")
+        return ContextualReply()
 
 # ── Proactive chiming ──────────────────────────────────────────────────────────
 # Grim watches every channel and occasionally chimes in when it has something
@@ -8841,7 +8895,8 @@ async def on_message(message):
         _channel_msg_counter[str(message.channel.id)] = 0
         _channel_last_grim_post[str(message.channel.id)] = time.time()
         async with message.channel.typing():
-            reply = await generate_contextual_reply(message)
+            result = await generate_contextual_reply(message)
+        reply = result.text
         if reply:
             reply_chunks = _split_discord_content(reply)
             try:
@@ -8910,7 +8965,11 @@ async def on_message(message):
                         sent.created_at.timestamp(), is_grim=True
                     )
         else:
-            await message.reply("something went sideways on my end, try again", mention_author=False)
+            failure = mention_failure_text(message.content, result.failure)
+            if failure:
+                await message.reply(failure, mention_author=False)
+            else:
+                print("[Grim] Conversational mention produced no reply")
     elif not is_prefix_command:
         # Not @mentioned — let Grim decide if it wants to drop in
         await maybe_chime_in(message)

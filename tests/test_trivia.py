@@ -486,6 +486,115 @@ class TriviaTests(unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_mention_failures_use_their_own_lines_and_conversation_does_not(self):
+        store = (
+            "store all this info for the future. I will need a reference "
+            "for when I start investing into pure localization"
+        )
+        denial = "no it didn’t"
+        fact = "is this true"
+        lines = {
+            "timeout": "Traffic went AWOL. Call it again.",
+            "rate_limit": "Channel's crowded. Hold, then call.",
+            "empty": "No lock. One more.",
+        }
+        self.assertEqual(main.MENTION_FAILURE_LINES, lines)
+        for failure, line in lines.items():
+            self.assertEqual(main.mention_failure_text(fact, failure), line)
+            self.assertIsNone(main.mention_failure_text(store, failure))
+            self.assertIsNone(main.mention_failure_text(denial, failure))
+            self.assertIsNone(main.mention_failure_text("Damn accurate", failure))
+            self.assertNotIn("sideways", line.casefold())
+            self.assertNotIn("404", line)
+
+        async def run():
+            for _ in range(main.RATE_LIMIT_MAX_REQUESTS):
+                self.assertTrue(main._rate_limit_allows_actor("50", "10", "external_ai"))
+
+            class Channel:
+                id = 9
+                name = "general"
+
+                def history(self, limit, before=None):
+                    async def _empty():
+                        if False:
+                            yield None
+                    return _empty()
+
+            def make_message(text):
+                return SimpleNamespace(
+                    guild=SimpleNamespace(id=50, name="Seclude", member_count=3),
+                    channel=Channel(),
+                    author=SimpleNamespace(id=10, display_name="Death"),
+                    content=f"<@999> {text}",
+                    attachments=[],
+                    embeds=[],
+                    reference=None,
+                )
+
+            model_reply = "i'll keep that for when you start."
+            model = AsyncMock(return_value=model_reply)
+            patches = (
+                patch.dict(main.os.environ, {"XAI_API_KEY": "test-key"}),
+                patch.object(
+                    main.discord.Client,
+                    "user",
+                    new_callable=PropertyMock,
+                    return_value=SimpleNamespace(id=999),
+                ),
+                patch.object(
+                    main.bot,
+                    "get_channel",
+                    return_value=SimpleNamespace(name="general"),
+                ),
+            )
+            with patches[0], patches[1], patches[2], patch.object(
+                main, "_complete_contextual_reply", model
+            ):
+                stored = await main.generate_contextual_reply(make_message(store))
+                denied = await main.generate_contextual_reply(make_message(denial))
+            self.assertEqual(stored.text, model_reply)
+            self.assertEqual(denied.text, model_reply)
+            self.assertIsNone(stored.failure)
+            self.assertIsNone(denied.failure)
+            self.assertEqual(model.await_count, 2)
+
+            blocked = AsyncMock(side_effect=AssertionError("rate limit should not call the model"))
+            with patches[0], patches[1], patches[2], patch.object(
+                main, "_complete_contextual_reply", blocked
+            ):
+                crowded = await main.generate_contextual_reply(make_message(fact))
+            self.assertIsNone(crowded.text)
+            self.assertEqual(crowded.failure, "rate_limit")
+            self.assertEqual(main.mention_failure_text(fact, crowded.failure), lines["rate_limit"])
+
+            main._COMMAND_RATE_LIMITS.clear()
+            stalled = AsyncMock(side_effect=asyncio.TimeoutError)
+            with patches[0], patches[1], patches[2], patch.object(
+                main, "_complete_contextual_reply", stalled
+            ):
+                traffic = await main.generate_contextual_reply(make_message(fact))
+                quiet = await main.generate_contextual_reply(make_message(store))
+            self.assertEqual(traffic.failure, "timeout")
+            self.assertEqual(main.mention_failure_text(fact, traffic.failure), lines["timeout"])
+            self.assertIsNone(quiet.failure)
+            self.assertIsNone(main.mention_failure_text(store, "timeout"))
+
+            main._COMMAND_RATE_LIMITS.clear()
+            blank = AsyncMock(return_value=None)
+            with patches[0], patches[1], patches[2], patch.object(
+                main, "_complete_contextual_reply", blank
+            ):
+                unlocked = await main.generate_contextual_reply(make_message(fact))
+                still_quiet = await main.generate_contextual_reply(make_message(denial))
+            self.assertEqual(unlocked.failure, "empty")
+            self.assertEqual(main.mention_failure_text(fact, unlocked.failure), lines["empty"])
+            self.assertIsNone(still_quiet.text)
+            self.assertIsNone(still_quiet.failure)
+            self.assertIsNone(main.mention_failure_text(denial, "empty"))
+
+        asyncio.run(run())
+
     def test_trivia_rejects_bad_subject_and_missing_key_without_a_quiz(self):
         async def run():
             event = trivia_interaction()
