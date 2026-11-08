@@ -595,6 +595,69 @@ class TriviaTests(unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_chat_voice_varies_and_does_not_require_a_checklist(self):
+        voice = main.GRIM_CHAT_VOICE
+        self.assertIn("Vary the length and the shape", voice)
+        self.assertIn("sometimes neither", voice)
+        self.assertIn("This is not a checklist", voice)
+        self.assertIn("Do not default to restating", voice)
+        self.assertIn('No "great point" padding', voice)
+        self.assertNotIn("Do not open by restating the user's line", voice)
+        self.assertNotIn("Add substance they did not already give", voice)
+        self.assertNotIn("Take a stance. Agree, disagree, or qualify.", voice)
+        self.assertIn(voice, main.grim_chime_system("Seclude"))
+        self.assertEqual(
+            main.MENTION_FAILURE_LINES["timeout"],
+            "Traffic went AWOL. Call it again.",
+        )
+        self.assertEqual(
+            main.MENTION_FAILURE_LINES["rate_limit"],
+            "Channel's crowded. Hold, then call.",
+        )
+        self.assertEqual(
+            main.MENTION_FAILURE_LINES["empty"],
+            "No lock. One more.",
+        )
+
+        async def run():
+            class Channel:
+                id = 9
+                name = "general"
+
+                def history(self, limit, before=None):
+                    async def _empty():
+                        if False:
+                            yield None
+                    return _empty()
+
+            message = SimpleNamespace(
+                guild=SimpleNamespace(id=50, name="Seclude", member_count=3),
+                channel=Channel(),
+                author=SimpleNamespace(id=10, display_name="Death"),
+                content="<@999> a killswitch if the build goes wrong",
+                attachments=[],
+                embeds=[],
+                reference=None,
+            )
+            model = AsyncMock(return_value="leave the switch where you can reach it.")
+            with patch.dict(main.os.environ, {"XAI_API_KEY": "test-key"}), \
+                    patch.object(
+                        main.discord.Client,
+                        "user",
+                        new_callable=PropertyMock,
+                        return_value=SimpleNamespace(id=999),
+                    ), \
+                    patch.object(main, "_complete_contextual_reply", model):
+                await main.generate_contextual_reply(message)
+            prompt = model.await_args.args[2]
+            self.assertIn("This is not a checklist", prompt)
+            self.assertIn("sometimes neither", prompt)
+            self.assertIn("Do not default to restating", prompt)
+            self.assertIn('No "great point" padding', prompt)
+            self.assertNotIn("Do not make every reply avoid a restatement, add a reference, and take a stance.\nAdd substance", prompt)
+
+        asyncio.run(run())
+
     def test_trivia_rejects_bad_subject_and_missing_key_without_a_quiz(self):
         async def run():
             event = trivia_interaction()

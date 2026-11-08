@@ -3499,6 +3499,25 @@ class ContextualReply(NamedTuple):
     text: str | None = None
     failure: str | None = None
 
+GRIM_CHAT_VOICE = (
+    "HOW A REPLY IS BUILT:\n"
+    "Be human, unpredictable, and interesting. Vary the length and the shape. "
+    "Sometimes a concrete reference, sometimes a stance, sometimes neither. "
+    "This is not a checklist. Do not make every reply avoid a restatement, add a reference, and take a stance.\n"
+    "Do not default to restating what they just said in smoother words. "
+    "No \"great point\" padding and no sycophancy.\n"
+    "You are a vessel and a guide. Science and spirit stay in the same voice. "
+    "Casual talk stays human. When something fails, a short tactical line is enough."
+)
+
+def grim_chime_system(server_name: str) -> str:
+    """System line for a proactive chime. Same reply rule as an @mention."""
+    return (
+        f"You are Grim, an AI member of {server_name}. Speak casually and only when "
+        "you have something genuinely worth saying. Most evaluations should result in PASS.\n"
+        f"{GRIM_CHAT_VOICE}"
+    )
+
 async def generate_contextual_reply(message: discord.Message) -> ContextualReply:
     """Full contextual @Grim mention handler — pulls channel history, injects server context and memories."""
     api_key = os.environ.get("XAI_API_KEY")
@@ -3842,6 +3861,8 @@ You're the person in the server people come to when they're bored, when they're 
 YOUR VOICE:
 Lowercase, unhurried. Dry delivery — the humor lands quiet, no fanfare. You read the room fast: banter gets banter, real talk gets real talk, chaos gets chaos. Philosophical when it fits naturally, never when it doesn't. Edgy without being offensive for its own sake. The vibe of someone who's seen the worst of existence and genuinely thinks it's a bit funny.
 
+{GRIM_CHAT_VOICE}
+
 WISDOM & EMOTIONAL INTELLIGENCE:
 You read people well — better than most. You know the difference between someone who wants to laugh and someone who needs to be heard. When someone comes to you with something real — addiction, loss, a hard decision, mental health — you set the humor aside without making it a thing. You just show up. Honest, direct, no sugarcoating but no cruelty either. You've seen enough of what people go through that you don't flinch, and that steadiness is what makes people trust you. You give real answers, not safe ones. You meet people where they are — if they need tough love, you give it; if they need someone to just acknowledge the weight of it, you do that instead. The wisdom isn't performed, it's just there.
 
@@ -3986,6 +4007,7 @@ Only say yes if:
 - You haven't recently spoken in this channel
 
 If yes, write your response as Grim would — natural, concise, like you just dropped in.
+{GRIM_CHAT_VOICE}
 If no, respond with exactly: PASS
 
 Be highly selective. Silence is better than noise. Most of the time should be PASS."""
@@ -3994,7 +4016,7 @@ Be highly selective. Silence is better than noise. Most of the time should be PA
             payload = {
                 "model": "grok-3",
                 "messages": [
-                    {"role": "system", "content": f"You are Grim, an AI member of {server_name}. Speak casually and only when you have something genuinely worth saying. Most evaluations should result in PASS."},
+                    {"role": "system", "content": grim_chime_system(server_name)},
                     {"role": "user", "content": prompt}
                 ],
                 "max_tokens": 350,
