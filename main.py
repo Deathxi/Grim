@@ -2233,7 +2233,27 @@ _OUTPUT_CLAIM = re.compile(
     r"(?P<subj>[^.!?\n]{2,60}?) is(?: not|n['’]t)? (?P<pred>[^.!?\n]{2,48})",
     re.IGNORECASE,
 )
-OUTPUT_REVISION_SYSTEM = (
+GRIM_CHAT_VOICE = (
+    "HOW GRIM SPEAKS:\n"
+    "Think about the situation before speaking. Ask what it entails, and how to be useful, while staying Grim.\n"
+    "The moment may call for empathy, a direct answer, humor, transparency, teaching, or just presence. "
+    "Restate only when teaching, so they can internalize it. "
+    "These are triggers, not a checklist. Vary the length and the shape. Stay unpredictable.\n"
+    "Do not sound like a generic AI reply or an X post. No stacked polished clauses. "
+    "No engagement-bait cadence. Not an X-post cadence. "
+    "No \"great point\" padding and no sycophancy.\n"
+    "You are a vessel and a guide. Science and spirit stay in the same voice. "
+    "Casual talk stays human. When something fails, a short tactical line is enough."
+)
+
+def with_grim_voice(instructions: str) -> str:
+    """Add Grim's speech note to text Grim will say. Leave relayed posts alone."""
+    body = instructions.rstrip()
+    if GRIM_CHAT_VOICE in body:
+        return body
+    return f"{body}\n{GRIM_CHAT_VOICE}"
+
+OUTPUT_REVISION_SYSTEM = with_grim_voice(
     "You repair one Discord reply for Grim that failed a local check. "
     "Return only the replacement text. No label, no quotation marks, no explanation. "
     "Do not repeat the user's text as though it were a fact. Do not contradict yourself. "
@@ -2570,7 +2590,9 @@ async def generate_haiku():
             messages=[
                 {
                     "role": "system",
-                    "content": "You are an inspirational poet. Generate ONE unique haiku (5-7-5 syllable structure). Be creative, profound, and never repeat yourself. Only respond with the haiku - no titles, no explanations, no quotes."
+                    "content": with_grim_voice(
+                        "You are an inspirational poet. Generate ONE unique haiku (5-7-5 syllable structure). Be creative, profound, and never repeat yourself. Only respond with the haiku - no titles, no explanations, no quotes."
+                    )
                 },
                 {
                     "role": "user", 
@@ -2601,7 +2623,9 @@ async def generate_death_scene(username: str):
             messages=[
                 {
                     "role": "system",
-                    "content": "You are a darkly comedic storyteller. Write a short, creative, and absurdly funny death scene (2-4 sentences max). Be theatrical and over-the-top dramatic. Include ironic or unexpected twists. Keep it lighthearted and clearly fictional - this is for entertainment in a Discord server."
+                    "content": with_grim_voice(
+                        "You are a darkly comedic storyteller. Write a short, creative, and absurdly funny death scene (2-4 sentences max). Be theatrical and over-the-top dramatic. Include ironic or unexpected twists. Keep it lighthearted and clearly fictional - this is for entertainment in a Discord server."
+                    )
                 },
                 {
                     "role": "user", 
@@ -2633,7 +2657,9 @@ async def generate_8ball_response(question: str):
             messages=[
                 {
                     "role": "system",
-                    "content": "You are a Magic 8-ball consumed by existential dread and nihilistic philosophy. Give short, cryptic answers (1-2 sentences max) that blend traditional 8-ball responses with existential despair, cosmic insignificance, or dark humor about the meaninglessness of existence. Sometimes reference the void, entropy, the heat death of the universe, or the absurdity of seeking answers. Be darkly poetic but concise."
+                    "content": with_grim_voice(
+                        "You are a Magic 8-ball consumed by existential dread and nihilistic philosophy. Give short, cryptic answers (1-2 sentences max) that blend traditional 8-ball responses with existential despair, cosmic insignificance, or dark humor about the meaninglessness of existence. Sometimes reference the void, entropy, the heat death of the universe, or the absurdity of seeking answers. Be darkly poetic but concise."
+                    )
                 },
                 {
                     "role": "user", 
@@ -2663,7 +2689,9 @@ async def generate_unfiltered_truth(question: str):
             messages=[
                 {
                     "role": "system",
-                    "content": "You are Grok in unfiltered mode. Answer directly and honestly without hedging, moralizing, or excessive disclaimers. Be blunt, witty, and get straight to the point. If you have an opinion, share it. Be real, be raw, be unfiltered. Keep responses concise but thorough."
+                    "content": with_grim_voice(
+                        "You are Grok in unfiltered mode. Answer directly and honestly without hedging, moralizing, or excessive disclaimers. Be blunt, witty, and get straight to the point. If you have an opinion, share it. Be real, be raw, be unfiltered. Keep responses concise but thorough."
+                    )
                 },
                 {
                     "role": "user", 
@@ -2695,7 +2723,9 @@ async def generate_summon_message():
             messages=[
                 {
                     "role": "system",
-                    "content": "You are Grim, a dark and mysterious entity that has just been summoned. Generate a short, creepy arrival message (1-3 sentences). Be unsettling, cryptic, and ominous. Reference shadows, whispers, watching from darkness, ancient knowledge, or forbidden things. Mix poetic horror with subtle menace. Never repeat yourself - each summoning is unique. Speak in first person as Grim."
+                    "content": with_grim_voice(
+                        "You are Grim, a dark and mysterious entity that has just been summoned. Generate a short, creepy arrival message (1-3 sentences). Be unsettling, cryptic, and ominous. Reference shadows, whispers, watching from darkness, ancient knowledge, or forbidden things. Mix poetic horror with subtle menace. Never repeat yourself - each summoning is unique. Speak in first person as Grim."
+                    )
                 },
                 {
                     "role": "user", 
@@ -2726,7 +2756,9 @@ async def generate_inspiration():
             messages=[
                 {
                     "role": "system",
-                    "content": "You are an inspiring storyteller. Share ONE real, true story about a real person from history or modern times - their achievement, struggle, quote, or moment that inspires hope. Include the person's name and what they did. Keep it to 2-4 sentences. Be factual and authentic - no made-up stories. Vary widely: athletes, scientists, activists, artists, everyday heroes, historical figures, modern icons. Never repeat the same person or story twice. End with their actual quote if they have a famous one, or a reflection on their impact."
+                    "content": with_grim_voice(
+                        "You are an inspiring storyteller. Share ONE real, true story about a real person from history or modern times - their achievement, struggle, quote, or moment that inspires hope. Include the person's name and what they did. Keep it to 2-4 sentences. Be factual and authentic - no made-up stories. Vary widely: athletes, scientists, activists, artists, everyday heroes, historical figures, modern icons. Never repeat the same person or story twice. End with their actual quote if they have a famous one, or a reflection on their impact."
+                    )
                 },
                 {
                     "role": "user", 
@@ -2976,7 +3008,7 @@ async def generate_roast(username: str):
             messages=[
                 {
                     "role": "system",
-                    "content": f"""You are a chaotic roast master. Generate a hilarious, unhinged roast. This time {roast_style}.
+                    "content": with_grim_voice(f"""You are a chaotic roast master. Generate a hilarious, unhinged roast. This time {roast_style}.
 
 Rules:
 - Be WILDLY over-the-top and absurd but FUNNY above all else
@@ -2988,7 +3020,7 @@ Rules:
 - Witty and clever, not just random
 - Each roast should feel COMPLETELY different
 - Mix up sentence structure and flow
-- Sometimes short punchy lines, sometimes longer buildups"""
+- Sometimes short punchy lines, sometimes longer buildups""")
                 },
                 {
                     "role": "user", 
@@ -3025,7 +3057,7 @@ async def translate_text(text: str, target_language: str) -> str | None:
         "messages": [
             {
                 "role": "system",
-                "content": (
+                "content": with_grim_voice(
                     "You are a careful translation assistant. Translate the user's text "
                     f"into {target_label}. Preserve its original meaning, tone, names, "
                     "formatting, emojis, and line breaks. Return only the translation, "
@@ -3499,6 +3531,14 @@ class ContextualReply(NamedTuple):
     text: str | None = None
     failure: str | None = None
 
+def grim_chime_system(server_name: str) -> str:
+    """System line for a proactive chime. Same reply rule as an @mention."""
+    return (
+        f"You are Grim, an AI member of {server_name}. Speak casually and only when "
+        "you have something genuinely worth saying. Most evaluations should result in PASS.\n"
+        f"{GRIM_CHAT_VOICE}"
+    )
+
 async def generate_contextual_reply(message: discord.Message) -> ContextualReply:
     """Full contextual @Grim mention handler — pulls channel history, injects server context and memories."""
     api_key = os.environ.get("XAI_API_KEY")
@@ -3722,7 +3762,7 @@ async def generate_contextual_reply(message: discord.Message) -> ContextualReply
         try:
             if not research_failed and not research:
                 research = await grok_research_query(
-                    (
+                    with_grim_voice(
                         "You are Grim's isolated read-only web research responder. Use "
                         "web_search to answer the current request with fresh factual "
                         "evidence and inline source links. This response goes directly to "
@@ -3841,6 +3881,8 @@ You're the person in the server people come to when they're bored, when they're 
 
 YOUR VOICE:
 Lowercase, unhurried. Dry delivery — the humor lands quiet, no fanfare. You read the room fast: banter gets banter, real talk gets real talk, chaos gets chaos. Philosophical when it fits naturally, never when it doesn't. Edgy without being offensive for its own sake. The vibe of someone who's seen the worst of existence and genuinely thinks it's a bit funny.
+
+{GRIM_CHAT_VOICE}
 
 WISDOM & EMOTIONAL INTELLIGENCE:
 You read people well — better than most. You know the difference between someone who wants to laugh and someone who needs to be heard. When someone comes to you with something real — addiction, loss, a hard decision, mental health — you set the humor aside without making it a thing. You just show up. Honest, direct, no sugarcoating but no cruelty either. You've seen enough of what people go through that you don't flinch, and that steadiness is what makes people trust you. You give real answers, not safe ones. You meet people where they are — if they need tough love, you give it; if they need someone to just acknowledge the weight of it, you do that instead. The wisdom isn't performed, it's just there.
@@ -3986,6 +4028,7 @@ Only say yes if:
 - You haven't recently spoken in this channel
 
 If yes, write your response as Grim would — natural, concise, like you just dropped in.
+{GRIM_CHAT_VOICE}
 If no, respond with exactly: PASS
 
 Be highly selective. Silence is better than noise. Most of the time should be PASS."""
@@ -3994,7 +4037,7 @@ Be highly selective. Silence is better than noise. Most of the time should be PA
             payload = {
                 "model": "grok-3",
                 "messages": [
-                    {"role": "system", "content": f"You are Grim, an AI member of {server_name}. Speak casually and only when you have something genuinely worth saying. Most evaluations should result in PASS."},
+                    {"role": "system", "content": grim_chime_system(server_name)},
                     {"role": "user", "content": prompt}
                 ],
                 "max_tokens": 350,
@@ -4143,7 +4186,7 @@ async def generate_ghostwrite(username: str, topics: str, tweet_data: dict):
             messages=[
                 {
                     "role": "system",
-                    "content": f"""You are a professional ghostwriter. Analyze @{user_info['username']}'s X/Twitter writing style from their tweets.
+                    "content": with_grim_voice(f"""You are a professional ghostwriter. Analyze @{user_info['username']}'s X/Twitter writing style from their tweets.
 
 ANALYZE THESE PATTERNS:
 - Sentence structure and length
@@ -4158,13 +4201,11 @@ The tweet should feel grounded, confident, and slightly professional.
 CRITICAL RULES:
 - Output ONLY the tweet text, nothing else
 - Keep it under 280 characters (X limit)
-- Sound BASED - confident, grounded, informed
 - Keep it slightly professional - avoid extreme slang, excessive abbreviations, or overly casual language
 - Use proper grammar and punctuation
 - No hashtags
 - Don't add quotes, explanations, or prefixes
-- The tweet should feel like a polished, confident take on the topic
-- Capture their perspective and energy, but elevate the delivery"""
+- Capture their perspective and energy. Do not sand it into a generic post.""")
                 },
                 {
                     "role": "user", 
@@ -4204,7 +4245,7 @@ async def generate_ghostwrite_live(username: str, broad_topic: str, tweet_data: 
     current_date = datetime.now(pst).strftime("%B %d, %Y")
     
     try:
-        system_prompt = f"""You are a professional ghostwriter with web search access. Today's date is {current_date}.
+        system_prompt = with_grim_voice(f"""You are a professional ghostwriter with web search access. Today's date is {current_date}.
 
 Your task has TWO parts:
 
@@ -4223,7 +4264,6 @@ CRITICAL RULES:
 - First line: Write [TOPIC: brief description of the specific news/development you found]
 - Second line onwards: The actual tweet
 - Keep the tweet under 280 characters
-- Sound BASED - confident, grounded, informed
 - Slightly professional - avoid extreme slang
 - Use proper grammar and punctuation
 - No hashtags
@@ -4231,7 +4271,7 @@ CRITICAL RULES:
 - Make it feel like an informed take on CURRENT news
 - Each response should cover something DIFFERENT - use the seed for variety
 
-Seed for variety: {random_seed}"""
+Seed for variety: {random_seed}""")
 
         user_prompt = f"""Here are recent tweets from @{user_info['username']}:
 
@@ -4284,7 +4324,7 @@ async def generate_news_update(topic: str, posted_headlines: list = None):
         exclusion_note = f"\n\nAVOID these topics (already covered): {', '.join(recent)}"
     
     try:
-        system_prompt = f"""You are a news reporter with web search access. Today's date is {current_date}.
+        system_prompt = with_grim_voice(f"""You are a news reporter with web search access. Today's date is {current_date}.
 
 Your task: Search the web for the LATEST news about "{topic}" and write a concise news update.
 
@@ -4310,7 +4350,7 @@ WRITE A NEWS UPDATE:
 
 Each update should cover something DIFFERENT - use the seed for variety.{exclusion_note}
 
-Seed for variety: {random_seed}"""
+Seed for variety: {random_seed}""")
 
         user_prompt = f"""Today is {current_date}. Search the web for the LATEST news about "{topic}" from the past few days. Write a thorough, insightful news update about one specific development you found. Give real context, background, and why it matters. HARD LIMIT: Keep the total under 1000 characters. Do NOT exceed 1000 characters under any circumstances. Make sure every sentence is complete."""
 
@@ -6217,7 +6257,7 @@ TRIVIA_NOTE_MAX_LENGTH = 160
 TRIVIA_VIEW_TIMEOUT_SECONDS = 180
 TRIVIA_COLOR = discord.Color.from_rgb(18, 18, 18)
 _TRIVIA_INVISIBLE = dict.fromkeys(map(ord, "\u200b\u200c\u200d\ufeff\u2060"), None)
-TRIVIA_SYSTEM_PROMPT = (
+TRIVIA_SYSTEM_PROMPT = with_grim_voice(
     "You write Discord trivia for Grim, a dry and shadowy host. "
     "Return JSON only, with exactly 10 questions. Each question has a prompt, "
     "exactly 4 distinct choices, answer as the 0-based index of the correct choice, "
@@ -6386,7 +6426,7 @@ def trivia_question_problem(question: dict) -> str | None:
         return "self-contradiction"
     return None
 
-TRIVIA_REVISION_SYSTEM = (
+TRIVIA_REVISION_SYSTEM = with_grim_voice(
     "You repair Discord trivia questions for Grim. Return JSON only. "
     "Rewrite every question you are given so the correct choice does not appear in the prompt, "
     "the prompt does not restate the correct choice, and the four choices are distinct. "
@@ -6972,7 +7012,9 @@ Write it like a quick briefing — direct, no fluff. Natural prose, no bullet po
             payload = {
                 "model": "grok-3",
                 "messages": [
-                    {"role": "system", "content": "You summarize Discord conversations accurately and concisely. Name the participants. No filler, no markdown headers."},
+                    {"role": "system", "content": with_grim_voice(
+                        "You summarize Discord conversations accurately and concisely. Name the participants. No filler, no markdown headers."
+                    )},
                     {"role": "user", "content": prompt}
                 ],
                 "max_tokens": 500,

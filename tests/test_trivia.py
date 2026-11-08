@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import json
 import tempfile
 import unittest
@@ -592,6 +593,111 @@ class TriviaTests(unittest.TestCase):
             self.assertIsNone(still_quiet.text)
             self.assertIsNone(still_quiet.failure)
             self.assertIsNone(main.mention_failure_text(denial, "empty"))
+
+        asyncio.run(run())
+
+    def test_chat_voice_varies_and_does_not_require_a_checklist(self):
+        voice = main.GRIM_CHAT_VOICE
+        self.assertIn("Think about the situation before speaking", voice)
+        self.assertIn("how to be useful", voice)
+        self.assertIn("Restate only when teaching", voice)
+        self.assertIn("just presence", voice)
+        self.assertIn("not a checklist", voice)
+        self.assertIn("Vary the length and the shape", voice)
+        self.assertIn("X-post cadence", voice)
+        self.assertIn("generic AI reply", voice)
+        self.assertIn("stacked polished clauses", voice)
+        self.assertIn("engagement-bait", voice)
+        self.assertIn("vessel and a guide", voice)
+        self.assertIn("Science and spirit", voice)
+        self.assertIn('No "great point" padding', voice)
+        self.assertNotIn("Do not open by restating the user's line", voice)
+        self.assertNotIn("Do not restate the person's point as the whole answer", voice)
+        self.assertNotIn("Add substance they did not already give", voice)
+        self.assertNotIn("Take a stance. Agree, disagree, or qualify.", voice)
+        self.assertIn(voice, main.grim_chime_system("Seclude"))
+        for spoken in (
+            main.OUTPUT_REVISION_SYSTEM,
+            main.TRIVIA_SYSTEM_PROMPT,
+            main.TRIVIA_REVISION_SYSTEM,
+            main.with_grim_voice("notes"),
+        ):
+            self.assertIn("Restate only when teaching", spoken)
+        for name in (
+            "generate_haiku",
+            "generate_death_scene",
+            "generate_8ball_response",
+            "generate_unfiltered_truth",
+            "generate_summon_message",
+            "generate_inspiration",
+            "generate_roast",
+            "translate_text",
+            "generate_ghostwrite",
+            "generate_ghostwrite_live",
+            "generate_news_update",
+            "summarize",
+            "generate_contextual_reply",
+        ):
+            target = getattr(main, name)
+            if not inspect.isfunction(target):
+                target = target.callback
+            self.assertIn("with_grim_voice", inspect.getsource(target))
+        for relay in ("check_livetweets", "check_redditfeed", "check_nftwatch"):
+            target = getattr(main, relay)
+            target = getattr(target, "coro", target)
+            source = inspect.getsource(target)
+            self.assertNotIn("with_grim_voice", source)
+            self.assertNotIn("GRIM_CHAT_VOICE", source)
+        self.assertEqual(
+            main.MENTION_FAILURE_LINES["timeout"],
+            "Traffic went AWOL. Call it again.",
+        )
+        self.assertEqual(
+            main.MENTION_FAILURE_LINES["rate_limit"],
+            "Channel's crowded. Hold, then call.",
+        )
+        self.assertEqual(
+            main.MENTION_FAILURE_LINES["empty"],
+            "No lock. One more.",
+        )
+
+        async def run():
+            class Channel:
+                id = 9
+                name = "general"
+
+                def history(self, limit, before=None):
+                    async def _empty():
+                        if False:
+                            yield None
+                    return _empty()
+
+            message = SimpleNamespace(
+                guild=SimpleNamespace(id=50, name="Seclude", member_count=3),
+                channel=Channel(),
+                author=SimpleNamespace(id=10, display_name="Death"),
+                content="<@999> a killswitch if the build goes wrong",
+                attachments=[],
+                embeds=[],
+                reference=None,
+            )
+            model = AsyncMock(return_value="leave the switch where you can reach it.")
+            with patch.dict(main.os.environ, {"XAI_API_KEY": "test-key"}), \
+                    patch.object(
+                        main.discord.Client,
+                        "user",
+                        new_callable=PropertyMock,
+                        return_value=SimpleNamespace(id=999),
+                    ), \
+                    patch.object(main, "_complete_contextual_reply", model):
+                await main.generate_contextual_reply(message)
+            prompt = model.await_args.args[2]
+            self.assertIn("Think about the situation before speaking", prompt)
+            self.assertIn("not a checklist", prompt)
+            self.assertIn("Restate only when teaching", prompt)
+            self.assertIn("X-post cadence", prompt)
+            self.assertIn('No "great point" padding', prompt)
+            self.assertNotIn("Do not make every reply avoid a restatement, add a reference, and take a stance.\nAdd substance", prompt)
 
         asyncio.run(run())
 
