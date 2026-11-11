@@ -12,7 +12,7 @@ All notable changes to this project are documented here, organized by month.
 - `/trivia subject` — a private, dismissible ten-question quiz. Grim writes the round through the existing xAI path, shows one four-choice question at a time, and scores the invoking member out of 10. A bad subject or a failed generation stops the round instead of posting a partial quiz.
 
 ### Changed
-- `/zork` is a dismissable panel only that player sees. Type opens a box for a command. Compass, Look, and Inventory are on every room. Take, Open, and Examine use an object already named in the room text. HUD and TERMINAL stay.
+- A death on the Zork panel shows the grue line and "you have died" once, then the room you wake in once. The move is not echoed. Another reply that names more than one room keeps the current room, then the newest outcome. TERMINAL still lists every move.
 - `/zork` HUD keeps the status line first, then the current room description, then the newest reply. A failed move leaves that room in place. Entering another room replaces it instead of stacking the old one.
 - `/zork` opens on HUD: the latest message, with the room, score, and moves still on the panel. `/zork-ui` in that thread switches that player to TERMINAL, the full move list, and back. The choice is kept per player per game.
 - `/trivia` questions sit in a tighter monochrome box. The round ends on one debrief: the score, each miss with the pick and the right answer, a short note on that answer, and a Grim lore line. Intellect and data boxes use the historical credit line, now reading `Powered by XSI`.

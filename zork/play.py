@@ -118,6 +118,7 @@ class Session:
     def play(self, command: str) -> Turn:
         before = self.score
         previous_room = self.room
+        previous_place = self.place
         previous_id = self.machine.location()
         output = self.machine.accept(command)
         self.pull_status()
@@ -132,7 +133,12 @@ class Session:
             max_score=GAMES[self.game_id].max_score,
             key=f"{self.moves}:{output[-80:]}",
         )
-        return self.panel(text=output, aside=aside, finished=self.machine.halted)
+        return self.panel(
+            text=output,
+            aside=aside,
+            finished=self.machine.halted,
+            previous_place=previous_place,
+        )
 
     def panel(
         self,
@@ -141,11 +147,12 @@ class Session:
         finished: bool = False,
         ok: bool = True,
         error: str | None = None,
+        previous_place: str = "",
     ) -> Turn:
         info = GAMES[self.game_id]
         self._ensure_place()
         if self.ui == HUD:
-            shown = _hud_body(self.place, self.latest)
+            shown = _hud_body(self.place, self.latest, previous_place=previous_place)
         else:
             shown = self.transcript
         title, status, description = render_panel(
@@ -718,18 +725,61 @@ def _place_from_output(text: str, room: str) -> str:
     return cleaned
 
 
-def _hud_body(place: str, latest: str) -> str:
-    """Status is drawn above this. The room stays put; a different reply goes under it."""
+def _squash(text: str) -> str:
+    lines = text.strip("\n").split("\n")
+    cleaned: list[str] = []
+    blank = False
+    for line in lines:
+        if not line.strip():
+            if cleaned and not blank:
+                cleaned.append("")
+            blank = True
+            continue
+        blank = False
+        cleaned.append(line.rstrip())
+    return "\n".join(cleaned).strip("\n")
+
+
+def _excise(text: str, block: str) -> str:
+    """Drop every copy of a room block. The caller puts the current room back once."""
+    text = _game_text(text)
+    block = _game_text(block)
+    if not text or not block:
+        return text
+    while block in text:
+        text = text.replace(block, "", 1)
+    return _squash(text)
+
+
+def _join_parts(first: str, second: str) -> str:
+    first = _game_text(first)
+    second = _game_text(second)
+    if not first:
+        return second
+    if not second or second == first or second in first:
+        return first
+    return f"{first}\n\n{second}"
+
+
+def _hud_body(place: str, latest: str, previous_place: str = "") -> str:
+    """One current room, then the newest outcome. A death stays in story order.
+
+    The command echo stays in the transcript. It is not drawn on the panel.
+    """
     pinned = _game_text(place)
-    echo, reply = _split_latest(latest)
-    if not pinned:
-        if echo and reply:
-            return f"{echo}\n{reply}"
-        return reply or echo
+    _echo, reply = _split_latest(latest)
+    reply = _game_text(reply)
+    prior = _game_text(previous_place)
+    if prior and prior != pinned:
+        reply = _excise(reply, prior)
     if not reply or reply == pinned:
-        return pinned
-    bottom = f"{echo}\n{reply}" if echo else reply
-    return f"{pinned}\n\n{bottom}"
+        return pinned or reply
+    if pinned and pinned in reply:
+        outcome = _excise(reply, pinned)
+        if "you have died" in reply.casefold():
+            return _join_parts(outcome, pinned)
+        return _join_parts(pinned, outcome)
+    return _join_parts(pinned, reply)
 
 
 def _latest_block(transcript: str) -> str:

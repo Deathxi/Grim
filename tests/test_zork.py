@@ -144,6 +144,80 @@ class ZorkInterpreterTests(unittest.TestCase):
         self.assertNotIn("can't go that way", arrived_body)
         self.assertNotIn("bottle", arrived_body)
 
+    def test_death_leaves_one_room_and_skips_the_command(self):
+        from zork.ui import embed_for
+
+        open_session(self.root, self.player, "zork1")
+        self.assertEqual(toggle_ui(self.root, self.player, "zork1").ui, HUD)
+        cellar = None
+        died = None
+        for command in (
+            "south",
+            "east",
+            "open window",
+            "west",
+            "west",
+            "move rug",
+            "open trap",
+            "down",
+            "north",
+            "north",
+            "south",
+        ):
+            played = command_session(self.root, self.player, "zork1", command)
+            if played.room == "Cellar" and cellar is None:
+                cellar = played
+            if "you have died" in played.text.casefold():
+                died = played
+                break
+        self.assertIsNotNone(cellar)
+        cellar_panel = embed_for(cellar).description
+        cellar_folded = cellar_panel.lower()
+        self.assertEqual(cellar_folded.count("it is pitch black"), 1)
+        self.assertEqual(cellar_folded.count("you have moved into a dark place"), 1)
+        self.assertLess(cellar_folded.index("it is pitch black"), cellar_folded.index("you have moved into a dark place"))
+        self.assertNotIn("> down", cellar_panel)
+        self.assertLess(cellar_panel.index("SCORE"), cellar_folded.index("it is pitch black"))
+
+        self.assertIsNotNone(died)
+        self.assertEqual(died.room, "Forest")
+        panel = embed_for(died).description
+        folded = panel.lower()
+        self.assertEqual(folded.count("you have died"), 1)
+        self.assertEqual(folded.count("grue"), 1)
+        self.assertEqual(folded.count("another chance"), 1)
+        self.assertEqual(folded.count("this is a forest, with trees in all directions"), 1)
+        self.assertLess(folded.index("grue"), folded.index("you have died"))
+        self.assertLess(folded.index("you have died"), folded.index("another chance"))
+        self.assertLess(folded.index("another chance"), folded.index("this is a forest, with trees in all directions"))
+        self.assertLess(panel.index("SCORE"), folded.index("grue"))
+        self.assertNotIn("> south", panel)
+        self.assertNotIn("> west", panel)
+        self.assertNotIn("pitch black", folded)
+        self.assertNotIn("troll", folded)
+        self.assertIn(died.aside, panel)
+        self.assertLess(folded.index("this is a forest, with trees in all directions"), folded.index(died.aside.lower()))
+
+        terminal = open_session(self.root, "4242", "zork1")
+        self.assertEqual(terminal.ui, TERMINAL)
+        for command in (
+            "south",
+            "east",
+            "open window",
+            "west",
+            "west",
+            "move rug",
+            "open trap",
+            "down",
+            "north",
+            "north",
+            "south",
+        ):
+            terminal = command_session(self.root, "4242", "zork1", command)
+        self.assertIn("you have died", terminal.text.casefold())
+        self.assertEqual(terminal.ui, TERMINAL)
+        self.assertIn("> south", terminal.description)
+
     def test_hud_shows_latest_and_zork_ui_toggles_terminal(self):
         command_session(self.root, self.player, "zork1", "open mailbox")
         latest = command_session(self.root, self.player, "zork1", "north")
