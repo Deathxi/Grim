@@ -7,6 +7,7 @@ All notable changes to this project are documented here, organized by month.
 ## November 2026
 
 ### Added
+- `/zork-map` — in a Zork thread, a monospace sketch of the current room and the compass links that player has walked in that save. Unvisited exits stay blank. It does not probe the game or replace the panel.
 - `/zork` — Zork I, II, or III in a private thread. A local Z-machine runs the MIT-licensed story files, so a move never calls xAI. One autosave per player per game lives under `~/.grim_data` and is included in the encrypted backup.
 - `/trivia subject` — a private, dismissible ten-question quiz. Grim writes the round through the existing xAI path, shows one four-choice question at a time, and scores the invoking member out of 10. A bad subject or a failed generation stops the round instead of posting a partial quiz.
 

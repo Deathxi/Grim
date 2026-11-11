@@ -249,6 +249,10 @@ class ZMachine:
         self.moves = self.read_var(18)
         self.room = self.short_name(location).strip() if location else ""
 
+    def location(self) -> int:
+        """Object number of the room the player is in. Zero when unknown."""
+        return self.read_var(16)
+
     def restart_machine(self) -> None:
         kept = self.u16(0x10) & 0x0003
         self.mem[:] = self.original

@@ -93,6 +93,7 @@ class Session:
         self.ui_chosen = bool(ui_chosen)
         self.place = _game_text(place or "")
         self.place_for = ""
+        self.map: dict[str, dict] = {}
         self.room = machine.room
         self.score = machine.score
         self.moves = machine.moves
@@ -115,10 +116,12 @@ class Session:
     def play(self, command: str) -> Turn:
         before = self.score
         previous_room = self.room
+        previous_id = self.machine.location()
         output = self.machine.accept(command)
         self.pull_status()
         self._append(command, output)
         self._note_place(previous_room, output)
+        self._remember_walk(previous_id, previous_room, command, self.machine.location(), self.room)
         died = "you have died" in output.casefold()
         aside = choose_aside(
             game_id=self.game_id,
@@ -195,6 +198,41 @@ class Session:
                 self.place_for = self.room
             else:
                 self.place_for = ""
+
+    def _remember_walk(self, src_id: int, src_name: str, command: str, dst_id: int, dst_name: str) -> None:
+        direction = _compass(command)
+        if not direction or not src_id or not dst_id or src_id == dst_id:
+            return
+        if not src_name.strip() or not dst_name.strip():
+            return
+        self._set_exit(src_id, src_name, direction, dst_id, dst_name)
+        back = _OPPOSITE[direction]
+        existing = str(((self.map.get(str(dst_id)) or {}).get("exits") or {}).get(back) or "")
+        if existing in ("", str(src_id)):
+            self._set_exit(dst_id, dst_name, back, src_id, src_name)
+
+    def _set_exit(self, src_id: int, src_name: str, direction: str, dst_id: int, dst_name: str) -> None:
+        src = self.map.setdefault(str(src_id), {"name": src_name.strip(), "exits": {}})
+        if src_name.strip():
+            src["name"] = src_name.strip()
+        src.setdefault("exits", {})[direction] = str(dst_id)
+        dst = self.map.setdefault(str(dst_id), {"name": dst_name.strip(), "exits": {}})
+        if dst_name.strip():
+            dst["name"] = dst_name.strip()
+
+    def sketch(self) -> str:
+        here_id = str(self.machine.location() or "")
+        node = self.map.get(here_id) or {}
+        exits = node.get("exits") or {}
+        names = {}
+        for direction, dest in exits.items():
+            if direction not in _OPPOSITE:
+                continue
+            other = self.map.get(str(dest)) or {}
+            name = str(other.get("name") or "").strip()
+            if name and str(dest) != here_id:
+                names[direction] = name
+        return render_sketch(str(node.get("name") or self.room or "Here"), names)
 
     def _ensure_place(self) -> None:
         """Fill a missing room description from LOOK, then restore the game."""
@@ -323,6 +361,11 @@ def restart_session(root: str | Path, user_id: str, game_id: str) -> Turn:
     return turn
 
 
+def map_sketch(root: str | Path, user_id: str, game_id: str) -> str:
+    """Monospace sketch of walked connections. Does not run the game."""
+    return _ensure(root, user_id, game_id).sketch()
+
+
 def toggle_ui(root: str | Path, user_id: str, game_id: str) -> Turn:
     """Switch this player's panel for this game between HUD and TERMINAL."""
     session = _ensure(root, user_id, game_id)
@@ -419,6 +462,7 @@ def _read_slot(root: str | Path, user_id: str, game_id: str) -> Session | None:
         ui, chosen = _resolve_ui(payload)
         session = Session(game_id, machine, transcript, latest, ui, ui_chosen=chosen)
         session.pull_status()
+        session.map = _clean_map(payload.get("map"))
         stored_place = payload.get("place")
         stored_for = str(payload.get("place_for") or "")
         if isinstance(stored_place, str) and _is_location_text(_game_text(stored_place), session.room):
@@ -446,8 +490,90 @@ def _write_slot(root: str | Path, user_id: str, session: Session) -> None:
         "place_for": session.place_for,
         "ui": session.ui,
         "ui_chosen": session.ui_chosen,
+        "map": session.map,
     }
     _atomic_json(_slot_path(root, user_id, session.game_id), payload)
+
+
+_COMPASS = {
+    "n": "n",
+    "north": "n",
+    "s": "s",
+    "south": "s",
+    "e": "e",
+    "east": "e",
+    "w": "w",
+    "west": "w",
+    "u": "u",
+    "up": "u",
+    "d": "d",
+    "down": "d",
+}
+_OPPOSITE = {"n": "s", "s": "n", "e": "w", "w": "e", "u": "d", "d": "u"}
+
+
+def _compass(command: str) -> str | None:
+    words = [word.strip(".,!?").lower() for word in command.split() if word.strip(".,!?")]
+    if not words:
+        return None
+    if words[0] in {"go", "walk", "move"} and len(words) == 2:
+        words = words[1:]
+    if len(words) != 1:
+        return None
+    return _COMPASS.get(words[0])
+
+
+def _clean_map(value) -> dict:
+    if not isinstance(value, dict):
+        return {}
+    cleaned = {}
+    for ident, node in value.items():
+        if not str(ident).isdigit() or not isinstance(node, dict):
+            continue
+        name = " ".join(str(node.get("name") or "").split())
+        raw = node.get("exits")
+        exits = {}
+        if isinstance(raw, dict):
+            for direction, dest in raw.items():
+                if direction in _OPPOSITE and str(dest).isdigit():
+                    exits[direction] = str(dest)
+        if name or exits:
+            cleaned[str(ident)] = {"name": name, "exits": exits}
+    return cleaned
+
+
+def render_sketch(here: str, exits: dict[str, str]) -> str:
+    """Current room in the middle. A side is drawn only when that neighbor was walked."""
+    label = f"[{' '.join((here or 'Here').split())}]"
+    north = " ".join(str(exits.get("n") or "").split())
+    south = " ".join(str(exits.get("s") or "").split())
+    east = " ".join(str(exits.get("e") or "").split())
+    west = " ".join(str(exits.get("w") or "").split())
+    up = " ".join(str(exits.get("u") or "").split())
+    down = " ".join(str(exits.get("d") or "").split())
+    left = f"{west} -- " if west else ""
+    right = f" -- {east}" if east else ""
+    middle = f"{left}{label}{right}"
+    hub = len(left) + (len(label) // 2)
+    rows: list[tuple[int, str]] = []
+    if north:
+        rows.append((hub - (len(north) // 2), north))
+        rows.append((hub, "|"))
+    rows.append((0, middle))
+    if south:
+        rows.append((hub, "|"))
+        rows.append((hub - (len(south) // 2), south))
+    shift = max(0, -min(start for start, _text in rows))
+    lines = [" " * (start + shift) + text for start, text in rows]
+    vertical = []
+    if up:
+        vertical.append(f"Up: {up}")
+    if down:
+        vertical.append(f"Down: {down}")
+    if vertical:
+        lines.append("")
+        lines.append("   ".join(vertical))
+    return "\n".join(lines)
 
 
 def _ui_mode(value) -> str:
