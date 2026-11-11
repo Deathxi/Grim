@@ -1,0 +1,24 @@
+Zork I, Zork II, and Zork III story files
+
+These are the compiled Z-machine story files from Microsoft's MIT-licensed
+release of the Infocom sources, published 20 November 2025 through the
+historicalsource repositories. They are not unofficial copies.
+
+  https://github.com/historicalsource/zork1  COMPILED/zork1.z3
+  https://github.com/historicalsource/zork2  COMPILED/zork2.z3
+  https://github.com/historicalsource/zork3  COMPILED/zork3.z3
+
+  zork1.z3  release 119  serial 880429
+            sha256 37084966477dff679282de42974b2077156b1bd68fad92a65d4ea94d8eb64d79
+  zork2.z3  release 63   serial 860811
+            sha256 3ae7d5558943e9721f3e4b273c8a7faec1a03a604e1ae4ee1cde472c21cb24ac
+  zork3.z3  release 25   serial 860811
+            sha256 b637a242865d059890184164ce8dec28554cc80901dcbf26c740b2d1ed0d4eb8
+
+The MIT license shipped with that release is included here as LICENSE
+(Copyright (c) 2025 Microsoft). It is identical in all three repositories.
+Zork and Infocom names are trademarks of their owners. This notice does
+not grant trademark rights.
+
+Grim runs these files in-process. Game text is not sent to xAI.
+Player saves are runtime state under ~/.grim_data and are never committed.
