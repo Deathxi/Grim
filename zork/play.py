@@ -10,6 +10,7 @@ import base64
 import hashlib
 import json
 import os
+import re
 import zlib
 from dataclasses import dataclass
 from pathlib import Path
@@ -71,6 +72,7 @@ class Turn:
     aside: str | None
     finished: bool
     ui: str = TERMINAL
+    place: str = ""
     error: str | None = None
 
 
@@ -141,8 +143,8 @@ class Session:
         error: str | None = None,
     ) -> Turn:
         info = GAMES[self.game_id]
+        self._ensure_place()
         if self.ui == HUD:
-            self._ensure_place()
             shown = _hud_body(self.place, self.latest)
         else:
             shown = self.transcript
@@ -169,6 +171,7 @@ class Session:
             aside=aside,
             finished=finished or self.machine.halted,
             ui=self.ui,
+            place=self.place,
             error=error,
         )
 
@@ -361,6 +364,49 @@ def restart_session(root: str | Path, user_id: str, game_id: str) -> Turn:
     return turn
 
 
+def named_in_text(game_id: str, room: str, text: str) -> list[str]:
+    """Object names that already appear in this room's text. Nothing hidden."""
+    if game_id not in GAMES:
+        return []
+    folded = text.casefold()
+    room_name = " ".join(room.casefold().split())
+    found: list[str] = []
+    for name in _object_names(game_id):
+        clean = " ".join(name.split())
+        key = clean.casefold()
+        if len(clean) < 3 or key in _OBJECT_SKIP or key == room_name:
+            continue
+        if re.search(rf"(?<![a-z0-9]){re.escape(key)}(?![a-z0-9])", folded):
+            found.append(clean)
+    found.sort(key=len, reverse=True)
+    kept: list[str] = []
+    for name in found:
+        key = name.casefold()
+        if any(key in chosen.casefold() for chosen in kept):
+            continue
+        kept.append(name)
+        if len(kept) == 8:
+            break
+    kept.sort(key=str.lower)
+    return kept
+
+
+def remember_active(root: str | Path, guild_id: str, user_id: str, game_id: str) -> None:
+    if game_id not in GAMES:
+        raise ValueError(game_id)
+    index = _index(root)
+    index.setdefault("active", {})[f"{guild_id}:{_user_key(user_id)}"] = game_id
+    _write_index(root, index)
+
+
+def active_game(root: str | Path, guild_id: str, user_id: str) -> str | None:
+    try:
+        found = _index(root).get("active", {}).get(f"{guild_id}:{_user_key(user_id)}")
+    except (OSError, ValueError):
+        return None
+    return found if found in GAMES else None
+
+
 def map_sketch(root: str | Path, user_id: str, game_id: str) -> str:
     """Monospace sketch of walked connections. Does not run the game."""
     return _ensure(root, user_id, game_id).sketch()
@@ -510,6 +556,37 @@ _COMPASS = {
     "down": "d",
 }
 _OPPOSITE = {"n": "s", "s": "n", "e": "w", "w": "e", "u": "d", "d": "u"}
+_OBJECT_NAMES: dict[str, list[str]] = {}
+_OBJECT_SKIP = {
+    "you",
+    "me",
+    "it",
+    "them",
+    "all",
+    "here",
+    "floor",
+    "ground",
+    "sky",
+    "wall",
+    "walls",
+}
+
+
+def _object_names(game_id: str) -> list[str]:
+    cached = _OBJECT_NAMES.get(game_id)
+    if cached is not None:
+        return cached
+    machine = ZMachine(load_story(game_id))
+    names = []
+    for number in range(1, 256):
+        try:
+            name = machine.short_name(number).strip()
+        except (ZMachineError, IndexError, ValueError):
+            continue
+        if name:
+            names.append(name)
+    _OBJECT_NAMES[game_id] = names
+    return names
 
 
 def _compass(command: str) -> str | None:
@@ -705,7 +782,11 @@ def _index(root: str | Path) -> dict:
         try:
             loaded = json.loads(path.read_text())
             if isinstance(loaded, dict) and isinstance(loaded.get("threads"), dict):
-                index = {"threads": loaded["threads"]}
+                active = loaded.get("active")
+                index = {
+                    "threads": loaded["threads"],
+                    "active": active if isinstance(active, dict) else {},
+                }
         except (OSError, ValueError):
             index = {"threads": {}}
     _INDEXES[key] = index

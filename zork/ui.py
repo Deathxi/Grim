@@ -9,18 +9,23 @@ from discord import ui
 
 from zork.play import (
     GAMES,
+    active_game,
     bind_thread,
     command_session,
     lookup_thread,
     map_sketch,
+    named_in_text,
     open_session,
+    remember_active,
     restart_session,
     toggle_ui,
 )
 
 _config: dict = {}
 _LOCK = asyncio.Lock()
+_PICKED: dict[tuple[str, str], str] = {}
 ACCENT = discord.Color.from_rgb(176, 186, 194)
+PANEL_TIMEOUT = 4 * 60 * 60
 
 
 class ZorkView(ui.View):
@@ -77,13 +82,149 @@ class ZorkView(ui.View):
         )
 
 
+def panel_view(user_id, game_id: str, turn) -> "ZorkPanel":
+    """The same controls in every room. Objects come only from that room's text."""
+    room_text = getattr(turn, "place", "") or getattr(turn, "text", "") or ""
+    names = named_in_text(game_id, getattr(turn, "room", ""), room_text)
+    key = (str(user_id), game_id)
+    if _PICKED.get(key) not in names:
+        _PICKED.pop(key, None)
+    return ZorkPanel(user_id, game_id, names)
+
+
+class ZorkPanel(ui.View):
+    """Ephemeral controls. Only the player who opened /zork can use them."""
+
+    def __init__(self, user_id, game_id: str, objects: list[str]):
+        super().__init__(timeout=PANEL_TIMEOUT)
+        self.user_id = str(user_id)
+        self.game_id = game_id
+        moves = (
+            ("N", "north", 0),
+            ("S", "south", 0),
+            ("E", "east", 0),
+            ("W", "west", 0),
+            ("U", "up", 0),
+            ("D", "down", 1),
+            ("Look", "look", 1),
+            ("Inventory", "inventory", 1),
+            ("Type", "", 1),
+            ("Take", "take", 2),
+            ("Open", "open", 2),
+            ("Examine", "examine", 2),
+            ("Restart", "restart", 2),
+            ("Dismiss", "", 2),
+        )
+        for label, command, row in moves:
+            self.add_item(_PanelButton(label, command, row))
+        if objects:
+            self.add_item(_ObjectMenu(objects))
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if str(interaction.user.id) == self.user_id:
+            return True
+        if not interaction.response.is_done():
+            await interaction.response.send_message(
+                "This game belongs to someone else.", ephemeral=True
+            )
+        return False
+
+
+class _PanelButton(ui.Button):
+    def __init__(self, label: str, command: str, row: int):
+        self.play = command
+        style = discord.ButtonStyle.secondary
+        shown = label
+        if label == "Type":
+            style = discord.ButtonStyle.primary
+        elif label == "Restart":
+            style = discord.ButtonStyle.danger
+        super().__init__(label=shown, style=style, row=row)
+
+    async def callback(self, interaction: discord.Interaction):
+        view: ZorkPanel = self.view
+        if self.label == "Dismiss":
+            await interaction.response.edit_message(content="Dismissed.", embed=None, view=None)
+            return
+        if self.label == "Type":
+            if not await _move_allowed(interaction):
+                return
+            await interaction.response.send_modal(_CommandModal(view.user_id, view.game_id))
+            return
+        if self.play == "restart":
+            if not await _move_allowed(interaction):
+                return
+            await interaction.response.defer()
+            await _panel_turn(interaction, view, restart=True)
+            return
+        if self.play in {"take", "open", "examine"}:
+            name = _PICKED.get((view.user_id, view.game_id), "")
+            if not name:
+                await interaction.response.send_message(
+                    "Pick an object from this room first.", ephemeral=True
+                )
+                return
+            if not await _move_allowed(interaction):
+                return
+            await interaction.response.defer()
+            await _panel_turn(interaction, view, f"{self.play} {name}")
+            return
+        if not await _move_allowed(interaction):
+            return
+        await interaction.response.defer()
+        await _panel_turn(interaction, view, self.play)
+
+
+class _ObjectMenu(ui.Select):
+    def __init__(self, names: list[str]):
+        super().__init__(
+            placeholder="Objects in this room",
+            min_values=1,
+            max_values=1,
+            row=3,
+            options=[discord.SelectOption(label=name[:100], value=name[:100]) for name in names[:8]],
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        view: ZorkPanel = self.view
+        choice = (self.values or [""])[0]
+        if choice:
+            _PICKED[(view.user_id, view.game_id)] = choice
+        if not interaction.response.is_done():
+            await interaction.response.defer()
+
+
+class _CommandModal(ui.Modal, title="Zork"):
+    command = ui.TextInput(
+        label="Command",
+        placeholder="open mailbox",
+        max_length=180,
+        required=True,
+    )
+
+    def __init__(self, user_id: str, game_id: str):
+        super().__init__()
+        self.user_id = user_id
+        self.game_id = game_id
+
+    async def on_submit(self, interaction: discord.Interaction):
+        text = " ".join(str(self.command.value or "").split())[:180]
+        if not text:
+            await interaction.response.send_message("Type a command.", ephemeral=True)
+            return
+        if not await _move_allowed(interaction):
+            return
+        await interaction.response.defer()
+        await _panel_turn(interaction, ZorkPanel(self.user_id, self.game_id, []), text)
+
+
 def install_zork(bot, *, data_root, footer, allow_open, allow_move) -> None:
     _config["root"] = data_root
     _config["footer"] = footer
     _config["allow_open"] = allow_open
     _config["allow_move"] = allow_move
 
-    @bot.tree.command(name="zork", description="Play Zork I, II, or III in a private thread")
+    @bot.tree.command(name="zork", description="Play Zork I, II, or III on a private panel")
     @discord.app_commands.guild_only()
     @discord.app_commands.describe(game="Zork I, II, or III")
     @discord.app_commands.choices(
@@ -98,7 +239,7 @@ def install_zork(bot, *, data_root, footer, allow_open, allow_move) -> None:
 
     @bot.tree.command(
         name="zork-ui",
-        description="Switch this Zork thread between HUD and TERMINAL",
+        description="Switch your Zork panel between HUD and TERMINAL",
     )
     @discord.app_commands.guild_only()
     async def zork_ui(interaction: discord.Interaction):
@@ -106,7 +247,7 @@ def install_zork(bot, *, data_root, footer, allow_open, allow_move) -> None:
 
     @bot.tree.command(
         name="zork-map",
-        description="Sketch the rooms you have walked in this Zork thread",
+        description="Sketch the rooms you have walked in your Zork game",
     )
     @discord.app_commands.guild_only()
     async def zork_map(interaction: discord.Interaction):
@@ -170,66 +311,25 @@ async def _command(interaction: discord.Interaction, game: str) -> None:
     if game not in GAMES:
         await interaction.response.send_message("Pick Zork I, II, or III.", ephemeral=True)
         return
-    channel = interaction.channel
-    if interaction.guild is None or channel is None:
+    if interaction.guild is None or interaction.channel is None:
         await interaction.response.send_message("Open /zork in a server channel.", ephemeral=True)
-        return
-    if isinstance(channel, discord.Thread) or getattr(channel, "type", None) not in (
-        discord.ChannelType.text,
-        discord.ChannelType.news,
-    ):
-        await interaction.response.send_message("Open /zork from a text channel.", ephemeral=True)
         return
     allow_open = _config.get("allow_open")
     if allow_open and not await allow_open(interaction, "zork"):
         return
 
     await interaction.response.defer(ephemeral=True)
-    title = GAMES[game].title
-    who = getattr(interaction.user, "display_name", None) or interaction.user.name
-    name = f"{title} · {' '.join(str(who).replace(chr(10), ' ').split()) or 'player'}"[:100]
-    try:
-        thread = await _open_thread(channel, name)
-    except discord.HTTPException as exc:
-        print(f"[Zork] thread failed: {type(exc).__name__}")
-        await interaction.followup.send(
-            "I couldn't open a private thread in this channel.", ephemeral=True
-        )
-        return
-
-    added = True
-    try:
-        await thread.add_user(interaction.user)
-    except discord.HTTPException:
-        added = False
-
     try:
         async with _LOCK:
             turn = await asyncio.to_thread(open_session, _config["root"], interaction.user.id, game)
-            panel = await thread.send(
-                embed=embed_for(turn),
-                view=ZorkView(),
-                allowed_mentions=discord.AllowedMentions.none(),
-            )
-            bind_thread(
-                _config["root"],
-                thread.id,
-                interaction.user.id,
-                game,
-                panel.id,
-                interaction.guild.id,
-            )
+            remember_active(_config["root"], interaction.guild.id, interaction.user.id, game)
     except Exception as exc:
         print(f"[Zork] {game} failed to start: {type(exc).__name__}: {exc}")
         await interaction.followup.send("The machine couldn't start that story.", ephemeral=True)
         return
-
-    print(f"[Zork] {game} thread {thread.id}")
-    note = f"You're in {thread.mention}. Type there."
-    if not added:
-        note = "I opened the thread but couldn't add you to it."
     await interaction.followup.send(
-        note,
+        embed=embed_for(turn),
+        view=panel_view(interaction.user.id, game, turn),
         ephemeral=True,
         allowed_mentions=discord.AllowedMentions.none(),
     )
@@ -238,26 +338,49 @@ async def _command(interaction: discord.Interaction, game: str) -> None:
 async def _ui(interaction: discord.Interaction) -> None:
     channel = interaction.channel
     binding = lookup_thread(_config.get("root"), getattr(channel, "id", None))
-    if not binding or not isinstance(channel, discord.Thread):
-        await interaction.response.send_message("Use this in your Zork thread.", ephemeral=True)
+    if binding and isinstance(channel, discord.Thread):
+        if str(interaction.user.id) != str(binding.get("user_id")):
+            await interaction.response.send_message(
+                "This game belongs to someone else.", ephemeral=True
+            )
+            return
+        allow_open = _config.get("allow_open")
+        if allow_open and not await allow_open(interaction, "zork_ui"):
+            return
+        await interaction.response.defer(ephemeral=True)
+        try:
+            async with _LOCK:
+                turn = await asyncio.to_thread(
+                    toggle_ui,
+                    _config["root"],
+                    binding["user_id"],
+                    binding["game"],
+                )
+                await _show(channel, binding, turn, None)
+        except Exception as exc:
+            print(f"[Zork] UI toggle failed: {type(exc).__name__}: {exc}")
+            await interaction.followup.send("The panel didn't update.", ephemeral=True)
+            return
+        await interaction.followup.send(turn.ui.upper(), ephemeral=True)
         return
-    if str(interaction.user.id) != str(binding.get("user_id")):
-        await interaction.response.send_message("This game belongs to someone else.", ephemeral=True)
+
+    game = active_game(
+        _config.get("root"),
+        getattr(interaction.guild, "id", "dm"),
+        interaction.user.id,
+    )
+    if not game:
+        await interaction.response.send_message("Use /zork first.", ephemeral=True)
         return
     allow_open = _config.get("allow_open")
     if allow_open and not await allow_open(interaction, "zork_ui"):
         return
-
     await interaction.response.defer(ephemeral=True)
     try:
         async with _LOCK:
             turn = await asyncio.to_thread(
-                toggle_ui,
-                _config["root"],
-                binding["user_id"],
-                binding["game"],
+                toggle_ui, _config["root"], interaction.user.id, game
             )
-            await _show(channel, binding, turn, None)
     except Exception as exc:
         print(f"[Zork] UI toggle failed: {type(exc).__name__}: {exc}")
         await interaction.followup.send("The panel didn't update.", ephemeral=True)
@@ -268,11 +391,40 @@ async def _ui(interaction: discord.Interaction) -> None:
 async def _map(interaction: discord.Interaction) -> None:
     channel = interaction.channel
     binding = lookup_thread(_config.get("root"), getattr(channel, "id", None))
-    if not binding or not isinstance(channel, discord.Thread):
-        await interaction.response.send_message("Use this in your Zork thread.", ephemeral=True)
+    if binding and isinstance(channel, discord.Thread):
+        if str(interaction.user.id) != str(binding.get("user_id")):
+            await interaction.response.send_message(
+                "This game belongs to someone else.", ephemeral=True
+            )
+            return
+        allow_open = _config.get("allow_open")
+        if allow_open and not await allow_open(interaction, "zork_map"):
+            return
+        try:
+            async with _LOCK:
+                sketch = await asyncio.to_thread(
+                    map_sketch,
+                    _config["root"],
+                    binding["user_id"],
+                    binding["game"],
+                )
+        except Exception as exc:
+            print(f"[Zork] map failed: {type(exc).__name__}: {exc}")
+            await interaction.response.send_message("The sketch didn't come out.", ephemeral=True)
+            return
+        await interaction.response.send_message(
+            f"```\n{sketch}\n```",
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
         return
-    if str(interaction.user.id) != str(binding.get("user_id")):
-        await interaction.response.send_message("This game belongs to someone else.", ephemeral=True)
+
+    game = active_game(
+        _config.get("root"),
+        getattr(interaction.guild, "id", "dm"),
+        interaction.user.id,
+    )
+    if not game:
+        await interaction.response.send_message("Use /zork first.", ephemeral=True)
         return
     allow_open = _config.get("allow_open")
     if allow_open and not await allow_open(interaction, "zork_map"):
@@ -280,10 +432,7 @@ async def _map(interaction: discord.Interaction) -> None:
     try:
         async with _LOCK:
             sketch = await asyncio.to_thread(
-                map_sketch,
-                _config["root"],
-                binding["user_id"],
-                binding["game"],
+                map_sketch, _config["root"], interaction.user.id, game
             )
     except Exception as exc:
         print(f"[Zork] map failed: {type(exc).__name__}: {exc}")
@@ -291,23 +440,45 @@ async def _map(interaction: discord.Interaction) -> None:
         return
     await interaction.response.send_message(
         f"```\n{sketch}\n```",
+        ephemeral=True,
         allowed_mentions=discord.AllowedMentions.none(),
     )
 
 
-async def _open_thread(channel, name: str):
-    error = None
-    for duration in (10080, 4320, 1440, 60):
-        try:
-            return await channel.create_thread(
-                name=name,
-                type=discord.ChannelType.private_thread,
-                invitable=False,
-                auto_archive_duration=duration,
-            )
-        except discord.HTTPException as exc:
-            error = exc
-    raise error if error else RuntimeError("thread was not created")
+async def _move_allowed(interaction: discord.Interaction) -> bool:
+    allow = _config.get("allow_move")
+    if not allow:
+        return True
+    guild = str(getattr(interaction, "guild_id", None) or "dm")
+    if allow(guild, interaction.user.id):
+        return True
+    if not interaction.response.is_done():
+        await interaction.response.send_message("Too many moves. Wait a moment.", ephemeral=True)
+    return False
+
+
+async def _panel_turn(interaction: discord.Interaction, view: ZorkPanel, command: str = "", *, restart: bool = False) -> None:
+    root = _config["root"]
+    worker = restart_session if restart else command_session
+    args = (root, view.user_id, view.game_id)
+    if not restart:
+        args = (*args, command)
+    try:
+        async with _LOCK:
+            turn = await asyncio.to_thread(worker, *args)
+    except Exception as exc:
+        print(f"[Zork] command failed: {type(exc).__name__}: {exc}")
+        await interaction.followup.send("The machine didn't answer.", ephemeral=True)
+        return
+    payload = dict(
+        embed=embed_for(turn),
+        view=panel_view(view.user_id, view.game_id, turn),
+        allowed_mentions=discord.AllowedMentions.none(),
+    )
+    try:
+        await interaction.edit_original_response(**payload)
+    except discord.HTTPException:
+        await interaction.followup.send(**payload, ephemeral=True)
 
 
 async def _apply(channel, binding: dict, command: str, *, restart: bool = False, message=None) -> None:
