@@ -112,6 +112,34 @@ class ZorkInterpreterTests(unittest.TestCase):
         cleared = command_session(self.root, self.player, "zork1", "take leaflet")
         self.assertNotIn("taken", cleared.text.lower(), cleared.text)
 
+    def test_failed_move_keeps_the_prior_room_above_the_newest_line(self):
+        open_session(self.root, self.player, "zork1")
+        for command in ("south", "east", "open window", "west"):
+            command_session(self.root, self.player, "zork1", command)
+        failed = command_session(self.root, self.player, "zork1", "north")
+        self.assertEqual(failed.ui, HUD)
+        self.assertEqual(failed.room, "Kitchen")
+        self.assertIn("can't go that way", failed.text.lower())
+        body = failed.description
+        folded = body.lower()
+        self.assertIn("you are in the kitchen of the white house", folded)
+        self.assertIn("bottle", folded)
+        self.assertIn("sack", folded)
+        self.assertLess(folded.index("you are in the kitchen"), folded.index("can't go that way"))
+        self.assertLess(body.index("SCORE"), folded.index("you are in the kitchen"))
+        self.assertLess(body.index("MOVES"), folded.index("you are in the kitchen"))
+        self.assertIn(failed.room.upper(), body)
+        self.assertIn(f"SCORE {failed.score}/{GAMES['zork1'].max_score}", body)
+        self.assertIn(f"MOVES {failed.moves}", body)
+
+        arrived = command_session(self.root, self.player, "zork1", "west")
+        self.assertEqual(arrived.room, "Living Room")
+        arrived_body = arrived.description.lower()
+        self.assertIn("living room", arrived_body)
+        self.assertNotIn("you are in the kitchen", arrived_body)
+        self.assertNotIn("can't go that way", arrived_body)
+        self.assertNotIn("bottle", arrived_body)
+
     def test_hud_shows_latest_and_zork_ui_toggles_terminal(self):
         command_session(self.root, self.player, "zork1", "open mailbox")
         hud = command_session(self.root, self.player, "zork1", "north")
