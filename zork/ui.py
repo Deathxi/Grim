@@ -12,6 +12,7 @@ from zork.play import (
     bind_thread,
     command_session,
     lookup_thread,
+    map_sketch,
     open_session,
     restart_session,
     toggle_ui,
@@ -102,6 +103,14 @@ def install_zork(bot, *, data_root, footer, allow_open, allow_move) -> None:
     @discord.app_commands.guild_only()
     async def zork_ui(interaction: discord.Interaction):
         await _ui(interaction)
+
+    @bot.tree.command(
+        name="zork-map",
+        description="Sketch the rooms you have walked in this Zork thread",
+    )
+    @discord.app_commands.guild_only()
+    async def zork_map(interaction: discord.Interaction):
+        await _map(interaction)
 
 
 def register_zork_view(bot) -> None:
@@ -254,6 +263,36 @@ async def _ui(interaction: discord.Interaction) -> None:
         await interaction.followup.send("The panel didn't update.", ephemeral=True)
         return
     await interaction.followup.send(turn.ui.upper(), ephemeral=True)
+
+
+async def _map(interaction: discord.Interaction) -> None:
+    channel = interaction.channel
+    binding = lookup_thread(_config.get("root"), getattr(channel, "id", None))
+    if not binding or not isinstance(channel, discord.Thread):
+        await interaction.response.send_message("Use this in your Zork thread.", ephemeral=True)
+        return
+    if str(interaction.user.id) != str(binding.get("user_id")):
+        await interaction.response.send_message("This game belongs to someone else.", ephemeral=True)
+        return
+    allow_open = _config.get("allow_open")
+    if allow_open and not await allow_open(interaction, "zork_map"):
+        return
+    try:
+        async with _LOCK:
+            sketch = await asyncio.to_thread(
+                map_sketch,
+                _config["root"],
+                binding["user_id"],
+                binding["game"],
+            )
+    except Exception as exc:
+        print(f"[Zork] map failed: {type(exc).__name__}: {exc}")
+        await interaction.response.send_message("The sketch didn't come out.", ephemeral=True)
+        return
+    await interaction.response.send_message(
+        f"```\n{sketch}\n```",
+        allowed_mentions=discord.AllowedMentions.none(),
+    )
 
 
 async def _open_thread(channel, name: str):

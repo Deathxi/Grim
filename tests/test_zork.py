@@ -17,6 +17,8 @@ from zork.play import (
     story_hash,
     HUD,
     TERMINAL,
+    map_sketch,
+    render_sketch,
     toggle_ui,
 )
 
@@ -240,6 +242,62 @@ class ZorkInterpreterTests(unittest.TestCase):
         self.assertLess(fresh_folded.index("small mailbox"), fresh_folded.index("leaflet"))
         self.assertEqual(embed_for(opened).title, opened.room.upper())
 
+    def test_sketch_draws_visited_up_and_leaves_unvisited_blank(self):
+        sketch = render_sketch(
+            "Kitchen",
+            {"s": "Living Room", "u": "Attic"},
+        )
+        self.assertIn("[Kitchen]", sketch)
+        self.assertIn("Living Room", sketch)
+        self.assertIn("Up: Attic", sketch)
+        self.assertNotIn("Down:", sketch)
+        self.assertNotIn(" -- ", sketch.split("\n")[0])
+        self.assertLess(sketch.index("[Kitchen]"), sketch.index("Living Room"))
+        self.assertLess(sketch.index("Living Room"), sketch.index("Up: Attic"))
+
+    def test_map_shows_only_walked_neighbors_in_all_three_stories(self):
+        stories = (
+            ("zork1", "south", ("south", "east")),
+            ("zork2", "south", ("south", "south")),
+            ("zork3", "south", ("take lantern", "light lamp", "south", "west")),
+        )
+        sketches = {}
+        for game_id, step, further in stories:
+            open_session(self.root, self.player, game_id)
+            if game_id == "zork1":
+                stayed = command_session(self.root, self.player, game_id, "east")
+                self.assertEqual(stayed.room, "West of House")
+            walked = command_session(self.root, self.player, game_id, step)
+            moves = walked.moves
+            score = walked.score
+            sketch = map_sketch(self.root, self.player, game_id)
+            sketches[game_id] = sketch
+            self.assertIn(f"[{walked.room}]", sketch)
+            origin = open_session(self.root, f"origin-{game_id}", game_id).room
+            self.assertIn(origin, sketch)
+            self.assertNotEqual(origin, walked.room)
+            other = open_session(self.root, f"other-{game_id}", game_id)
+            for command in further:
+                other = command_session(self.root, f"other-{game_id}", game_id, command)
+            self.assertNotIn(other.room, sketch)
+            self.assertNotIn(other.room, map_sketch(self.root, self.player, game_id))
+            again = open_session(self.root, self.player, game_id)
+            self.assertEqual(again.moves, moves)
+            self.assertEqual(again.score, score)
+            self.assertEqual(again.room, walked.room)
+            reset_runtime_cache()
+            self.assertEqual(map_sketch(self.root, self.player, game_id), sketch)
+            if game_id == "zork1":
+                toggle_ui(self.root, self.player, game_id)
+                self.assertEqual(map_sketch(self.root, self.player, game_id), sketch)
+        self.assertIn("[South of House]", sketches["zork1"])
+        self.assertIn("West of House", sketches["zork1"])
+        self.assertNotIn("North of House", sketches["zork1"])
+        self.assertIn("[Narrow Tunnel]", sketches["zork2"])
+        self.assertIn("Inside the Barrow", sketches["zork2"])
+        self.assertIn("[Junction]", sketches["zork3"])
+        self.assertIn("Endless Stair", sketches["zork3"])
+
     def test_zork2_and_zork3_accept_a_command(self):
         for game_id in ("zork2", "zork3"):
             opening = open_session(self.root, self.player, game_id)
@@ -261,7 +319,10 @@ class ZorkCommandTests(unittest.TestCase):
         names = {command.name for command in main.bot.tree.get_commands()}
         self.assertIn("zork", names)
         self.assertIn("zork-ui", names)
+        self.assertIn("zork-map", names)
         self.assertNotIn("zork-move-history", names)
+        mapped = next(command for command in main.bot.tree.get_commands() if command.name == "zork-map")
+        self.assertEqual(len(mapped.parameters), 0)
         ui_command = next(command for command in main.bot.tree.get_commands() if command.name == "zork-ui")
         self.assertEqual(len(ui_command.parameters), 0)
         command = next(command for command in main.bot.tree.get_commands() if command.name == "zork")
