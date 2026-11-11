@@ -30,6 +30,7 @@ except ImportError as exc:
         "Install into the VPS venv: /root/grim/venv/bin/pip install -r requirements.txt"
     ) from exc
 from zoneinfo import ZoneInfo
+from zork.ui import handle_zork_message, install_zork, register_zork_view
 
 BOT_START_TIME = None
 
@@ -1221,6 +1222,19 @@ async def require_member_state_action(interaction: discord.Interaction, action: 
         "Too many requests recently. Please try again in a minute.", ephemeral=True
     )
     return False
+
+install_zork(
+    bot,
+    data_root=DATA_DIR,
+    footer=xsi_footer,
+    allow_open=require_member_state_action,
+    allow_move=lambda guild_id, user_id: _bounded_rate_limit_allows(
+        str(guild_id or "dm"),
+        str(user_id),
+        "zork_move",
+        60,
+    ),
+)
 
 # In-memory tracker for members currently in a voice channel: {"guild_id:member_id": join_timestamp}
 _vc_active_sessions: dict[str, float] = {}
@@ -5426,6 +5440,11 @@ async def on_ready():
         print(f"Synced {len(synced)} slash command(s)")
     except Exception as e:
         print(f"Failed to sync commands: {e}")
+
+    try:
+        register_zork_view(bot)
+    except Exception as e:
+        print(f"[Zork] Could not register the panel: {type(e).__name__}")
     
     if not check_livetweets.is_running():
         check_livetweets.start()
@@ -8863,7 +8882,10 @@ async def on_message(message):
                 except Exception as e:
                     print(f"[Moderation] Failed to delete message: {e}")
                 return
-    
+
+    if await handle_zork_message(message):
+        return
+
     # Persist every human message to the chat history DB
     if message.guild:
         save_message_to_db(
@@ -9078,7 +9100,10 @@ async def haiku(ctx):
 async def help_grim(ctx):
     embed = discord.Embed(
         title="Commands",
-        description="`/trivia` — ten private questions on a subject, scored out of 10",
+        description=(
+            "`/zork` — Zork I, II, or III in a private thread\n"
+            "`/trivia` — ten private questions on a subject, scored out of 10"
+        ),
         color=discord.Color.from_rgb(18, 18, 18)
     )
     embed.add_field(name="!ping", value="Latency", inline=True)
