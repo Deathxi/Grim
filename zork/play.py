@@ -82,12 +82,14 @@ class Session:
         transcript: str,
         latest: str | None = None,
         ui: str = HUD,
+        place: str | None = None,
     ):
         self.game_id = game_id
         self.machine = machine
         self.transcript = transcript.strip("\n")
         self.latest = (self.transcript if latest is None else latest).strip("\n")
         self.ui = _ui_mode(ui)
+        self.place = _game_text(self.transcript if place is None else place)
         self.room = machine.room
         self.score = machine.score
         self.moves = machine.moves
@@ -98,6 +100,7 @@ class Session:
         opening = machine.run()
         session = cls(game_id, machine, opening)
         session.pull_status()
+        session.place = _place_from_output(opening, session.room)
         return session
 
     def pull_status(self) -> None:
@@ -107,9 +110,11 @@ class Session:
 
     def play(self, command: str) -> Turn:
         before = self.score
+        previous_room = self.room
         output = self.machine.accept(command)
         self.pull_status()
         self._append(command, output)
+        self._note_place(previous_room, output)
         died = "you have died" in output.casefold()
         aside = choose_aside(
             game_id=self.game_id,
@@ -129,7 +134,10 @@ class Session:
         error: str | None = None,
     ) -> Turn:
         info = GAMES[self.game_id]
-        shown = self.transcript if self.ui == TERMINAL else (self.latest or self.transcript)
+        if self.ui == TERMINAL:
+            shown = self.transcript
+        else:
+            shown = _hud_body(self.place, self.latest)
         title, status, description = render_panel(
             info.label,
             self.room,
@@ -170,6 +178,14 @@ class Session:
             trimmed = self.transcript[-TRANSCRIPT_LIMIT:]
             newline = trimmed.find("\n")
             self.transcript = trimmed[newline + 1 :] if newline != -1 else trimmed
+
+    def _note_place(self, previous_room: str, output: str) -> None:
+        text = _game_text(output)
+        if not text:
+            return
+        entered = self.room.strip().casefold() != (previous_room or "").strip().casefold()
+        if entered or _is_location_text(text, self.room):
+            self.place = _place_from_output(text, self.room)
 
 
 def choose_aside(*, game_id: str, died: bool, delta: int, max_score: int, key: str) -> str | None:
@@ -367,14 +383,19 @@ def _read_slot(root: str | Path, user_id: str, game_id: str) -> Session | None:
         latest = payload.get("latest")
         if not isinstance(latest, str):
             latest = _latest_block(transcript)
+        stored_place = payload.get("place")
         session = Session(
             game_id,
             machine,
             transcript,
             latest,
             _ui_mode(payload.get("ui")),
+            stored_place if isinstance(stored_place, str) else None,
         )
         session.pull_status()
+        if not isinstance(stored_place, str):
+            _, reply = _split_latest(session.latest)
+            session.place = _place_from_output(reply, session.room) or session.place
         return session
     except (OSError, ValueError, KeyError, TypeError, ZMachineError) as exc:
         print(f"[Zork] Ignoring unreadable save {path.name}: {type(exc).__name__}")
@@ -390,6 +411,7 @@ def _write_slot(root: str | Path, user_id: str, session: Session) -> None:
         "checkpoint": _encode_snap(session.machine.checkpoint) if session.machine.checkpoint else None,
         "transcript": session.transcript,
         "latest": session.latest,
+        "place": session.place,
         "ui": session.ui,
     }
     _atomic_json(_slot_path(root, user_id, session.game_id), payload)
@@ -410,6 +432,59 @@ def _saved_ui(root: str | Path, user_id: str, game_id: str) -> str:
     if not isinstance(payload, dict):
         return HUD
     return _ui_mode(payload.get("ui"))
+
+
+def _game_text(output: str) -> str:
+    text = (output or "").strip()
+    if not text:
+        return ""
+    head, sep, tail = text.rpartition("\n")
+    if sep and tail.strip() == ">":
+        text = head.strip()
+    elif text == ">":
+        return ""
+    return text.strip("\n")
+
+
+def _split_latest(latest: str) -> tuple[str, str]:
+    text = (latest or "").strip("\n")
+    if text.startswith("> "):
+        echo, _, rest = text.partition("\n")
+        return echo, _game_text(rest)
+    return "", _game_text(text)
+
+
+def _is_location_text(text: str, room: str) -> bool:
+    if not text or not room:
+        return False
+    first = text.split("\n", 1)[0].strip()
+    return first.casefold() == room.strip().casefold()
+
+
+def _place_from_output(text: str, room: str) -> str:
+    cleaned = _game_text(text)
+    if not cleaned or not room:
+        return cleaned
+    target = room.strip().casefold()
+    lines = cleaned.split("\n")
+    for index, line in enumerate(lines):
+        if line.strip().casefold() == target:
+            return "\n".join(lines[index:]).strip("\n")
+    return cleaned
+
+
+def _hud_body(place: str, latest: str) -> str:
+    """Status is drawn above this. The room stays put; a different reply goes under it."""
+    pinned = _game_text(place)
+    echo, reply = _split_latest(latest)
+    if not pinned:
+        if echo and reply:
+            return f"{echo}\n{reply}"
+        return reply or echo
+    if not reply or reply == pinned:
+        return pinned
+    bottom = f"{echo}\n{reply}" if echo else reply
+    return f"{pinned}\n\n{bottom}"
 
 
 def _latest_block(transcript: str) -> str:
