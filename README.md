@@ -39,7 +39,7 @@ Grim respects your shadows. Here’s exactly what is collected, where it lives, 
 - **Message content in guild channels Grim can see** — persisted for conversational context, digests, and member profile synthesis (not only when you @Grim).
 - **Voice-channel presence timing** — aggregate time-in-voice totals for `/stats`.
 - **Command and preference data** — reminders, language preferences, moderation word lists, welcome/member-log settings, feed schedules, and similar bot configuration.
-- **Zork slots** — one saved position per player per Zork title (I, II, or III), under `~/.grim_data`, included in the encrypted weekly backup. The same slot remembers a HUD or TERMINAL choice for that title, and the compass links that player has walked for `/zork-map`. Until the player picks one, the panel is the move list. Moves are interpreted locally and are not sent to xAI.
+- **Zork slots** — one saved position per player per Zork title (I, II, or III), under `~/.grim_data`, included in the encrypted weekly backup. The same slot remembers a HUD or TERMINAL choice for that title, and the compass links that player has walked for `/zork-map`. Until the player picks one, the panel is the move list. The panel is private to that player. Moves are interpreted locally and are not sent to xAI.
 - **Redacted security audit metadata** — action, outcome, actor/server IDs, and non-secret metadata (no message bodies); retained about 90 days.
 - **Prompts sent to xAI (Grok)** — when Grim generates an AI reply; handled under [xAI's privacy policy](https://x.ai/legal/privacy-policy).
 

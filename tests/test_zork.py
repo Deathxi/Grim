@@ -309,6 +309,271 @@ class ZorkInterpreterTests(unittest.TestCase):
             self.assertTrue(looked.text.strip(), looked.text)
             self.assertNotEqual(looked.room, "")
 
+    def test_panel_lists_only_objects_named_in_the_room(self):
+        import asyncio
+
+        import discord
+
+        from zork import ui
+
+        house = open_session(self.root, self.player, "zork1")
+        self.assertEqual(map_sketch(self.root, self.player, "zork1").strip(), "[West of House]")
+        house_view = ui.panel_view(self.player, "zork1", house)
+        labels = [child.label for child in house_view.children if isinstance(child, discord.ui.Button)]
+        self.assertEqual(
+            labels,
+            ["N", "S", "E", "W", "U", "D", "Look", "Inventory", "Type", "Take", "Open", "Examine", "Restart", "Dismiss"],
+        )
+        house_menu = next(child for child in house_view.children if isinstance(child, discord.ui.Select))
+        house_names = [option.value for option in house_menu.options]
+        self.assertTrue(any("mailbox" in name.casefold() for name in house_names))
+        self.assertFalse(any("bottle" in name.casefold() for name in house_names))
+        self.assertFalse(any("leaflet" in name.casefold() for name in house_names))
+        for name in house_names:
+            self.assertIn(name.casefold(), house.place.casefold())
+
+        mailbox = next(name for name in house_names if "mailbox" in name.casefold())
+        house_menu._values = [mailbox]
+        saved = dict(ui._config)
+        ui._config["root"] = self.root
+        ui._config["allow_move"] = lambda *_args, **_kwargs: True
+        ui._PICKED.clear()
+
+        class Response:
+            def __init__(self):
+                self.done = False
+                self.sent = None
+
+            def is_done(self):
+                return self.done
+
+            async def send_message(self, *args, **kwargs):
+                self.done = True
+                self.sent = kwargs.get("content", args[0] if args else "")
+
+            async def defer(self, **kwargs):
+                self.done = True
+
+            async def edit_message(self, **kwargs):
+                self.done = True
+                self.edited = kwargs
+
+        class Followup:
+            def __init__(self):
+                self.sent = []
+
+            async def send(self, *args, **kwargs):
+                self.sent.append(kwargs)
+
+        class Interaction:
+            def __init__(self):
+                self.user = type("User", (), {"id": self_player})()
+                self.guild_id = 1
+                self.response = Response()
+                self.followup = Followup()
+                self.edited = None
+
+            async def edit_original_response(self, **kwargs):
+                self.edited = kwargs
+
+        self_player = self.player
+        try:
+            missing = Interaction()
+            take = next(child for child in house_view.children if child.label == "Take")
+            asyncio.run(take.callback(missing))
+            self.assertIn("Pick an object", missing.response.sent)
+
+            picked = Interaction()
+            asyncio.run(house_menu.callback(picked))
+            self.assertEqual(ui._PICKED[(str(self.player), "zork1")], mailbox)
+            examined = Interaction()
+            examine = next(child for child in house_view.children if child.label == "Examine")
+            asyncio.run(examine.callback(examined))
+            self.assertIn("mailbox", examined.edited["embed"].description.casefold())
+            opened = Interaction()
+            open_button = next(child for child in house_view.children if child.label == "Open")
+            asyncio.run(open_button.callback(opened))
+            self.assertIn("leaflet", opened.edited["embed"].description.casefold())
+            refreshed = next(
+                child for child in opened.edited["view"].children if isinstance(child, discord.ui.Select)
+            )
+            self.assertFalse(any("leaflet" in option.value.casefold() for option in refreshed.options))
+            taken = Interaction()
+            asyncio.run(take.callback(taken))
+            self.assertIn("anchored", taken.edited["embed"].description.casefold())
+        finally:
+            ui._config.clear()
+            ui._config.update(saved)
+            ui._PICKED.clear()
+
+        cook = "424242"
+        kitchen = open_session(self.root, cook, "zork1")
+        for command in ("south", "east", "open window", "west"):
+            kitchen = command_session(self.root, cook, "zork1", command)
+        self.assertEqual(kitchen.room, "Kitchen")
+        kitchen_view = ui.panel_view(cook, "zork1", kitchen)
+        kitchen_labels = [child.label for child in kitchen_view.children if isinstance(child, discord.ui.Button)]
+        self.assertEqual(kitchen_labels, labels)
+        barrow = open_session(self.root, cook, "zork2")
+        barrow_labels = [
+            child.label
+            for child in ui.panel_view(cook, "zork2", barrow).children
+            if isinstance(child, discord.ui.Button)
+        ]
+        self.assertEqual(barrow_labels, labels)
+        stair = open_session(self.root, cook, "zork3")
+        stair_labels = [
+            child.label
+            for child in ui.panel_view(cook, "zork3", stair).children
+            if isinstance(child, discord.ui.Button)
+        ]
+        self.assertEqual(stair_labels, labels)
+        menu = next(child for child in kitchen_view.children if isinstance(child, discord.ui.Select))
+        names = [option.value for option in menu.options]
+        self.assertIn("glass bottle", names)
+        self.assertIn("brown sack", names)
+        self.assertNotIn("leaflet", [name.casefold() for name in names])
+        self.assertLessEqual(len(names), 8)
+        for name in names:
+            self.assertIn(name.casefold(), kitchen.place.casefold())
+        bottle = next(child for child in kitchen_view.children if isinstance(child, discord.ui.Select))
+        bottle._values = ["glass bottle"]
+        ui._config["root"] = self.root
+        ui._config["allow_move"] = lambda *_args, **_kwargs: True
+        try:
+            choose = Interaction()
+            asyncio.run(bottle.callback(choose))
+            grabbed = Interaction()
+            kitchen_take = next(child for child in kitchen_view.children if child.label == "Take")
+            asyncio.run(kitchen_take.callback(grabbed))
+            self.assertIn("taken", grabbed.edited["embed"].description.casefold())
+            held = command_session(self.root, cook, "zork1", "inventory")
+            self.assertIn("glass bottle", held.text.casefold())
+        finally:
+            ui._config.clear()
+            ui._config.update(saved)
+            ui._PICKED.clear()
+
+    def test_zork_opens_a_private_panel_and_types_through_a_modal(self):
+        import asyncio
+        from types import SimpleNamespace
+
+        import discord
+
+        from zork import ui
+
+        saved = dict(ui._config)
+        ui._config["root"] = self.root
+        ui._config["footer"] = lambda: "Powered by XSI • test"
+        ui._config["allow_open"] = None
+        ui._config["allow_move"] = lambda *_args, **_kwargs: True
+        ui._PICKED.clear()
+        threaded = {"called": False}
+
+        class Channel:
+            id = 42
+            type = discord.ChannelType.text
+
+            async def create_thread(self, **kwargs):
+                threaded["called"] = True
+                raise AssertionError("a private panel does not open a thread")
+
+        class Response:
+            def __init__(self):
+                self.done = False
+                self.sent = None
+                self.modal = None
+
+            def is_done(self):
+                return self.done
+
+            async def send_message(self, *args, **kwargs):
+                self.done = True
+                self.sent = kwargs.get("content", args[0] if args else "")
+                self.kwargs = kwargs
+
+            async def defer(self, **kwargs):
+                self.done = True
+                self.kwargs = kwargs
+
+            async def send_modal(self, modal):
+                self.done = True
+                self.modal = modal
+
+            async def edit_message(self, **kwargs):
+                self.done = True
+                self.edited = kwargs
+
+        class Followup:
+            def __init__(self):
+                self.sent = []
+
+            async def send(self, *args, **kwargs):
+                self.sent.append((args, kwargs))
+
+        class Interaction:
+            def __init__(self):
+                self.user = SimpleNamespace(id=self_player, name="death")
+                self.guild = SimpleNamespace(id=7)
+                self.guild_id = 7
+                self.channel = Channel()
+                self.response = Response()
+                self.followup = Followup()
+                self.edited = None
+
+            async def edit_original_response(self, **kwargs):
+                self.edited = kwargs
+
+        self_player = self.player
+        try:
+            opening = Interaction()
+            asyncio.run(ui._command(opening, "zork1"))
+            self.assertFalse(threaded["called"])
+            self.assertTrue(opening.response.kwargs.get("ephemeral"))
+            panel = opening.followup.sent[-1][1]
+            self.assertTrue(panel.get("ephemeral"))
+            self.assertIn(
+                "N",
+                [child.label for child in panel["view"].children if isinstance(child, discord.ui.Button)],
+            )
+            from zork.play import active_game
+
+            self.assertEqual(active_game(self.root, 7, self.player), "zork1")
+
+            typed = Interaction()
+            type_button = next(child for child in panel["view"].children if child.label == "Type")
+            asyncio.run(type_button.callback(typed))
+            modal = typed.response.modal
+            self.assertEqual(modal.command.max_length, 180)
+            modal.command._value = "east"
+            submitted = Interaction()
+            asyncio.run(modal.on_submit(submitted))
+            self.assertIn("boarded", submitted.edited["embed"].description.casefold())
+            self.assertEqual(map_sketch(self.root, self.player, "zork1").strip(), "[West of House]")
+
+            command_session(self.root, self.player, "zork1", "south")
+            sketch = Interaction()
+            asyncio.run(ui._map(sketch))
+            self.assertTrue(sketch.response.kwargs.get("ephemeral"))
+            self.assertIn("[South of House]", sketch.response.sent)
+            self.assertNotIn("Kitchen", sketch.response.sent)
+
+            switched = Interaction()
+            asyncio.run(ui._ui(switched))
+            self.assertEqual(switched.followup.sent[-1][0][0], "HUD")
+            saves = list((self.root / "zork" / "saves").rglob("*.json"))
+            self.assertEqual(len(saves), 1)
+
+            dismissed = Interaction()
+            dismiss = next(child for child in panel["view"].children if child.label == "Dismiss")
+            asyncio.run(dismiss.callback(dismissed))
+            self.assertEqual(dismissed.response.edited["content"], "Dismissed.")
+            self.assertIsNone(dismissed.response.edited["view"])
+        finally:
+            ui._config.clear()
+            ui._config.update(saved)
+            ui._PICKED.clear()
+
 
 class ZorkCommandTests(unittest.TestCase):
     def test_slash_command_offers_all_three_and_uses_the_xsi_footer(self):

@@ -9101,9 +9101,9 @@ async def help_grim(ctx):
     embed = discord.Embed(
         title="Commands",
         description=(
-            "`/zork` — Zork I, II, or III in a private thread. Starts on TERMINAL\n"
-            "`/zork-ui` — in that thread, switch between HUD and TERMINAL\n"
-            "`/zork-map` — in that thread, rooms you have walked\n"
+            "`/zork` — Zork I, II, or III on a private panel. Starts on TERMINAL\n"
+            "`/zork-ui` — switch your panel between HUD and TERMINAL\n"
+            "`/zork-map` — rooms you have walked\n"
             "`/trivia` — ten private questions on a subject, scored out of 10"
         ),
         color=discord.Color.from_rgb(18, 18, 18)
