@@ -14,6 +14,9 @@ from zork.play import (
     reset_runtime_cache,
     restart_session,
     story_hash,
+    HUD,
+    TERMINAL,
+    toggle_ui,
 )
 
 
@@ -109,6 +112,50 @@ class ZorkInterpreterTests(unittest.TestCase):
         cleared = command_session(self.root, self.player, "zork1", "take leaflet")
         self.assertNotIn("taken", cleared.text.lower(), cleared.text)
 
+    def test_hud_shows_latest_and_zork_ui_toggles_terminal(self):
+        command_session(self.root, self.player, "zork1", "open mailbox")
+        hud = command_session(self.root, self.player, "zork1", "north")
+        self.assertEqual(hud.ui, HUD)
+        self.assertIn("boarded", hud.text.lower())
+        self.assertIn("boarded", hud.description.lower())
+        self.assertNotIn("leaflet", hud.description.lower())
+        self.assertNotIn("> open mailbox", hud.description)
+        self.assertEqual(hud.title, hud.room.upper())
+        self.assertIn(hud.room.upper(), hud.description)
+        self.assertIn(f"SCORE {hud.score}/{GAMES['zork1'].max_score}", hud.description)
+        self.assertIn(f"MOVES {hud.moves}", hud.description)
+
+        terminal = toggle_ui(self.root, self.player, "zork1")
+        self.assertEqual(terminal.ui, TERMINAL)
+        self.assertIn("> open mailbox", terminal.description)
+        self.assertIn("leaflet", terminal.description.lower())
+        self.assertIn("boarded", terminal.description.lower())
+        self.assertIn(f"SCORE {terminal.score}/{GAMES['zork1'].max_score}", terminal.description)
+        self.assertIn(f"MOVES {terminal.moves}", terminal.description)
+        self.assertIn(terminal.room.upper(), terminal.description)
+
+        hud = toggle_ui(self.root, self.player, "zork1")
+        self.assertEqual(hud.ui, HUD)
+        self.assertNotIn("leaflet", hud.description.lower())
+        self.assertIn("boarded", hud.description.lower())
+
+        toggle_ui(self.root, self.player, "zork1")
+        reset_runtime_cache()
+        restored = open_session(self.root, self.player, "zork1")
+        self.assertEqual(restored.ui, TERMINAL)
+        self.assertIn("> open mailbox", restored.description)
+        self.assertIn("boarded", restored.description.lower())
+
+        other = command_session(self.root, "999", "zork1", "open mailbox")
+        other = command_session(self.root, "999", "zork1", "north")
+        self.assertEqual(other.ui, HUD)
+        self.assertNotIn("> open mailbox", other.description)
+        self.assertIn("boarded", other.description.lower())
+
+        same_player_other_game = command_session(self.root, self.player, "zork2", "inventory")
+        self.assertEqual(same_player_other_game.ui, HUD)
+        self.assertNotIn("> open mailbox", same_player_other_game.description)
+
     def test_zork2_and_zork3_accept_a_command(self):
         for game_id in ("zork2", "zork3"):
             opening = open_session(self.root, self.player, game_id)
@@ -129,6 +176,10 @@ class ZorkCommandTests(unittest.TestCase):
 
         names = {command.name for command in main.bot.tree.get_commands()}
         self.assertIn("zork", names)
+        self.assertIn("zork-ui", names)
+        self.assertNotIn("zork-move-history", names)
+        ui_command = next(command for command in main.bot.tree.get_commands() if command.name == "zork-ui")
+        self.assertEqual(len(ui_command.parameters), 0)
         command = next(command for command in main.bot.tree.get_commands() if command.name == "zork")
         self.assertEqual(len(command.parameters), 1)
         parameter = command.parameters[0]
