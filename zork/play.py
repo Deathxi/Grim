@@ -52,6 +52,8 @@ _LIVE: dict[tuple[str, str, str], "Session"] = {}
 _INDEXES: dict[str, dict] = {}
 SAVE_VERSION = 1
 TRANSCRIPT_LIMIT = 3400
+HUD = "hud"
+TERMINAL = "terminal"
 
 
 @dataclass
@@ -68,14 +70,24 @@ class Turn:
     moves: int
     aside: str | None
     finished: bool
+    ui: str = HUD
     error: str | None = None
 
 
 class Session:
-    def __init__(self, game_id: str, machine: ZMachine, transcript: str):
+    def __init__(
+        self,
+        game_id: str,
+        machine: ZMachine,
+        transcript: str,
+        latest: str | None = None,
+        ui: str = HUD,
+    ):
         self.game_id = game_id
         self.machine = machine
         self.transcript = transcript.strip("\n")
+        self.latest = (self.transcript if latest is None else latest).strip("\n")
+        self.ui = _ui_mode(ui)
         self.room = machine.room
         self.score = machine.score
         self.moves = machine.moves
@@ -117,13 +129,14 @@ class Session:
         error: str | None = None,
     ) -> Turn:
         info = GAMES[self.game_id]
+        shown = self.transcript if self.ui == TERMINAL else (self.latest or self.transcript)
         title, status, description = render_panel(
             info.label,
             self.room,
             self.score,
             self.moves,
             info.max_score,
-            self.transcript,
+            shown,
             aside,
         )
         return Turn(
@@ -139,6 +152,7 @@ class Session:
             moves=self.moves,
             aside=aside,
             finished=finished or self.machine.halted,
+            ui=self.ui,
             error=error,
         )
 
@@ -147,6 +161,7 @@ class Session:
         block = f"> {command}\n{chunk}" if command else chunk
         if not block:
             return
+        self.latest = block
         if self.transcript:
             self.transcript = f"{self.transcript.rstrip()}\n\n{block}"
         else:
@@ -251,12 +266,22 @@ def command_session(root: str | Path, user_id: str, game_id: str, command: str) 
 def restart_session(root: str | Path, user_id: str, game_id: str) -> Turn:
     """Clear that player's slot for this game, then boot a new one."""
     key = _cache_key(root, user_id, game_id)
+    ui = _saved_ui(root, user_id, game_id)
     _delete_slot(root, user_id, game_id)
     _LIVE.pop(key, None)
     session = Session.start(game_id)
+    session.ui = ui
     _LIVE[key] = session
     _write_slot(root, user_id, session)
     return session.panel(text=session.transcript)
+
+
+def toggle_ui(root: str | Path, user_id: str, game_id: str) -> Turn:
+    """Switch this player's panel for this game between HUD and TERMINAL."""
+    session = _ensure(root, user_id, game_id)
+    session.ui = HUD if session.ui == TERMINAL else TERMINAL
+    _write_slot(root, user_id, session)
+    return session.panel(text=session.latest)
 
 
 def bind_thread(
@@ -338,7 +363,17 @@ def _read_slot(root: str | Path, user_id: str, game_id: str) -> Session | None:
         checkpoint = payload.get("checkpoint")
         if checkpoint:
             machine.checkpoint = _decode_snap(checkpoint)
-        session = Session(game_id, machine, str(payload.get("transcript") or ""))
+        transcript = str(payload.get("transcript") or "")
+        latest = payload.get("latest")
+        if not isinstance(latest, str):
+            latest = _latest_block(transcript)
+        session = Session(
+            game_id,
+            machine,
+            transcript,
+            latest,
+            _ui_mode(payload.get("ui")),
+        )
         session.pull_status()
         return session
     except (OSError, ValueError, KeyError, TypeError, ZMachineError) as exc:
@@ -354,8 +389,36 @@ def _write_slot(root: str | Path, user_id: str, session: Session) -> None:
         "machine": _encode_snap(session.machine.snapshot()),
         "checkpoint": _encode_snap(session.machine.checkpoint) if session.machine.checkpoint else None,
         "transcript": session.transcript,
+        "latest": session.latest,
+        "ui": session.ui,
     }
     _atomic_json(_slot_path(root, user_id, session.game_id), payload)
+
+
+def _ui_mode(value) -> str:
+    return TERMINAL if str(value or "").casefold() == TERMINAL else HUD
+
+
+def _saved_ui(root: str | Path, user_id: str, game_id: str) -> str:
+    path = _slot_path(root, user_id, game_id)
+    if not path.is_file():
+        return HUD
+    try:
+        payload = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return HUD
+    if not isinstance(payload, dict):
+        return HUD
+    return _ui_mode(payload.get("ui"))
+
+
+def _latest_block(transcript: str) -> str:
+    text = transcript.strip("\n")
+    marker = "\n\n> "
+    index = text.rfind(marker)
+    if index == -1:
+        return text
+    return text[index + 2 :]
 
 
 def _delete_slot(root: str | Path, user_id: str, game_id: str) -> None:

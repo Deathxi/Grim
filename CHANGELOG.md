@@ -11,6 +11,7 @@ All notable changes to this project are documented here, organized by month.
 - `/trivia subject` — a private, dismissible ten-question quiz. Grim writes the round through the existing xAI path, shows one four-choice question at a time, and scores the invoking member out of 10. A bad subject or a failed generation stops the round instead of posting a partial quiz.
 
 ### Changed
+- `/zork` opens on HUD: the latest message, with the room, score, and moves still on the panel. `/zork-ui` in that thread switches that player to TERMINAL, the full move list, and back. The choice is kept per player per game.
 - `/trivia` questions sit in a tighter monochrome box. The round ends on one debrief: the score, each miss with the pick and the right answer, a short note on that answer, and a Grim lore line. Intellect and data boxes use the historical credit line, now reading `Powered by XSI`.
 - Generated replies are checked locally before Grim shows them: a leaked trivia answer, empty or duplicate choices, a reply that repeats the user as fact, or an obvious self-contradiction. A clean reply makes no extra model call. A failure gets one xAI rewrite of that item, then it is dropped if it still fails.
 - Casual @Grim talk is exempt from that check. Compliments, reactions, and follow-ups that are not asking for facts are sent as written. A factual question, lookup, "is this true", or trivia-like mention is still checked locally, rewritten once if it fails, and kept as the original reply if the rewrite also fails.

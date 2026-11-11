@@ -9102,6 +9102,7 @@ async def help_grim(ctx):
         title="Commands",
         description=(
             "`/zork` — Zork I, II, or III in a private thread\n"
+            "`/zork-ui` — in that thread, switch between HUD and TERMINAL\n"
             "`/trivia` — ten private questions on a subject, scored out of 10"
         ),
         color=discord.Color.from_rgb(18, 18, 18)
