@@ -70,7 +70,7 @@ class Turn:
     moves: int
     aside: str | None
     finished: bool
-    ui: str = HUD
+    ui: str = TERMINAL
     error: str | None = None
 
 
@@ -81,15 +81,18 @@ class Session:
         machine: ZMachine,
         transcript: str,
         latest: str | None = None,
-        ui: str = HUD,
+        ui: str = TERMINAL,
         place: str | None = None,
+        ui_chosen: bool = False,
     ):
         self.game_id = game_id
         self.machine = machine
         self.transcript = transcript.strip("\n")
         self.latest = (self.transcript if latest is None else latest).strip("\n")
-        self.ui = _ui_mode(ui)
-        self.place = _game_text(self.transcript if place is None else place)
+        self.ui = _ui_mode(ui) if ui_chosen else TERMINAL
+        self.ui_chosen = bool(ui_chosen)
+        self.place = _game_text(place or "")
+        self.place_for = ""
         self.room = machine.room
         self.score = machine.score
         self.moves = machine.moves
@@ -101,6 +104,7 @@ class Session:
         session = cls(game_id, machine, opening)
         session.pull_status()
         session.place = _place_from_output(opening, session.room)
+        session.place_for = session.room
         return session
 
     def pull_status(self) -> None:
@@ -134,10 +138,11 @@ class Session:
         error: str | None = None,
     ) -> Turn:
         info = GAMES[self.game_id]
-        if self.ui == TERMINAL:
-            shown = self.transcript
-        else:
+        if self.ui == HUD:
+            self._ensure_place()
             shown = _hud_body(self.place, self.latest)
+        else:
+            shown = self.transcript
         title, status, description = render_panel(
             info.label,
             self.room,
@@ -186,6 +191,29 @@ class Session:
         entered = self.room.strip().casefold() != (previous_room or "").strip().casefold()
         if entered or _is_location_text(text, self.room):
             self.place = _place_from_output(text, self.room)
+            if _is_location_text(self.place, self.room):
+                self.place_for = self.room
+            else:
+                self.place_for = ""
+
+    def _ensure_place(self) -> None:
+        """Fill a missing room description from LOOK, then restore the game."""
+        if self.place and self.place_for.casefold() == (self.room or "").casefold():
+            return
+        if self.machine.halted or not self.machine.waiting:
+            return
+        snap = self.machine.snapshot()
+        try:
+            output = self.machine.accept("look")
+        except ZMachineError:
+            self.machine.load_snapshot(snap)
+            return
+        self.machine.load_snapshot(snap)
+        self.pull_status()
+        text = _place_from_output(output, self.room)
+        if text:
+            self.place = text
+        self.place_for = self.room
 
 
 def choose_aside(*, game_id: str, died: bool, delta: int, max_score: int, key: str) -> str | None:
@@ -256,8 +284,9 @@ def reset_runtime_cache() -> None:
 
 def open_session(root: str | Path, user_id: str, game_id: str) -> Turn:
     session = _ensure(root, user_id, game_id)
+    turn = session.panel(text=session.transcript)
     _write_slot(root, user_id, session)
-    return session.panel(text=session.transcript)
+    return turn
 
 
 def command_session(root: str | Path, user_id: str, game_id: str, command: str) -> Turn:
@@ -282,22 +311,26 @@ def command_session(root: str | Path, user_id: str, game_id: str, command: str) 
 def restart_session(root: str | Path, user_id: str, game_id: str) -> Turn:
     """Clear that player's slot for this game, then boot a new one."""
     key = _cache_key(root, user_id, game_id)
-    ui = _saved_ui(root, user_id, game_id)
+    ui, chosen = _saved_choice(root, user_id, game_id)
     _delete_slot(root, user_id, game_id)
     _LIVE.pop(key, None)
     session = Session.start(game_id)
     session.ui = ui
+    session.ui_chosen = chosen
     _LIVE[key] = session
+    turn = session.panel(text=session.transcript)
     _write_slot(root, user_id, session)
-    return session.panel(text=session.transcript)
+    return turn
 
 
 def toggle_ui(root: str | Path, user_id: str, game_id: str) -> Turn:
     """Switch this player's panel for this game between HUD and TERMINAL."""
     session = _ensure(root, user_id, game_id)
     session.ui = HUD if session.ui == TERMINAL else TERMINAL
+    session.ui_chosen = True
+    turn = session.panel(text=session.latest)
     _write_slot(root, user_id, session)
-    return session.panel(text=session.latest)
+    return turn
 
 
 def bind_thread(
@@ -383,19 +416,17 @@ def _read_slot(root: str | Path, user_id: str, game_id: str) -> Session | None:
         latest = payload.get("latest")
         if not isinstance(latest, str):
             latest = _latest_block(transcript)
-        stored_place = payload.get("place")
-        session = Session(
-            game_id,
-            machine,
-            transcript,
-            latest,
-            _ui_mode(payload.get("ui")),
-            stored_place if isinstance(stored_place, str) else None,
-        )
+        ui, chosen = _resolve_ui(payload)
+        session = Session(game_id, machine, transcript, latest, ui, ui_chosen=chosen)
         session.pull_status()
-        if not isinstance(stored_place, str):
-            _, reply = _split_latest(session.latest)
-            session.place = _place_from_output(reply, session.room) or session.place
+        stored_place = payload.get("place")
+        stored_for = str(payload.get("place_for") or "")
+        if isinstance(stored_place, str) and _is_location_text(_game_text(stored_place), session.room):
+            session.place = _game_text(stored_place)
+            session.place_for = session.room
+        elif isinstance(stored_place, str) and stored_for.casefold() == session.room.casefold():
+            session.place = _game_text(stored_place)
+            session.place_for = session.room
         return session
     except (OSError, ValueError, KeyError, TypeError, ZMachineError) as exc:
         print(f"[Zork] Ignoring unreadable save {path.name}: {type(exc).__name__}")
@@ -412,26 +443,37 @@ def _write_slot(root: str | Path, user_id: str, session: Session) -> None:
         "transcript": session.transcript,
         "latest": session.latest,
         "place": session.place,
+        "place_for": session.place_for,
         "ui": session.ui,
+        "ui_chosen": session.ui_chosen,
     }
     _atomic_json(_slot_path(root, user_id, session.game_id), payload)
 
 
 def _ui_mode(value) -> str:
-    return TERMINAL if str(value or "").casefold() == TERMINAL else HUD
+    return HUD if str(value or "").casefold() == HUD else TERMINAL
 
 
-def _saved_ui(root: str | Path, user_id: str, game_id: str) -> str:
+def _resolve_ui(payload: dict) -> tuple[str, bool]:
+    """TERMINAL until /zork-ui records a choice. An older terminal value counts as one."""
+    if payload.get("ui_chosen") is True:
+        return _ui_mode(payload.get("ui")), True
+    if str(payload.get("ui") or "").casefold() == TERMINAL:
+        return TERMINAL, True
+    return TERMINAL, False
+
+
+def _saved_choice(root: str | Path, user_id: str, game_id: str) -> tuple[str, bool]:
     path = _slot_path(root, user_id, game_id)
     if not path.is_file():
-        return HUD
+        return TERMINAL, False
     try:
         payload = json.loads(path.read_text())
     except (OSError, ValueError):
-        return HUD
+        return TERMINAL, False
     if not isinstance(payload, dict):
-        return HUD
-    return _ui_mode(payload.get("ui"))
+        return TERMINAL, False
+    return _resolve_ui(payload)
 
 
 def _game_text(output: str) -> str:
