@@ -1,3 +1,4 @@
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -114,6 +115,7 @@ class ZorkInterpreterTests(unittest.TestCase):
 
     def test_failed_move_keeps_the_prior_room_above_the_newest_line(self):
         open_session(self.root, self.player, "zork1")
+        self.assertEqual(toggle_ui(self.root, self.player, "zork1").ui, HUD)
         for command in ("south", "east", "open window", "west"):
             command_session(self.root, self.player, "zork1", command)
         failed = command_session(self.root, self.player, "zork1", "north")
@@ -142,9 +144,12 @@ class ZorkInterpreterTests(unittest.TestCase):
 
     def test_hud_shows_latest_and_zork_ui_toggles_terminal(self):
         command_session(self.root, self.player, "zork1", "open mailbox")
-        hud = command_session(self.root, self.player, "zork1", "north")
+        latest = command_session(self.root, self.player, "zork1", "north")
+        self.assertEqual(latest.ui, TERMINAL)
+        self.assertIn("> open mailbox", latest.description)
+
+        hud = toggle_ui(self.root, self.player, "zork1")
         self.assertEqual(hud.ui, HUD)
-        self.assertIn("boarded", hud.text.lower())
         self.assertIn("boarded", hud.description.lower())
         self.assertNotIn("leaflet", hud.description.lower())
         self.assertNotIn("> open mailbox", hud.description)
@@ -158,31 +163,82 @@ class ZorkInterpreterTests(unittest.TestCase):
         self.assertIn("> open mailbox", terminal.description)
         self.assertIn("leaflet", terminal.description.lower())
         self.assertIn("boarded", terminal.description.lower())
-        self.assertIn(f"SCORE {terminal.score}/{GAMES['zork1'].max_score}", terminal.description)
-        self.assertIn(f"MOVES {terminal.moves}", terminal.description)
-        self.assertIn(terminal.room.upper(), terminal.description)
 
-        hud = toggle_ui(self.root, self.player, "zork1")
-        self.assertEqual(hud.ui, HUD)
-        self.assertNotIn("leaflet", hud.description.lower())
-        self.assertIn("boarded", hud.description.lower())
-
-        toggle_ui(self.root, self.player, "zork1")
         reset_runtime_cache()
         restored = open_session(self.root, self.player, "zork1")
         self.assertEqual(restored.ui, TERMINAL)
         self.assertIn("> open mailbox", restored.description)
-        self.assertIn("boarded", restored.description.lower())
 
         other = command_session(self.root, "999", "zork1", "open mailbox")
         other = command_session(self.root, "999", "zork1", "north")
-        self.assertEqual(other.ui, HUD)
-        self.assertNotIn("> open mailbox", other.description)
-        self.assertIn("boarded", other.description.lower())
+        self.assertEqual(other.ui, TERMINAL)
+        self.assertIn("> open mailbox", other.description)
 
         same_player_other_game = command_session(self.root, self.player, "zork2", "inventory")
-        self.assertEqual(same_player_other_game.ui, HUD)
+        self.assertEqual(same_player_other_game.ui, TERMINAL)
         self.assertNotIn("> open mailbox", same_player_other_game.description)
+
+    def test_old_save_and_fresh_game_render_through_the_bot_panel(self):
+        from zork.ui import embed_for
+
+        open_session(self.root, self.player, "zork1")
+        self.assertEqual(toggle_ui(self.root, self.player, "zork1").ui, HUD)
+        for command in ("south", "east", "open window", "west", "north"):
+            played = command_session(self.root, self.player, "zork1", command)
+        moves = played.moves
+        score = played.score
+        slot = self.root / "zork" / "saves" / self.player / "zork1.json"
+        older = json.loads(slot.read_text())
+        older.pop("place", None)
+        older.pop("place_for", None)
+        older.pop("ui_chosen", None)
+        older["ui"] = "hud"
+        slot.write_text(json.dumps(older))
+
+        reset_runtime_cache()
+        untouched = open_session(self.root, self.player, "zork1")
+        self.assertEqual(untouched.ui, TERMINAL)
+        self.assertEqual(untouched.moves, moves)
+        self.assertEqual(untouched.score, score)
+
+        chosen = dict(older)
+        chosen["ui_chosen"] = True
+        slot.write_text(json.dumps(chosen))
+        reset_runtime_cache()
+        restored = open_session(self.root, self.player, "zork1")
+        self.assertEqual(restored.ui, HUD)
+        self.assertEqual(restored.moves, moves)
+        self.assertEqual(restored.score, score)
+        panel = embed_for(restored).description
+        folded = panel.lower()
+        self.assertLess(panel.index("SCORE"), folded.index("you are in the kitchen of the white house"))
+        self.assertLess(panel.index("MOVES"), folded.index("you are in the kitchen of the white house"))
+        self.assertIn("bottle", folded)
+        self.assertIn("sack", folded)
+        self.assertLess(folded.index("you are in the kitchen of the white house"), folded.index("can't go that way"))
+        self.assertEqual(embed_for(restored).title, "KITCHEN")
+
+        taken = command_session(self.root, self.player, "zork1", "take bottle")
+        self.assertEqual(taken.moves, moves + 1)
+        self.assertIn("taken", taken.text.lower())
+        taken_panel = embed_for(taken).description.lower()
+        self.assertLess(taken_panel.index("you are in the kitchen of the white house"), taken_panel.index("taken"))
+
+        fresh = open_session(self.root, "42", "zork1")
+        self.assertEqual(fresh.ui, TERMINAL)
+        self.assertEqual(fresh.moves, 0)
+        chosen_hud = toggle_ui(self.root, "42", "zork1")
+        self.assertEqual(chosen_hud.ui, HUD)
+        self.assertEqual(chosen_hud.moves, 0)
+        opened = command_session(self.root, "42", "zork1", "open mailbox")
+        self.assertEqual(opened.moves, 1)
+        fresh_panel = embed_for(opened).description
+        fresh_folded = fresh_panel.lower()
+        self.assertIn("small mailbox", fresh_folded)
+        self.assertIn("leaflet", fresh_folded)
+        self.assertLess(fresh_panel.index("SCORE"), fresh_folded.index("small mailbox"))
+        self.assertLess(fresh_folded.index("small mailbox"), fresh_folded.index("leaflet"))
+        self.assertEqual(embed_for(opened).title, opened.room.upper())
 
     def test_zork2_and_zork3_accept_a_command(self):
         for game_id in ("zork2", "zork3"):
