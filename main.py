@@ -32,6 +32,7 @@ except ImportError as exc:
 from zoneinfo import ZoneInfo
 import difflib
 import textwrap
+from image_clean import ImageCleanError, clean_image
 from post_preview import (
     PreparedPost,
     missing_permissions,
@@ -8474,6 +8475,7 @@ async def _build_quote_file(
     card = await asyncio.to_thread(
         _render_quote_card, content, author_name, avatar_bytes, created_at
     )
+    card, _ = await asyncio.to_thread(clean_image, card)
     return discord.File(BytesIO(card), filename="grim-quote.png")
 
 @bot.tree.context_menu(name="Quote")
@@ -9502,6 +9504,13 @@ async def _read_relay_image(attachment, kind: str, max_bytes: int) -> tuple[byte
     extension = RELAY_IMAGE_FORMATS.get(image_format or "")
     if not extension:
         raise RelayImageError("Use a PNG, JPEG, GIF, or WebP image.")
+    try:
+        data, extension = await asyncio.to_thread(clean_image, data)
+    except ImageCleanError as error:
+        print(f"[Relay] metadata strip failed: {error}")
+        raise RelayImageError("Couldn't clean that image's metadata, so Grim won't post it.")
+    if len(data) > max_bytes:
+        raise RelayImageError("That image is too large to post in this server.")
     return data, f"grim-{kind}{extension}"
 
 def build_announce_post(

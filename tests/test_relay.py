@@ -9,6 +9,7 @@ from PIL import Image
 
 import main
 import post_preview
+from image_clean import metadata_left
 
 
 def png_bytes():
@@ -269,6 +270,58 @@ class RelayCommandTests(unittest.TestCase):
             event, _ = await self.preview(main.announce, image=attachment(data))
             preview, _ = self.preview_view(event)
             self.assertEqual(preview["embed"].image.url, "attachment://grim-announce.png")
+
+        asyncio.run(run())
+
+    def test_reuploaded_image_has_its_metadata_stripped_in_preview_and_public_post(self):
+        async def run():
+            from tests.test_image_clean import LEAKS, dirty_jpeg, dirty_png, dirty_webp, dirty_gif, metadata_left
+
+            for command in (main.say, main.announce):
+                for dirty in (dirty_jpeg(), dirty_png(), dirty_gif(), dirty_webp()):
+                    self.assertTrue(any(leak in dirty for leak in LEAKS))
+                    event, _ = await self.preview(command, text="hi", image=attachment(dirty), rewrite="hi")
+                    preview, view = self.preview_view(event)
+                    shown = file_bytes(preview)
+                    for leak in LEAKS:
+                        self.assertNotIn(leak, shown)
+                    self.assertEqual(metadata_left(shown), [])
+                    await view.confirm(relay_interaction(channel=event.channel))
+                    self.assertEqual(file_bytes(event.channel.sent[-1]), shown)
+
+        asyncio.run(run())
+
+    def test_image_that_cannot_be_cleaned_is_refused(self):
+        async def run():
+            from image_clean import ImageCleanError
+
+            with patch.object(main, "clean_image", side_effect=ImageCleanError("boom")):
+                event, _ = await self.preview(main.say, text="hi", image=attachment())
+            self.assertIn("won't post it", event.followup.sent[0][0])
+            self.assertEqual(event.channel.sent, [])
+
+        asyncio.run(run())
+
+    def test_quote_card_goes_through_the_shared_cleaner(self):
+        async def run():
+            from datetime import datetime, timezone
+
+            real = main.clean_image
+            seen = []
+
+            def spy(data):
+                seen.append(data)
+                return real(data)
+
+            with patch.object(main, "clean_image", side_effect=spy), \
+                    patch.object(main.aiohttp, "ClientSession", side_effect=RuntimeError("offline")):
+                quote = await main._build_quote_file(
+                    "hello", "Noct", "https://cdn.example/a.png", datetime(2026, 1, 1, tzinfo=timezone.utc)
+                )
+            self.assertEqual(len(seen), 1)
+            self.assertEqual(quote.filename, "grim-quote.png")
+            self.assertEqual(quote.fp.getvalue()[:8], b"\x89PNG\r\n\x1a\n")
+            self.assertEqual(metadata_left(quote.fp.getvalue()), [])
 
         asyncio.run(run())
 
