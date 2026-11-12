@@ -145,11 +145,12 @@ class RelayCommandTests(unittest.TestCase):
                 channel = RelayChannel()
                 event = relay_interaction(admin=False, channel=channel)
                 event, model = await self.preview(command, text="hello all", image=attachment(), event=event)
-                content, kwargs = event.response.messages[0]
+                self.assertEqual(len(event.response.deferred), 1)
+                self.assertTrue(event.response.deferred[0]["ephemeral"])
+                content, kwargs, _ = event.followup.sent[0]
                 self.assertIn("Only server administrators", content)
                 self.assertTrue(kwargs["ephemeral"])
-                self.assertEqual(event.response.deferred, [])
-                self.assertEqual(event.followup.sent, [])
+                self.assertEqual(len(event.followup.sent), 1)
                 self.assertEqual(channel.sent, [])
                 model.assert_not_awaited()
 
@@ -359,9 +360,9 @@ class RelayCommandTests(unittest.TestCase):
             for command in (main.announce, main.say):
                 for text in (None, "   "):
                     event, model = await self.preview(command, text=text)
-                    self.assertIn("text, an image, or both", event.response.messages[0][0])
-                    self.assertEqual(event.response.deferred, [])
-                    self.assertEqual(event.followup.sent, [])
+                    self.assertIn("text, an image, or both", event.followup.sent[0][0])
+                    self.assertTrue(event.followup.sent[0][1]["ephemeral"])
+                    self.assertEqual(len(event.followup.sent), 1)
                     self.assertEqual(event.channel.sent, [])
                     model.assert_not_awaited()
 
@@ -379,8 +380,8 @@ class RelayCommandTests(unittest.TestCase):
         async def run():
             event = relay_interaction(permissions=bot_permissions(attach_files=False))
             event, model = await self.preview(main.say, text="hi", image=attachment(), event=event)
-            self.assertIn("Attach Files", event.response.messages[0][0])
-            self.assertTrue(event.response.messages[0][1]["ephemeral"])
+            self.assertIn("Attach Files", event.followup.sent[0][0])
+            self.assertTrue(event.followup.sent[0][1]["ephemeral"])
             model.assert_not_awaited()
             self.assertEqual(event.channel.sent, [])
 
@@ -645,6 +646,121 @@ class RelayOriginalTests(unittest.TestCase):
             await warning.post_original(press)
             self.assertIn("Nothing was posted", press.followup.sent[-1][0])
             self.assertEqual(channel.sent, [])
+
+        asyncio.run(run())
+
+
+class RelayAcknowledgeFirstTests(unittest.TestCase):
+    """Discord drops an interaction that isn't acknowledged within three seconds."""
+
+    def setUp(self):
+        main._COMMAND_RATE_LIMITS.clear()
+        self.log = []
+        self.audit = patch.object(
+            main, "record_security_event", side_effect=lambda *a, **k: self.log.append("audit")
+        )
+        self.audit.start()
+
+    def tearDown(self):
+        self.audit.stop()
+        main._COMMAND_RATE_LIMITS.clear()
+
+    def event(self, **overrides):
+        event = relay_interaction(**overrides)
+        real_defer = event.response.defer
+
+        async def defer(**kwargs):
+            self.log.append("defer")
+            await real_defer(**kwargs)
+
+        event.response.defer = defer
+        return event
+
+    def slow_attachment(self):
+        data = dirty_jpeg()
+        item = attachment(data)
+
+        async def read():
+            self.log.append("download")
+            await asyncio.sleep(0.01)
+            return data
+
+        item.read = read
+        return item
+
+    async def run_command(self, command, event, text, image):
+        real_clean = main.clean_image_report
+
+        def clean(data):
+            self.log.append("clean")
+            return real_clean(data)
+
+        async def model(payload):
+            self.log.append("model")
+            await asyncio.sleep(0.01)
+            return "hi"
+
+        with patch.object(main, "clean_image_report", clean), patch.object(main, "_post_xai_chat", model):
+            await command.callback(event, text, image)
+
+    def test_defer_is_the_first_thing_that_happens_for_both_commands(self):
+        async def run():
+            for command in (main.say, main.announce):
+                self.log.clear()
+                event = self.event()
+                await self.run_command(command, event, "hi", self.slow_attachment())
+                self.assertEqual(self.log[0], "defer")
+                self.assertEqual(self.log.count("defer"), 1)
+                for step in ("download", "clean", "model"):
+                    self.assertIn(step, self.log)
+                    self.assertGreater(self.log.index(step), 0)
+                self.assertTrue(event.response.deferred[0]["ephemeral"])
+                self.assertEqual(event.response.messages, [])
+                self.assertTrue(any(
+                    isinstance(kwargs.get("view"), post_preview.PreviewView)
+                    for _, kwargs, _ in event.followup.sent
+                ))
+
+        asyncio.run(run())
+
+    def test_text_only_defers_before_the_model_call(self):
+        async def run():
+            event = self.event()
+            await self.run_command(main.say, event, "hi", None)
+            self.assertEqual(self.log[0], "defer")
+            self.assertLess(self.log.index("defer"), self.log.index("model"))
+
+        asyncio.run(run())
+
+    def test_denials_and_rejections_still_acknowledge_first_and_do_no_work(self):
+        async def run():
+            self.log.clear()
+            event = self.event(admin=False)
+            await self.run_command(main.say, event, "hi", self.slow_attachment())
+            self.assertEqual(self.log[0], "defer")
+            for step in ("download", "clean", "model"):
+                self.assertNotIn(step, self.log)
+            self.assertIn("Only server administrators", event.followup.sent[0][0])
+            self.assertEqual(event.channel.sent, [])
+
+            self.log.clear()
+            event = self.event()
+            await self.run_command(main.announce, event, None, None)
+            self.assertEqual(self.log[0], "defer")
+            self.assertEqual(event.response.messages, [])
+
+        asyncio.run(run())
+
+    def test_an_unexpected_failure_after_the_defer_is_reported_not_left_hanging(self):
+        async def run():
+            event = self.event()
+            with patch.object(main, "_rewrite_relay_text", AsyncMock(side_effect=RuntimeError("boom"))):
+                await main.say.callback(event, "hi", None)
+            self.assertEqual(self.log[0], "defer")
+            note, kwargs, _ = event.followup.sent[-1]
+            self.assertIn("Nothing was posted", note)
+            self.assertTrue(kwargs["ephemeral"])
+            self.assertEqual(event.channel.sent, [])
 
         asyncio.run(run())
 

@@ -9432,22 +9432,27 @@ def _is_administrator(interaction: discord.Interaction) -> bool:
     permissions = getattr(interaction.user, "guild_permissions", None)
     return bool(getattr(permissions, "administrator", False))
 
+async def _ephemeral_reply(interaction: discord.Interaction, message: str) -> None:
+    """Answer privately whether or not the interaction was already acknowledged."""
+    if interaction.response.is_done():
+        await interaction.followup.send(message, ephemeral=True)
+    else:
+        await interaction.response.send_message(message, ephemeral=True)
+
 async def require_administrator(interaction: discord.Interaction, action: str) -> bool:
     """Administrator permission only. default_permissions is a UI hint, this is the gate."""
     if not interaction.guild_id or not interaction.guild:
         record_security_event(interaction, action, "denied", {"reason": "not_in_guild"})
-        await interaction.response.send_message(f"Use /{action} inside a server.", ephemeral=True)
+        await _ephemeral_reply(interaction, f"Use /{action} inside a server.")
         return False
     if not _is_administrator(interaction):
         record_security_event(interaction, action, "denied", {"reason": "not_administrator"})
-        await interaction.response.send_message(
-            f"Only server administrators can use /{action}.", ephemeral=True
-        )
+        await _ephemeral_reply(interaction, f"Only server administrators can use /{action}.")
         return False
     if not _rate_limit_allows(interaction, action):
         record_security_event(interaction, action, "rate_limited")
-        await interaction.response.send_message(
-            "Too many requests recently. Please try again in a minute.", ephemeral=True
+        await _ephemeral_reply(
+            interaction, "Too many requests recently. Please try again in a minute."
         )
         return False
     return True
@@ -9485,6 +9490,15 @@ async def _rewrite_relay_text(kind: str, text: str) -> str | None:
             return None
     return cleaned[:RELAY_TEXT_LIMITS[kind]]
 
+def _sniff_relay_image(data: bytes) -> str | None:
+    try:
+        with Image.open(BytesIO(data)) as picture:
+            image_format = picture.format
+            picture.verify()
+        return image_format
+    except Exception:
+        return None
+
 async def _read_relay_image(
     attachment, kind: str, max_bytes: int
 ) -> tuple[bytes, str, bytes, tuple[str, ...]]:
@@ -9497,14 +9511,10 @@ async def _read_relay_image(
         raise RelayImageError("Couldn't download that image. Try again.")
     if not data or len(data) > max_bytes:
         raise RelayImageError("That image is too large to post in this server.")
-    try:
-        with Image.open(BytesIO(data)) as picture:
-            image_format = picture.format
-            picture.verify()
-    except Exception:
+    image_format = await asyncio.to_thread(_sniff_relay_image, data)
+    if image_format is None:
         raise RelayImageError("That file isn't an image Grim can post.")
-    extension = RELAY_IMAGE_FORMATS.get(image_format or "")
-    if not extension:
+    if image_format not in RELAY_IMAGE_FORMATS:
         raise RelayImageError("Use a PNG, JPEG, GIF, or WebP image.")
     original = data
     try:
@@ -9560,19 +9570,36 @@ async def _relay_command(
     text: str | None,
     image: discord.Attachment | None,
 ):
+    # Discord gives three seconds to acknowledge. Acknowledge before anything else,
+    # then do the slow work (download, metadata strip, xAI rewrite) and follow up.
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    try:
+        await _run_relay_command(interaction, kind, text, image)
+    except Exception as error:
+        print(f"[Relay] /{kind} failed: {type(error).__name__}: {error}")
+        record_security_event(interaction, kind, "failed", {"reason": type(error).__name__})
+        try:
+            await interaction.followup.send(
+                f"/{kind} hit a problem on Grim's side. Nothing was posted.", ephemeral=True
+            )
+        except Exception as send_error:
+            print(f"[Relay] Could not report the failure: {type(send_error).__name__}")
+
+async def _run_relay_command(
+    interaction: discord.Interaction,
+    kind: str,
+    text: str | None,
+    image: discord.Attachment | None,
+):
     if not await require_administrator(interaction, kind):
         return
     clean = _tidy_relay_text(text)
     if not clean and image is None:
-        await interaction.response.send_message(
-            f"Give /{kind} some text, an image, or both.", ephemeral=True
-        )
+        await _ephemeral_reply(interaction, f"Give /{kind} some text, an image, or both.")
         return
     limit = RELAY_TEXT_LIMITS[kind]
     if len(clean) > limit:
-        await interaction.response.send_message(
-            f"Keep /{kind} text under {limit:,} characters.", ephemeral=True
-        )
+        await _ephemeral_reply(interaction, f"Keep /{kind} text under {limit:,} characters.")
         return
     needs = PreparedPost(
         embed=discord.Embed() if kind == "announce" else None,
@@ -9581,10 +9608,9 @@ async def _relay_command(
     missing = missing_permissions(interaction, needs)
     if missing:
         record_security_event(interaction, kind, "denied", {"reason": "bot_missing_permission"})
-        await interaction.response.send_message(permission_error(missing), ephemeral=True)
+        await _ephemeral_reply(interaction, permission_error(missing))
         return
 
-    await interaction.response.defer(ephemeral=True, thinking=True)
     picture = filename = original = None
     removed: tuple[str, ...] = ()
     if image is not None:

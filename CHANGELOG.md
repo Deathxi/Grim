@@ -13,6 +13,7 @@ All notable changes to this project are documented here, organized by month.
 - `/trivia subject` — a private, dismissible ten-question quiz. Grim writes the round through the existing xAI path, shows one four-choice question at a time, and scores the invoking member out of 10. A bad subject or a failed generation stops the round instead of posting a partial quiz.
 
 ### Changed
+- `/say` and `/announce` acknowledge the command before anything else, then check the permission, download and clean the image, and ask xAI. A denial, a rejected input, or an unexpected failure now arrives as a private follow-up instead of leaving Discord on "Sending command…".
 - A death on the Zork panel shows the grue line and "you have died" once, then the room you wake in once. The move is not echoed. Another reply that names more than one room keeps the current room, then the newest outcome. TERMINAL still lists every move.
 - `/zork` HUD keeps the status line first, then the current room description, then the newest reply. A failed move leaves that room in place. Entering another room replaces it instead of stacking the old one.
 - `/zork` opens on HUD: the latest message, with the room, score, and moves still on the panel. `/zork-ui` in that thread switches that player to TERMINAL, the full move list, and back. The choice is kept per player per game.
