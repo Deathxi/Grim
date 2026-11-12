@@ -5,7 +5,14 @@ from io import BytesIO
 
 from PIL import Image, ImageChops, ImageOps
 
-from image_clean import ImageCleanError, clean_image, metadata_left, strip_image_metadata
+from image_clean import (
+    ImageCleanError,
+    clean_image,
+    clean_image_report,
+    inspect_metadata,
+    metadata_left,
+    strip_image_metadata,
+)
 
 MAKE = "SecretCam"
 MODEL = "Model-XYZ-9000"
@@ -244,6 +251,37 @@ class StripMetadataTests(unittest.TestCase):
         for data, image_format in ((dirty_png(), "PNG"), (dirty_jpeg(), "JPEG"), (dirty_gif(), "GIF"), (dirty_webp(), "WEBP")):
             once = strip_image_metadata(data, image_format)
             self.assertEqual(strip_image_metadata(once, image_format), once)
+
+    def test_inspect_names_what_the_file_carries(self):
+        jpeg = inspect_metadata(dirty_jpeg(), "JPEG")
+        for label in ("GPS", "device", "timestamp", "author", "XMP", "comments"):
+            self.assertIn(label, jpeg)
+        self.assertEqual(jpeg[:3], ["GPS", "device", "timestamp"])
+        self.assertIn("timestamp", inspect_metadata(dirty_png(), "PNG"))
+        self.assertIn("comments", inspect_metadata(dirty_png(), "PNG"))
+        self.assertIn("GPS", inspect_metadata(dirty_png(), "PNG"))
+        self.assertIn("XMP", inspect_metadata(dirty_gif(), "GIF"))
+        self.assertIn("comments", inspect_metadata(dirty_gif(), "GIF"))
+        webp = inspect_metadata(dirty_webp(), "WEBP")
+        self.assertIn("GPS", webp)
+        self.assertIn("XMP", webp)
+        self.assertIn("other", inspect_metadata(dirty_png() + b"tail-bytes", "PNG"))
+
+    def test_clean_files_report_nothing_and_cleaned_files_report_nothing(self):
+        for data, image_format in ((dirty_png(), "PNG"), (dirty_jpeg(), "JPEG"), (dirty_gif(), "GIF"), (dirty_webp(), "WEBP")):
+            cleaned = strip_image_metadata(data, image_format)
+            self.assertEqual(inspect_metadata(cleaned, image_format), [])
+            report = clean_image_report(data)
+            self.assertTrue(report.removed)
+            self.assertEqual(clean_image_report(cleaned).removed, ())
+        plain = encode(sample_image(), "PNG")
+        self.assertEqual(clean_image_report(plain).removed, ())
+
+    def test_orientation_only_is_reported_as_orientation(self):
+        exif = Image.Exif()
+        exif[0x0112] = 6
+        data = encode(sample_image(), "JPEG", exif=exif)
+        self.assertEqual(inspect_metadata(data, "JPEG"), ["orientation"])
 
 
 if __name__ == "__main__":

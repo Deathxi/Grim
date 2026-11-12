@@ -9,6 +9,7 @@ be rotated, so it is re-encoded (PNG and WebP losslessly, JPEG at quality 95).
 from __future__ import annotations
 
 import struct
+from dataclasses import dataclass
 from io import BytesIO
 
 from PIL import Image, ImageOps
@@ -215,8 +216,222 @@ def metadata_left(data: bytes) -> list[str]:
     return found
 
 
-def clean_image(data: bytes) -> tuple[bytes, str]:
-    """The one door every image Grim reuploads goes through. Returns (bytes, extension)."""
+METADATA_ORDER = ("GPS", "device", "timestamp", "author", "software", "camera settings", "XMP", "IPTC", "comments", "orientation", "other")
+METADATA_DETAIL = {
+    "GPS": "GPS / location coordinates",
+    "device": "Device make, model, or serial number",
+    "timestamp": "Date and time taken or edited",
+    "author": "Author, owner, copyright, or description",
+    "software": "Editing software",
+    "camera settings": "Camera settings (exposure, lens, and similar)",
+    "XMP": "XMP data (edit history, author, and similar)",
+    "IPTC": "IPTC / Photoshop data (captions, credits, and similar)",
+    "comments": "Embedded comments or text",
+    "orientation": "Rotation flag",
+    "other": "Extra data hidden in the file",
+}
+
+_EXIF_DEVICE = {0x010F, 0x0110, 0xA431, 0xA432, 0xA433, 0xA434, 0xA435, 0xA430, 0xC62F}
+_EXIF_TIME = {0x0132, 0x9003, 0x9004, 0x9290, 0x9291, 0x9292, 0xA003}
+_EXIF_AUTHOR = {0x013B, 0x8298, 0x010E, 0x9286, 0x9C9B, 0x9C9C, 0x9C9D, 0x9C9E, 0x9C9F}
+_EXIF_SOFTWARE = {0x0131, 0x013C}
+_EXIF_STRUCTURAL = {0x8769, 0x8825, 0xA005, 0x0112, 0x0100, 0x0101, 0x011A, 0x011B, 0x0128, 0x0213}
+
+
+def _exif_labels(exif: Image.Exif) -> set[str]:
+    found: set[str] = set()
+    tags: dict = dict(exif)
+    try:
+        tags.update(exif.get_ifd(0x8769))
+    except Exception:
+        pass
+    try:
+        gps = exif.get_ifd(0x8825)
+    except Exception:
+        gps = {}
+    if gps:
+        found.add("GPS")
+    for tag in tags:
+        if tag in _EXIF_DEVICE:
+            found.add("device")
+        elif tag in _EXIF_TIME:
+            found.add("timestamp")
+        elif tag in _EXIF_AUTHOR:
+            found.add("author")
+        elif tag in _EXIF_SOFTWARE:
+            found.add("software")
+        elif tag == 0x0112:
+            found.add("orientation")
+        elif tag not in _EXIF_STRUCTURAL:
+            found.add("camera settings")
+    return found
+
+
+def _exif_from_bytes(payload: bytes) -> set[str]:
+    try:
+        exif = Image.Exif()
+        exif.load(payload)
+        return _exif_labels(exif) or {"other"}
+    except Exception:
+        return {"other"}
+
+
+def _ordered(found: set[str]) -> list[str]:
+    return [label for label in METADATA_ORDER if label in found]
+
+
+def _inspect_png(data: bytes) -> set[str]:
+    found: set[str] = set()
+    pos = len(PNG_SIGNATURE)
+    while pos + 8 <= len(data):
+        length = struct.unpack(">I", data[pos:pos + 4])[0]
+        kind = data[pos + 4:pos + 8]
+        end = pos + 12 + length
+        payload = data[pos + 8:pos + 8 + length]
+        if kind == b"tIME":
+            found.add("timestamp")
+        elif kind == b"eXIf":
+            found |= _exif_from_bytes(payload)
+        elif kind in (b"tEXt", b"zTXt", b"iTXt"):
+            keyword = payload.split(b"\x00", 1)[0].decode("latin-1").lower()
+            if keyword in ("author", "copyright"):
+                found.add("author")
+            elif keyword in ("creation time", "date:create", "date:modify"):
+                found.add("timestamp")
+            elif keyword == "software":
+                found.add("software")
+            elif keyword.startswith("xml:com.adobe.xmp"):
+                found.add("XMP")
+            else:
+                found.add("comments")
+        pos = end
+        if kind == b"IEND":
+            if data[pos:].strip(b"\x00"):
+                found.add("other")
+            break
+    return found
+
+
+def _inspect_jpeg(data: bytes) -> set[str]:
+    found: set[str] = set()
+    pos, size = 2, len(data)
+    while pos + 2 <= size:
+        if data[pos] != 0xFF:
+            break
+        marker = data[pos + 1]
+        if marker == 0xFF:
+            pos += 1
+            continue
+        if marker == 0xD9:
+            if data[pos + 2:].strip(b"\x00"):
+                found.add("other")
+            break
+        if marker == 0x01 or 0xD0 <= marker <= 0xD7:
+            pos += 2
+            continue
+        if pos + 4 > size:
+            break
+        length = struct.unpack(">H", data[pos + 2:pos + 4])[0]
+        end = pos + 2 + length
+        payload = data[pos + 4:end]
+        if marker == 0xE1 and payload.startswith(b"Exif\x00"):
+            found |= _exif_from_bytes(payload)
+        elif marker == 0xE1 and payload.startswith(b"http://ns.adobe.com/xap"):
+            found.add("XMP")
+        elif marker == 0xED:
+            found.add("IPTC")
+        elif marker == 0xFE:
+            found.add("comments")
+        elif 0xE0 <= marker <= 0xEF and not (
+            (marker == 0xE0 and payload.startswith(b"JFIF\x00"))
+            or (marker == 0xE2 and payload.startswith(b"ICC_PROFILE\x00"))
+            or (marker == 0xEE and payload.startswith(b"Adobe"))
+        ):
+            found.add("other")
+        pos = end
+        if marker == 0xDA:
+            while pos + 1 < size:
+                if data[pos] == 0xFF and data[pos + 1] != 0x00 and not 0xD0 <= data[pos + 1] <= 0xD7:
+                    break
+                pos += 1
+    return found
+
+
+def _inspect_gif(data: bytes) -> set[str]:
+    found: set[str] = set()
+    flags = data[10]
+    pos = 13
+    if flags & 0x80:
+        pos += 3 * (2 << (flags & 0x07))
+    while pos < len(data):
+        block = data[pos]
+        if block == 0x3B:
+            if data[pos + 1:].strip(b"\x00"):
+                found.add("other")
+            break
+        if block == 0x21:
+            label = data[pos + 1]
+            end = _skip_sub_blocks(data, pos + 2)
+            if label == 0xFE or label == 0x01:
+                found.add("comments")
+            elif label == 0xFF:
+                ident = data[pos + 3:pos + 14]
+                if ident.startswith(b"XMP Data"):
+                    found.add("XMP")
+                elif ident not in GIF_KEEP_APPS:
+                    found.add("other")
+            pos = end
+        elif block == 0x2C:
+            local = data[pos + 9]
+            end = pos + 10
+            if local & 0x80:
+                end += 3 * (2 << (local & 0x07))
+            pos = _skip_sub_blocks(data, end + 1)
+        else:
+            break
+    return found
+
+
+def _inspect_webp(data: bytes) -> set[str]:
+    found: set[str] = set()
+    pos = 12
+    while pos + 8 <= len(data):
+        kind = data[pos:pos + 4]
+        length = struct.unpack("<I", data[pos + 4:pos + 8])[0]
+        payload = data[pos + 8:pos + 8 + length]
+        if kind == b"EXIF":
+            found |= _exif_from_bytes(payload)
+        elif kind == b"XMP ":
+            found.add("XMP")
+        elif kind not in WEBP_KEEP:
+            found.add("other")
+        pos += 8 + length + (length % 2)
+    return found
+
+
+_INSPECTORS = {"PNG": _inspect_png, "JPEG": _inspect_jpeg, "GIF": _inspect_gif, "WEBP": _inspect_webp}
+
+
+def inspect_metadata(data: bytes, image_format: str) -> list[str]:
+    """Short labels for the identifying metadata in the file, e.g. ["GPS", "device"]."""
+    inspector = _INSPECTORS.get(image_format)
+    if inspector is None:
+        return []
+    try:
+        return _ordered(inspector(data))
+    except Exception:
+        return ["other"]
+
+
+@dataclass(frozen=True)
+class CleanedImage:
+    data: bytes
+    extension: str
+    removed: tuple[str, ...]
+
+
+def clean_image_report(data: bytes) -> CleanedImage:
+    """Clean an image and report which kinds of metadata it carried."""
     try:
         with Image.open(BytesIO(data)) as picture:
             picture.verify()
@@ -225,7 +440,15 @@ def clean_image(data: bytes) -> tuple[bytes, str]:
         raise ImageCleanError("not an image") from error
     if image_format not in FORMAT_EXTENSIONS:
         raise ImageCleanError("unsupported format")
-    return strip_image_metadata(data, image_format), FORMAT_EXTENSIONS[image_format]
+    removed = tuple(inspect_metadata(data, image_format))
+    cleaned = strip_image_metadata(data, image_format)
+    return CleanedImage(cleaned, FORMAT_EXTENSIONS[image_format], removed)
+
+
+def clean_image(data: bytes) -> tuple[bytes, str]:
+    """The one door every image Grim reuploads goes through. Returns (bytes, extension)."""
+    result = clean_image_report(data)
+    return result.data, result.extension
 
 
 def strip_image_metadata(data: bytes, image_format: str) -> bytes:

@@ -9,7 +9,8 @@ from PIL import Image
 
 import main
 import post_preview
-from image_clean import metadata_left
+from image_clean import metadata_left, strip_image_metadata
+from tests.test_image_clean import LEAKS, dirty_jpeg
 
 
 def png_bytes():
@@ -160,9 +161,10 @@ class RelayCommandTests(unittest.TestCase):
             self.assertTrue(event.response.deferred[0]["ephemeral"])
             kwargs, view = self.preview_view(event)
             self.assertTrue(kwargs["ephemeral"])
-            self.assertEqual(kwargs["embed"].description, "Polished words.")
-            self.assertEqual(kwargs["embed"].title, "Announcement")
-            self.assertIn("Powered by XSI", kwargs["embed"].footer.text)
+            self.assertEqual(kwargs["embeds"][0].description, "Polished words.")
+            self.assertEqual(kwargs["embeds"][0].title, "Announcement")
+            self.assertIn("Powered by XSI", kwargs["embeds"][0].footer.text)
+            self.assertIn("only you can see this", kwargs["embeds"][-1].description)
             self.assertEqual(view.owner_id, "10")
             self.assertEqual(event.channel.sent, [])
             model.assert_awaited_once()
@@ -181,7 +183,7 @@ class RelayCommandTests(unittest.TestCase):
 
             self.assertEqual(len(event.channel.sent), 1)
             public = event.channel.sent[0]
-            self.assertEqual(public["embed"].to_dict(), preview["embed"].to_dict())
+            self.assertEqual(public["embed"].to_dict(), preview["embeds"][0].to_dict())
             self.assertEqual(public.get("content"), preview.get("content"))
             self.assertEqual(file_bytes(public), file_bytes(preview))
             self.assertEqual(public["file"].filename, preview["file"].filename)
@@ -248,7 +250,7 @@ class RelayCommandTests(unittest.TestCase):
             demoted = relay_interaction(admin=False, channel=event.channel)
             await view.confirm(demoted)
             self.assertEqual(event.channel.sent, [])
-            self.assertIn("no longer have permission", demoted.followup.sent[-1][0])
+            self.assertIn("no longer have permission", demoted.response.messages[0][0])
 
         asyncio.run(run())
 
@@ -269,7 +271,7 @@ class RelayCommandTests(unittest.TestCase):
 
             event, _ = await self.preview(main.announce, image=attachment(data))
             preview, _ = self.preview_view(event)
-            self.assertEqual(preview["embed"].image.url, "attachment://grim-announce.png")
+            self.assertEqual(preview["embeds"][0].image.url, "attachment://grim-announce.png")
 
         asyncio.run(run())
 
@@ -295,7 +297,7 @@ class RelayCommandTests(unittest.TestCase):
         async def run():
             from image_clean import ImageCleanError
 
-            with patch.object(main, "clean_image", side_effect=ImageCleanError("boom")):
+            with patch.object(main, "clean_image_report", side_effect=ImageCleanError("boom")):
                 event, _ = await self.preview(main.say, text="hi", image=attachment())
             self.assertIn("won't post it", event.followup.sent[0][0])
             self.assertEqual(event.channel.sent, [])
@@ -342,11 +344,12 @@ class RelayCommandTests(unittest.TestCase):
             preview, _ = self.preview_view(event)
             self.assertNotIn("content", preview)
             self.assertIn("file", preview)
+            self.assertEqual(len(preview["embeds"]), 1)
             model.assert_not_awaited()
 
             event, model = await self.preview(main.announce, image=attachment())
             preview, _ = self.preview_view(event)
-            self.assertIsNone(preview["embed"].description)
+            self.assertIsNone(preview["embeds"][0].description)
             model.assert_not_awaited()
 
         asyncio.run(run())
@@ -424,7 +427,7 @@ class RelayCommandTests(unittest.TestCase):
             event, _ = await self.preview(main.announce, text="@everyone doors open at 9", rewrite="@everyone Doors open at nine.")
             preview, _ = self.preview_view(event)
             self.assertEqual(preview["content"], "@everyone")
-            self.assertNotIn("@everyone", preview["embed"].description)
+            self.assertNotIn("@everyone", preview["embeds"][0].description)
             self.assertIn("everyone", preview["allowed_mentions"].to_dict()["parse"])
 
         asyncio.run(run())
@@ -446,7 +449,202 @@ class RelayCommandTests(unittest.TestCase):
         async def run():
             event, _ = await self.preview(main.announce, text="servers back up", rewrite=None)
             preview, _ = self.preview_view(event)
-            self.assertEqual(preview["embed"].description, "servers back up")
+            self.assertEqual(preview["embeds"][0].description, "servers back up")
+
+        asyncio.run(run())
+
+
+class RelayOriginalTests(unittest.TestCase):
+    def setUp(self):
+        main._COMMAND_RATE_LIMITS.clear()
+        self.audit = patch.object(main, "record_security_event")
+        self.audit_mock = self.audit.start()
+        self.dirty = dirty_jpeg()
+        self.cleaned = strip_image_metadata(self.dirty, "JPEG")
+
+    def tearDown(self):
+        self.audit.stop()
+        main._COMMAND_RATE_LIMITS.clear()
+
+    async def preview(self, command=None, *, image_bytes=None, text="hi"):
+        event = relay_interaction()
+        model = AsyncMock(return_value=text)
+        with patch.object(main, "_post_xai_chat", model):
+            await (command or main.say).callback(event, text, attachment(image_bytes or self.dirty))
+        for _, kwargs, _ in event.followup.sent:
+            if isinstance(kwargs.get("view"), post_preview.PreviewView):
+                return event, kwargs, kwargs["view"]
+        self.fail("no preview")
+
+    async def open_warning(self, event, view, **overrides):
+        press = relay_interaction(channel=event.channel, **overrides)
+        await view.ask_original(press)
+        for _, kwargs, message in press.followup.sent:
+            if isinstance(kwargs.get("view"), post_preview.OriginalWarningView):
+                return press, kwargs, kwargs["view"]
+        return press, None, None
+
+    def labels(self, view):
+        return [child.label for child in view.children]
+
+    def test_preview_shows_the_stripped_file_and_says_what_was_removed(self):
+        async def run():
+            event, preview, view = await self.preview()
+            shown = file_bytes(preview)
+            self.assertEqual(shown, self.cleaned)
+            for leak in LEAKS:
+                self.assertNotIn(leak, shown)
+            status = preview["embeds"][-1].description
+            self.assertIn("Metadata stripped: GPS, device, timestamp", status)
+            self.assertEqual(event.channel.sent, [])
+
+            _, clean_preview, _ = await self.preview(image_bytes=self.cleaned)
+            self.assertIn("No metadata found", clean_preview["embeds"][-1].description)
+
+        asyncio.run(run())
+
+    def test_confirm_posts_the_stripped_file_the_preview_showed(self):
+        async def run():
+            event, preview, view = await self.preview()
+            await view.confirm(relay_interaction(channel=event.channel))
+            self.assertEqual(len(event.channel.sent), 1)
+            self.assertEqual(file_bytes(event.channel.sent[0]), file_bytes(preview))
+            self.assertEqual(file_bytes(event.channel.sent[0]), self.cleaned)
+
+        asyncio.run(run())
+
+    def test_post_original_needs_the_second_confirm_then_posts_the_original_bytes(self):
+        async def run():
+            event, preview, view = await self.preview(main.announce)
+            press, warning_kwargs, warning = await self.open_warning(event, view)
+            self.assertIsNotNone(warning)
+            self.assertEqual(event.channel.sent, [])
+            text = warning_kwargs["embed"].description
+            self.assertIn("GPS / location", text)
+            self.assertIn("Device", text)
+            self.assertIn("Date and time", text)
+            self.assertTrue(warning_kwargs["ephemeral"])
+            self.assertEqual(self.labels(warning), ["Post original", "Back"])
+
+            await warning.post_original(relay_interaction(channel=event.channel))
+            await warning.post_original(relay_interaction(channel=event.channel))
+            await view.confirm(relay_interaction(channel=event.channel))
+            self.assertEqual(len(event.channel.sent), 1)
+            public = event.channel.sent[0]
+            self.assertEqual(file_bytes(public), self.dirty)
+            self.assertEqual(public["file"].filename, "grim-announce.jpg")
+            self.assertEqual(public["embed"].to_dict(), preview["embeds"][0].to_dict())
+            rendered = repr(public)
+            for marker in ("Noct", "10>", "noct-private-photo"):
+                self.assertNotIn(marker, rendered)
+            self.assertTrue(any(
+                call.args[2] == "posted_original" for call in self.audit_mock.call_args_list if len(call.args) > 2
+            ))
+
+        asyncio.run(run())
+
+    def test_back_returns_without_posting_and_confirm_still_posts_the_stripped_file(self):
+        async def run():
+            event, preview, view = await self.preview()
+            _, _, warning = await self.open_warning(event, view)
+            back = relay_interaction(channel=event.channel)
+            await warning.back(back)
+            self.assertEqual(event.channel.sent, [])
+            self.assertIn("Nothing was posted", back.response.edits[0]["content"])
+            self.assertIsNone(back.response.edits[0]["view"])
+            await warning.post_original(relay_interaction(channel=event.channel))
+            self.assertEqual(event.channel.sent, [])
+
+            await view.confirm(relay_interaction(channel=event.channel))
+            self.assertEqual(file_bytes(event.channel.sent[0]), self.cleaned)
+
+        asyncio.run(run())
+
+    def test_post_original_button_is_hidden_when_nothing_was_stripped(self):
+        async def run():
+            _, _, dirty_view = await self.preview()
+            self.assertEqual(self.labels(dirty_view), ["Confirm", "Cancel", "Post original…"])
+
+            _, _, clean_view = await self.preview(image_bytes=self.cleaned)
+            self.assertEqual(self.labels(clean_view), ["Confirm", "Cancel"])
+
+            event, _, _ = await self.preview()
+            image_free = relay_interaction()
+            with patch.object(main, "_post_xai_chat", AsyncMock(return_value="hi")):
+                await main.say.callback(image_free, "hi", None)
+            view = [kw["view"] for _, kw, _ in image_free.followup.sent if "view" in kw][0]
+            self.assertEqual(self.labels(view), ["Confirm", "Cancel"])
+            press = relay_interaction(channel=image_free.channel)
+            await view.ask_original(press)
+            self.assertEqual(press.followup.sent, [])
+            self.assertEqual(image_free.channel.sent, [])
+
+        asyncio.run(run())
+
+    def test_button_styles_keep_confirm_primary_and_original_quiet(self):
+        async def run():
+            _, _, view = await self.preview()
+            styles = {child.label: child.style for child in view.children}
+            self.assertEqual(styles["Confirm"], discord.ButtonStyle.primary)
+            self.assertEqual(styles["Cancel"], discord.ButtonStyle.danger)
+            self.assertEqual(styles["Post original…"], discord.ButtonStyle.secondary)
+
+        asyncio.run(run())
+
+    def test_each_button_checks_invoker_and_administrator_again(self):
+        async def run():
+            event, _, view = await self.preview()
+            stranger = relay_interaction(user_id=99, channel=event.channel)
+            self.assertFalse(await view.interaction_check(stranger))
+
+            demoted = relay_interaction(admin=False, channel=event.channel)
+            self.assertFalse(await view.interaction_check(demoted))
+            await view.ask_original(relay_interaction(admin=False, channel=event.channel))
+
+            _, _, warning = await self.open_warning(event, view)
+            self.assertFalse(await warning.interaction_check(relay_interaction(user_id=99, channel=event.channel)))
+            self.assertFalse(await warning.interaction_check(relay_interaction(admin=False, channel=event.channel)))
+            await warning.post_original(relay_interaction(admin=False, channel=event.channel))
+            await warning.back(relay_interaction(admin=False, channel=event.channel))
+            self.assertEqual(event.channel.sent, [])
+            self.assertTrue(await warning.interaction_check(relay_interaction(channel=event.channel)))
+
+        asyncio.run(run())
+
+    def test_warning_is_dead_once_the_preview_is_handled_or_expires(self):
+        async def run():
+            event, _, view = await self.preview()
+            _, _, warning = await self.open_warning(event, view)
+            await view.confirm(relay_interaction(channel=event.channel))
+            stale = relay_interaction(channel=event.channel)
+            await warning.post_original(stale)
+            self.assertIn("Already handled", stale.response.messages[0][0])
+            self.assertEqual(len(event.channel.sent), 1)
+            self.assertEqual(file_bytes(event.channel.sent[0]), self.cleaned)
+
+            event, _, view = await self.preview()
+            _, _, warning = await self.open_warning(event, view)
+            await warning.on_timeout()
+            warning.message.edit.assert_awaited_once()
+            self.assertIn("Nothing was posted", warning.message.edit.await_args.kwargs["content"])
+            await view.on_timeout()
+            await warning.post_original(relay_interaction(channel=event.channel))
+            self.assertEqual(event.channel.sent, [])
+
+        asyncio.run(run())
+
+    def test_original_post_failure_is_reported_and_posts_nothing(self):
+        async def run():
+            channel = RelayChannel(error=discord.Forbidden(SimpleNamespace(status=403, reason="Forbidden"), "no"))
+            event = relay_interaction(channel=channel)
+            with patch.object(main, "_post_xai_chat", AsyncMock(return_value="hi")):
+                await main.say.callback(event, "hi", attachment(self.dirty))
+            view = [kw["view"] for _, kw, _ in event.followup.sent if "view" in kw][0]
+            _, _, warning = await self.open_warning(event, view)
+            press = relay_interaction(channel=channel)
+            await warning.post_original(press)
+            self.assertIn("Nothing was posted", press.followup.sent[-1][0])
+            self.assertEqual(channel.sent, [])
 
         asyncio.run(run())
 

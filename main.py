@@ -32,7 +32,7 @@ except ImportError as exc:
 from zoneinfo import ZoneInfo
 import difflib
 import textwrap
-from image_clean import ImageCleanError, clean_image
+from image_clean import ImageCleanError, clean_image, clean_image_report
 from post_preview import (
     PreparedPost,
     missing_permissions,
@@ -9485,8 +9485,10 @@ async def _rewrite_relay_text(kind: str, text: str) -> str | None:
             return None
     return cleaned[:RELAY_TEXT_LIMITS[kind]]
 
-async def _read_relay_image(attachment, kind: str, max_bytes: int) -> tuple[bytes, str]:
-    """Download the attachment so Grim reuploads it under a neutral name."""
+async def _read_relay_image(
+    attachment, kind: str, max_bytes: int
+) -> tuple[bytes, str, bytes, tuple[str, ...]]:
+    """Download the attachment. Returns (stripped, neutral filename, original, metadata removed)."""
     if int(getattr(attachment, "size", 0) or 0) > max_bytes:
         raise RelayImageError("That image is too large to post in this server.")
     try:
@@ -9504,14 +9506,15 @@ async def _read_relay_image(attachment, kind: str, max_bytes: int) -> tuple[byte
     extension = RELAY_IMAGE_FORMATS.get(image_format or "")
     if not extension:
         raise RelayImageError("Use a PNG, JPEG, GIF, or WebP image.")
+    original = data
     try:
-        data, extension = await asyncio.to_thread(clean_image, data)
+        result = await asyncio.to_thread(clean_image_report, original)
     except ImageCleanError as error:
         print(f"[Relay] metadata strip failed: {error}")
         raise RelayImageError("Couldn't clean that image's metadata, so Grim won't post it.")
-    if len(data) > max_bytes:
+    if len(result.data) > max_bytes:
         raise RelayImageError("That image is too large to post in this server.")
-    return data, f"grim-{kind}{extension}"
+    return result.data, f"grim-{kind}{result.extension}", original, result.removed
 
 def build_announce_post(
     body: str,
@@ -9582,14 +9585,15 @@ async def _relay_command(
         return
 
     await interaction.response.defer(ephemeral=True, thinking=True)
-    picture = filename = None
+    picture = filename = original = None
+    removed: tuple[str, ...] = ()
     if image is not None:
         max_bytes = min(
             int(getattr(interaction.guild, "filesize_limit", 0) or RELAY_DEFAULT_UPLOAD_BYTES),
             RELAY_MAX_UPLOAD_BYTES,
         )
         try:
-            picture, filename = await _read_relay_image(image, kind, max_bytes)
+            picture, filename, original, removed = await _read_relay_image(image, kind, max_bytes)
         except RelayImageError as error:
             await interaction.followup.send(str(error), ephemeral=True)
             return
@@ -9602,12 +9606,14 @@ async def _relay_command(
         body = rewritten or clean
     build = build_announce_post if kind == "announce" else build_say_post
     post = build(body, picture, filename, clean)
+    post.original = original
+    post.removed = removed
 
-    async def posted(confirm: discord.Interaction, message):
+    async def posted(confirm: discord.Interaction, message, original_file: bool = False):
         record_security_event(
             confirm,
             kind,
-            "posted",
+            "posted_original" if original_file else "posted",
             {"channel_id": str(getattr(confirm, "channel_id", "") or "")},
         )
 
@@ -9617,6 +9623,7 @@ async def _relay_command(
         label=kind,
         allowed=_is_administrator,
         on_posted=posted,
+        footer=xsi_footer(),
     )
     if view is None:
         return
@@ -9624,7 +9631,12 @@ async def _relay_command(
         interaction,
         kind,
         "previewed",
-        {"has_text": bool(clean), "has_image": picture is not None, "rewrite_fallback": fell_back},
+        {
+            "has_text": bool(clean),
+            "has_image": picture is not None,
+            "metadata_removed": bool(removed),
+            "rewrite_fallback": fell_back,
+        },
     )
     if fell_back:
         await interaction.followup.send(
