@@ -571,7 +571,8 @@ class TriviaTests(unittest.TestCase):
 
             main._COMMAND_RATE_LIMITS.clear()
             stalled = AsyncMock(side_effect=asyncio.TimeoutError)
-            with patches[0], patches[1], patches[2], patch.object(
+            no_search = patch.object(main, "_needs_live_sources", return_value=False)
+            with patches[0], patches[1], patches[2], no_search, patch.object(
                 main, "_complete_contextual_reply", stalled
             ):
                 traffic = await main.generate_contextual_reply(make_message(fact))
@@ -583,7 +584,8 @@ class TriviaTests(unittest.TestCase):
 
             main._COMMAND_RATE_LIMITS.clear()
             blank = AsyncMock(return_value=None)
-            with patches[0], patches[1], patches[2], patch.object(
+            no_search = patch.object(main, "_needs_live_sources", return_value=False)
+            with patches[0], patches[1], patches[2], no_search, patch.object(
                 main, "_complete_contextual_reply", blank
             ):
                 unlocked = await main.generate_contextual_reply(make_message(fact))
