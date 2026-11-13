@@ -4,6 +4,8 @@ import os
 import sqlite3
 import tempfile
 import unittest
+from datetime import datetime
+from zoneinfo import ZoneInfo
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -18,8 +20,12 @@ from grim_health import (
     build_audit_embed,
     build_opsec_report,
     classify_security_rows,
+    heartbeat_due,
+    heartbeat_slot,
     score_health,
 )
+
+LA = ZoneInfo("America/Los_Angeles")
 
 NOW = 100_000.0
 
@@ -406,8 +412,9 @@ class MainWiringTests(unittest.IsolatedAsyncioTestCase):
     def test_refresh_task_is_wired_into_the_health_monitor(self):
         import inspect
 
-        self.assertIn("health_board_refresh", inspect.getsource(main.health_monitor.coro))
-        self.assertIn("health_board_refresh", inspect.getsource(main.on_ready))
+        source = inspect.getsource(main.health_monitor.coro) + inspect.getsource(main.on_ready)
+        self.assertIn("health_board_refresh", source)
+        self.assertIn("opsec_report_heartbeat", source)
 
     async def test_failed_image_strip_is_recorded_as_a_security_event(self):
         attachment = SimpleNamespace(size=10, read=AsyncMock(return_value=b"x"))
@@ -506,6 +513,45 @@ class AuditPostTests(unittest.IsolatedAsyncioTestCase):
             await main.grim_opsec.callback(interaction)
         interaction.response.defer.assert_not_awaited()
         interaction.followup.send.assert_not_awaited()
+
+
+class HeartbeatTests(unittest.IsolatedAsyncioTestCase):
+    def test_noon_and_midnight_pacific_in_both_daylight_periods(self):
+        self.assertEqual(heartbeat_slot(datetime(2026, 1, 15, 8, 0, tzinfo=ZoneInfo("UTC"))).hour, 0)
+        self.assertEqual(heartbeat_slot(datetime(2026, 7, 15, 19, 0, tzinfo=ZoneInfo("UTC"))).hour, 12)
+        self.assertEqual(heartbeat_due(datetime(2026, 11, 13, 0, 0, tzinfo=LA), None), "2026-11-13T00")
+        self.assertEqual(heartbeat_due(datetime(2026, 11, 13, 12, 0, tzinfo=LA), None), "2026-11-13T12")
+        self.assertIsNone(heartbeat_due(datetime(2026, 11, 13, 12, 21, tzinfo=LA), None))
+        self.assertIsNone(heartbeat_due(datetime(2026, 11, 13, 12, 5, tzinfo=LA), "2026-11-13T12"))
+
+    def test_task_is_noon_and_midnight_los_angeles(self):
+        times = main.opsec_report_heartbeat._time
+        self.assertEqual(sorted(item.hour for item in times), [0, 12])
+        self.assertTrue(all(getattr(item.tzinfo, "key", None) == "America/Los_Angeles" for item in times))
+
+    async def test_heartbeat_posts_the_report_only_where_updates_are_on(self):
+        channel = SimpleNamespace(send=AsyncMock())
+        moment = datetime(2026, 11, 13, 12, 0, tzinfo=LA)
+        with tempfile.TemporaryDirectory() as folder, patch.object(
+            main, "OPSEC_HEARTBEAT_FILE", os.path.join(folder, "opsec_heartbeat.json")
+        ), patch.dict(main.updates_channels, {"1": {"channel_id": "55"}}, clear=True), patch.object(
+            main.bot, "fetch_channel", AsyncMock(return_value=channel)
+        ), patch.object(main, "compute_health", AsyncMock(return_value=score())):
+            self.assertTrue(await main.post_opsec_report_heartbeat(moment))
+            self.assertFalse(await main.post_opsec_report_heartbeat(moment))
+        kwargs = channel.send.await_args.kwargs
+        self.assertEqual(set(kwargs), {"embed"})
+        self.assertEqual(kwargs["embed"].title, "OPSEC REPORT")
+        self.assertNotIn("AUDIT", repr(kwargs["embed"].to_dict()))
+        channel.send.assert_awaited_once()
+
+    async def test_heartbeat_stays_off_without_an_updates_channel(self):
+        moment = datetime(2026, 11, 13, 0, 0, tzinfo=LA)
+        with patch.dict(main.updates_channels, {}, clear=True), patch.object(
+            main.bot, "fetch_channel", AsyncMock()
+        ) as fetch:
+            self.assertFalse(await main.post_opsec_report_heartbeat(moment))
+        fetch.assert_not_awaited()
 
 
 if __name__ == "__main__":

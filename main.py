@@ -49,6 +49,7 @@ from grim_health import (
     build_opsec_report,
     classify_security_rows,
     health_window_seconds,
+    heartbeat_due,
     score_health,
 )
 from reply_auditor import AuditorConfig, ReplyAuditor, conversation_key, format_events
@@ -493,7 +494,7 @@ livetweet_channels = load_livetweet_data()
 
 # Cache for ghostwrite tweet data: {username: {"data": tweet_data, "timestamp": time}}
 import time
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, time as clock_time, timezone, timedelta
 ghostwrite_cache = {}
 CACHE_TTL = 900  # 15 minutes
 GRIM_TIMEZONE = ZoneInfo("America/Los_Angeles")
@@ -5410,6 +5411,16 @@ async def health_monitor():
         else:
             tasks_status.append("health_board: OK")
 
+        if not opsec_report_heartbeat.is_running():
+            print("[Health Monitor] OPSEC report heartbeat not running, restarting...")
+            try:
+                opsec_report_heartbeat.start()
+                tasks_status.append("opsec_heartbeat: RESTARTED")
+            except Exception as e:
+                tasks_status.append(f"opsec_heartbeat: FAILED ({e})")
+        else:
+            tasks_status.append("opsec_heartbeat: OK")
+
         print(f"[Health Monitor] Status: {', '.join(tasks_status)}")
     except Exception as e:
         print(f"[Health Monitor] Error in health check: {e}")
@@ -5628,6 +5639,10 @@ async def on_ready():
     if not health_board_refresh.is_running():
         health_board_refresh.start()
         print("Started health board refresh")
+
+    if not opsec_report_heartbeat.is_running():
+        opsec_report_heartbeat.start()
+        print("Started OPSEC report heartbeat")
 
     if not health_monitor.is_running():
         health_monitor.start()
@@ -7870,6 +7885,7 @@ async def grim_status(interaction: discord.Interaction):
         "Digest": synthesize_server_digest,
         "Health Monitor": health_monitor,
         "Health Board": health_board_refresh,
+        "OPSEC Heartbeat": opsec_report_heartbeat,
         "VC Monitor": vc_empty_monitor,
     }
 
@@ -8769,7 +8785,8 @@ async def grim_updates(interaction: discord.Interaction):
             title="Grim Operations Log Disabled",
             description=(
                 "Grim will no longer post patch notes, offline after-reports, "
-                "the OPSEC REPORT, or `/clear` deletion logs in this server."
+                "the OPSEC REPORT (including noon and midnight Pacific), "
+                "or `/clear` deletion logs in this server."
             ),
             color=discord.Color.from_rgb(18, 18, 18)
         )
@@ -8783,8 +8800,8 @@ async def grim_updates(interaction: discord.Interaction):
         embed = discord.Embed(
             title="Grim Operations Log Enabled",
             description=(
-                f"Grim will post patch notes, offline after-reports, the OPSEC REPORT, "
-                f"and `/clear` deletion logs in "
+                f"Grim will post patch notes, offline after-reports, the OPSEC REPORT "
+                f"(including noon and midnight Pacific), and `/clear` deletion logs in "
                 f"<#{interaction.channel_id}>."
             ),
             color=discord.Color.from_rgb(18, 18, 18)
@@ -9971,6 +9988,81 @@ async def post_opsec_audit(entries: list) -> bool:
 
 audit_bulletin = AuditBulletin(post_opsec_audit)
 
+OPSEC_HEARTBEAT_FILE = _data_path("opsec_heartbeat.json")
+_opsec_heartbeat_lock = asyncio.Lock()
+
+def _load_opsec_heartbeat() -> dict:
+    if not os.path.exists(OPSEC_HEARTBEAT_FILE):
+        return {}
+    with open(OPSEC_HEARTBEAT_FILE, "r") as handle:
+        data = json.load(handle)
+    return data if isinstance(data, dict) else {}
+
+def _save_opsec_heartbeat(slot: str):
+    _atomic_json_write(OPSEC_HEARTBEAT_FILE, {"slot": slot})
+
+async def post_opsec_report_heartbeat(now=None) -> bool:
+    """Noon and midnight Pacific. Report only, and only where /grim_updates is already on."""
+    async with _opsec_heartbeat_lock:
+        if not updates_channels:
+            return False
+        moment = now or datetime.now(GRIM_TIMEZONE)
+        try:
+            state = _load_opsec_heartbeat()
+        except Exception as error:
+            print(f"[OpSec] Could not read the heartbeat slot: {type(error).__name__}")
+            state = {}
+        slot = heartbeat_due(moment, state.get("slot") or None)
+        if not slot:
+            return False
+        try:
+            _save_opsec_heartbeat(slot)
+        except Exception as error:
+            print(f"[OpSec] Could not save the heartbeat slot: {type(error).__name__}")
+            return False
+        health = await compute_health()
+        embed = build_opsec_report(health, xsi_footer())
+        posted = False
+        for guild_id, data in list(updates_channels.items()):
+            channel_id = str(data.get("channel_id", ""))
+            if not channel_id:
+                continue
+            try:
+                channel = await bot.fetch_channel(int(channel_id))
+                await channel.send(embed=embed)
+                posted = True
+            except Exception as e:
+                print(
+                    f"[OpSec] Could not post the heartbeat in channel {channel_id} "
+                    f"in guild {guild_id}: {type(e).__name__}"
+                )
+        if not posted:
+            try:
+                _save_opsec_heartbeat(str(state.get("slot") or ""))
+            except Exception:
+                pass
+        return posted
+
+@tasks.loop(time=[
+    clock_time(0, 0, tzinfo=GRIM_TIMEZONE),
+    clock_time(12, 0, tzinfo=GRIM_TIMEZONE),
+])
+async def opsec_report_heartbeat():
+    await post_opsec_report_heartbeat()
+
+@opsec_report_heartbeat.before_loop
+async def before_opsec_report_heartbeat():
+    await bot.wait_until_ready()
+    await post_opsec_report_heartbeat()
+
+@opsec_report_heartbeat.after_loop
+async def after_opsec_report_heartbeat():
+    if opsec_report_heartbeat.is_being_cancelled():
+        print("[OpSec] Report heartbeat was cancelled")
+    else:
+        print("[OpSec] Report heartbeat stopped unexpectedly, will restart on next health check")
+
+
 def _auditor_noticed(entry: dict):
     health_board.request_refresh()
     audit_bulletin.add(entry)
@@ -9990,6 +10082,10 @@ async def health_board_refresh():
         audit_bulletin.consider_checkup(await compute_health())
     except Exception as error:
         print(f"[OpSec] checkup skipped: {type(error).__name__}")
+    try:
+        await post_opsec_report_heartbeat()
+    except Exception as error:
+        print(f"[OpSec] heartbeat skipped: {type(error).__name__}")
 
 @health_board_refresh.before_loop
 async def before_health_board_refresh():

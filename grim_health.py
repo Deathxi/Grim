@@ -16,7 +16,9 @@ import asyncio
 import os
 import time
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from typing import Any, Awaitable, Callable, Iterable
+from zoneinfo import ZoneInfo
 
 import discord
 
@@ -506,6 +508,32 @@ class AuditBulletin:
         if not posted:
             self._log(f"[OpSec] audit not delivered; {len(entries)} event(s) stay in the saved log")
         return posted
+
+
+# ── twice-daily report heartbeat ─────────────────────────────────────────────
+# Noon and midnight Pacific. A restart inside the grace still posts that slot once.
+
+HEARTBEAT_ZONE = ZoneInfo("America/Los_Angeles")
+HEARTBEAT_HOURS = (0, 12)
+HEARTBEAT_GRACE = timedelta(minutes=20)
+
+
+def heartbeat_slot(moment: datetime) -> datetime:
+    """The most recent noon or midnight in America/Los_Angeles."""
+    local = moment.astimezone(HEARTBEAT_ZONE)
+    day = local.replace(hour=0, minute=0, second=0, microsecond=0)
+    return max(day.replace(hour=hour) for hour in HEARTBEAT_HOURS if day.replace(hour=hour) <= local)
+
+
+def heartbeat_due(moment: datetime, posted: str | None, *, grace: timedelta = HEARTBEAT_GRACE) -> str | None:
+    """Slot key when this moment should post, or None if it is outside the window or already posted."""
+    slot = heartbeat_slot(moment)
+    if moment.astimezone(HEARTBEAT_ZONE) - slot > grace:
+        return None
+    key = slot.strftime("%Y-%m-%dT%H")
+    if posted == key:
+        return None
+    return key
 
 
 # ── the standing board ───────────────────────────────────────────────────────
