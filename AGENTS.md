@@ -21,6 +21,7 @@ with xAI's Grok API integration. Live runtime is the VPS deploy path
 
 ## Project structure
 - `main.py` — bot commands and event handlers
+- `substance.py` — per-mood substance rules and the post-check on mention replies
 - `requirements.txt` / `pyproject.toml` / `uv.lock` — Python deps (VPS install uses `requirements.txt` into `/root/grim/venv`)
 - `systemd/grim.service` — `ExecStart` must use `/root/grim/venv/bin/python3`
 - Runtime JSON/SQLite state — under `~/.grim_data/`
