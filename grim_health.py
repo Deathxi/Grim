@@ -34,6 +34,9 @@ DEFAULT_WINDOW_HOURS = 6.0
 REPORT_TITLE = "OPSEC REPORT"
 AUDIT_TITLE = "AUDIT"
 UNKNOWN_CONNECTIVITY = "Discord unknown"
+REPORT_ZONE = ZoneInfo("America/Los_Angeles")
+CHECK_TIME_FORMAT = "%B %d, %Y • %I:%M:%S %p %Z"
+RECEIPT_FIELD = "\u200b"
 
 SEARCH_FAILURES = frozenset({
     "failed", "timeout", "provider_error", "unavailable", "parse_error",
@@ -206,6 +209,7 @@ class Health:
     last_event: tuple[str, float] | None
     window_hours: float
     connectivity: str = UNKNOWN_CONNECTIVITY
+    checked_at: float = 0.0
 
     @property
     def degraded(self) -> list[CheckResult]:
@@ -305,12 +309,18 @@ def score_health(
     level = min((r.level for r in results), default=5)
     status = str(connectivity).strip() if connectivity else ""
     return Health(
-        level, tuple(results), info, latest, window / 3600, status or UNKNOWN_CONNECTIVITY
+        level, tuple(results), info, latest, window / 3600,
+        status or UNKNOWN_CONNECTIVITY, current,
     )
 
 
 def _stamp(epoch: float) -> str:
     return f"<t:{int(epoch)}:R>" if epoch else ""
+
+
+def format_check_time(epoch: float) -> str:
+    """Pacific date and time of this check, exact to the second, timezone visible."""
+    return datetime.fromtimestamp(float(epoch), REPORT_ZONE).strftime(CHECK_TIME_FORMAT)
 
 
 def _seclude_embed(title: str, description: str, footer: str) -> discord.Embed:
@@ -369,6 +379,11 @@ def build_opsec_report(health: Health, footer: str) -> discord.Embed:
     embed.add_field(
         name="Quick Fix",
         value="\n".join(c.fix for c in degraded[:2])[:1000] or "None needed.",
+        inline=False,
+    )
+    embed.add_field(
+        name=RECEIPT_FIELD,
+        value=format_check_time(health.checked_at or time.time()),
         inline=False,
     )
     return embed
@@ -552,7 +567,7 @@ class AuditBulletin:
 # ── twice-daily report heartbeat ─────────────────────────────────────────────
 # Noon and midnight Pacific. A restart inside the grace still posts that slot once.
 
-HEARTBEAT_ZONE = ZoneInfo("America/Los_Angeles")
+HEARTBEAT_ZONE = REPORT_ZONE
 HEARTBEAT_HOURS = (0, 12)
 HEARTBEAT_GRACE = timedelta(minutes=20)
 
