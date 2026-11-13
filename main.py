@@ -54,6 +54,12 @@ from grim_health import (
 )
 from reply_auditor import AuditorConfig, ReplyAuditor, conversation_key, format_events
 from substance import SUBSTANCE_PROMPT, ensure_substance
+from delete_report import (
+    handle_raw_bulk_message_delete,
+    handle_raw_message_delete,
+    log_founder_delete_report_status,
+    remember_guild_message,
+)
 
 BOT_START_TIME = None
 
@@ -149,7 +155,7 @@ intents.message_content = True
 intents.members = True
 intents.presences = True
 
-bot = commands.Bot(command_prefix="!", intents=intents)
+bot = commands.Bot(command_prefix="!", intents=intents, max_messages=10000)
 
 # Data directory outside git workspace — survives deployments without being overwritten by git pull
 DATA_DIR = os.path.expanduser("~/.grim_data")
@@ -1325,6 +1331,39 @@ def save_message_to_db(guild_id: str, channel_id: str, message_id: str,
         conn.close()
     except Exception as e:
         print(f"[DB] Save error: {e}")
+
+def lookup_deleted_message_from_db(message_id: int | str) -> dict | None:
+    """Return a redacted-safe snapshot from chat history if Discord's cache missed."""
+    try:
+        conn = sqlite3.connect(CHAT_DB_FILE)
+        row = conn.execute(
+            """
+            SELECT guild_id, channel_id, author_name, content, timestamp
+            FROM messages WHERE message_id = ?
+            """,
+            (str(message_id),),
+        ).fetchone()
+        conn.close()
+    except Exception:
+        print("[DeleteReport] Cached history lookup failed.")
+        return None
+    if not row:
+        return None
+    created_at = None
+    if row[4]:
+        created_at = datetime.fromtimestamp(float(row[4]), tz=timezone.utc)
+    return {
+        "message_id": int(message_id),
+        "guild_id": int(row[0]) if str(row[0]).isdigit() else row[0],
+        "channel_id": int(row[1]) if str(row[1]).isdigit() else row[1],
+        "author_id": None,
+        "author_name": row[2],
+        "content": row[3] or "",
+        "created_at": created_at,
+        "attachments": [],
+        "stickers": [],
+    }
+
 
 def get_channel_history_from_db(guild_id: str, channel_id: str, limit: int = 50):
     """Returns rows as (author_name, content, is_grim) in chronological order."""
@@ -5594,6 +5633,7 @@ async def on_ready():
     print(f"{bot.user} has connected to Discord!")
     print(f"Bot is in {len(bot.guilds)} server(s)")
     print(f"[Startup] Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S UTC')}")
+    log_founder_delete_report_status()
     # Runtime state source of truth is ~/.grim_data (and encrypted backups).
     # The live host never pulls or pushes bot source/state through the Grim repo API.
     member_snapshots = collect_member_snapshots(bot.guilds)
@@ -9045,7 +9085,24 @@ async def on_member_update(before, after):
     )
 
 @bot.event
+async def on_raw_message_delete(payload: discord.RawMessageDeleteEvent):
+    try:
+        await handle_raw_message_delete(bot, payload, lookup_deleted_message_from_db)
+    except Exception as error:
+        print(f"[DeleteReport] Handler failed ({type(error).__name__}).")
+
+
+@bot.event
+async def on_raw_bulk_message_delete(payload: discord.RawBulkMessageDeleteEvent):
+    try:
+        await handle_raw_bulk_message_delete(bot, payload, lookup_deleted_message_from_db)
+    except Exception as error:
+        print(f"[DeleteReport] Handler failed ({type(error).__name__}).")
+
+
+@bot.event
 async def on_message(message):
+    remember_guild_message(message)
     if message.author.bot:
         return
     
