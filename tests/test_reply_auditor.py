@@ -1,18 +1,25 @@
 import asyncio
+import json
+import os
+import tempfile
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
+
+import discord
 
 import main
 import reply_auditor
 from reply_auditor import (
     BURST_LINE,
-    LOOP_LINE,
     STUCK_BACK_LINE,
     STUCK_FACT_LINE,
     STUCK_FAIL_LINE,
+    AuditNotes,
     AuditorConfig,
     ReplyAuditor,
+    build_audit_note,
+    defcon_for,
     format_events,
 )
 
@@ -26,20 +33,21 @@ class FakeClock:
 
 
 def fast_config(**overrides):
-    timeouts = dict(reply_auditor.DEFAULT_TIMEOUTS)
-    timeouts.update({kind: 0.05 for kind in timeouts})
+    timeouts = {kind: 0.05 for kind in reply_auditor.DEFAULT_TIMEOUTS}
     return AuditorConfig(timeouts=timeouts, **overrides)
 
 
-def make_auditor(clock=None, logs=None, **overrides):
+def make_auditor(clock=None, logs=None, **kwargs):
+    hooks = {name: kwargs.pop(name) for name in ("load", "save", "notify") if name in kwargs}
     return ReplyAuditor(
-        fast_config(**overrides),
+        fast_config(**kwargs),
         clock=clock or FakeClock(),
         log=(logs.append if logs is not None else lambda line: None),
+        **hooks,
     )
 
 
-async def hang():
+async def hang(*args, **kwargs):
     await asyncio.sleep(30)
     return "never"
 
@@ -80,13 +88,23 @@ class TimeoutRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(resets, ["g:c:u"])
         retry.assert_awaited_once()
         self.assertEqual(result.event, "recovered")
-        self.assertTrue(result.recovery.startswith(STUCK_BACK_LINE))
-        self.assertIn("the void says hi", result.recovery)
-        self.assertIsNone(result.value)
+        self.assertEqual(
+            result.recovery, "was MIA for a mike. back now.\nstill here. the void says hi."
+        )
         self.assertEqual(
             [event["event"] for event in auditor.recent_events()],
             ["timeout", "recovered"],
         )
+
+    async def test_recovery_line_is_one_message_with_a_single_line_break(self):
+        auditor = make_auditor()
+        result = await auditor.guarded_reply(
+            "reply", "g:c:u", hang, retry=AsyncMock(return_value="  the answer  ")
+        )
+        first, second = result.recovery.split("\n")
+        self.assertEqual(first, STUCK_BACK_LINE)
+        self.assertEqual(second, "the answer")
+        self.assertNotIn("\n\n", result.recovery)
 
     async def test_failed_retry_gives_a_plain_failure_line(self):
         auditor = make_auditor()
@@ -110,13 +128,9 @@ class TimeoutRecoveryTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_watched_tool_returns_its_timeout_shape(self):
         auditor = make_auditor()
-
-        async def search(system_prompt, user_prompt):
-            await asyncio.sleep(30)
-
         watched = auditor.watch_tool(
             "live_search",
-            search,
+            hang,
             material=lambda *a, **k: a[1],
             on_timeout=lambda: {"status": "timeout"},
             on_blocked=lambda: {"status": "loop_blocked"},
@@ -128,11 +142,10 @@ class TimeoutRecoveryTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(main, "reply_auditor", auditor), patch.object(
             main, "generate_contextual_reply", new=stuck_reply
         ), patch.object(
-            main, "_auditor_retry_reply", AsyncMock(return_value="back. what's up.")
+            main, "_auditor_retry_reply", AsyncMock(return_value="what's up.")
         ):
             result = await main.audited_contextual_reply(make_message())
-        self.assertTrue(result.text.startswith(STUCK_BACK_LINE))
-        self.assertIn("what's up", result.text)
+        self.assertEqual(result.text, "was MIA for a mike. back now.\nwhat's up.")
 
     async def test_main_hook_does_not_retry_a_fact_ask(self):
         auditor = make_auditor()
@@ -153,28 +166,6 @@ class TimeoutRecoveryTests(unittest.IsolatedAsyncioTestCase):
 
 
 class LoopDetectionTests(unittest.IsolatedAsyncioTestCase):
-    def test_third_near_identical_reply_is_replaced_and_state_reset(self):
-        auditor = make_auditor()
-        resets = []
-        auditor.register_reset(resets.append)
-        first = auditor.review_reply("g:c:u", "the void is patient. so am i.")
-        second = auditor.review_reply("g:c:u", "the void is patient, so am i!")
-        third = auditor.review_reply("g:c:u", "The void is patient. So am I.")
-        self.assertIsNone(first.event)
-        self.assertIsNone(second.event)
-        self.assertEqual(third.text, LOOP_LINE)
-        self.assertEqual(third.event, "reply_loop")
-        self.assertEqual(resets, ["g:c:u"])
-        self.assertIsNone(auditor.review_reply("g:c:u", "the void is patient. so am i.").event)
-
-    def test_repeats_outside_the_window_are_not_a_loop(self):
-        clock = FakeClock()
-        auditor = make_auditor(clock)
-        for _ in range(3):
-            review = auditor.review_reply("g:c:u", "same old line here")
-            clock.now += 700
-        self.assertIsNone(review.event)
-
     async def test_same_tool_call_over_and_over_is_blocked(self):
         auditor = make_auditor()
         calls = []
@@ -214,18 +205,48 @@ class LoopDetectionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(results[4].event, "reply_chain")
         self.assertEqual(work.await_count, 3)
 
-    def test_main_loop_hook_drops_the_cached_answer(self):
+
+class RepeatSubjectTests(unittest.IsolatedAsyncioTestCase):
+    async def test_asking_again_is_not_broken_as_a_loop(self):
         auditor = make_auditor()
-        text = "btc is at 100k right now"
-        message = make_message("btc price?")
-        with patch.object(main, "reply_auditor", auditor), patch.dict(
-            main._AI_RESEARCH_CACHE, {"k": (0.0, {"text": text})}, clear=True
-        ):
-            main.audit_outgoing_reply(message, text)
-            main.audit_outgoing_reply(message, text)
-            third = main.audit_outgoing_reply(message, text)
-            self.assertEqual(third, LOOP_LINE)
-            self.assertNotIn("k", main._AI_RESEARCH_CACHE)
+        texts = [
+            (await auditor.review_reply("g:c:u", "btc is at 100k right now.")).text
+            for _ in range(4)
+        ]
+        self.assertEqual(texts, ["btc is at 100k right now."] * 4)
+        self.assertNotIn("reply_loop", auditor.counts())
+
+    async def test_repeat_subject_pivots_to_a_more_direct_answer(self):
+        auditor = make_auditor()
+        pivot = AsyncMock(return_value="100k. that's the number, as of this hour.")
+        first = await auditor.review_reply("g:c:u", "btc is at 100k right now.", pivot=pivot)
+        second = await auditor.review_reply("g:c:u", "btc is at 100k right now!", pivot=pivot)
+        self.assertEqual(first.text, "btc is at 100k right now.")
+        pivot.assert_awaited_once_with("btc is at 100k right now!")
+        self.assertEqual(second.text, "100k. that's the number, as of this hour.")
+        self.assertEqual(second.event, "repeat_subject")
+
+    async def test_failed_or_identical_pivot_keeps_the_draft(self):
+        clock = FakeClock()
+        auditor = make_auditor(clock, pivot_cooldown_seconds=10)
+        await auditor.review_reply("g:c:u", "same answer here")
+        failing = await auditor.review_reply(
+            "g:c:u", "same answer here", pivot=AsyncMock(side_effect=RuntimeError("x"))
+        )
+        clock.now += 11
+        echo = await auditor.review_reply(
+            "g:c:u", "same answer here", pivot=AsyncMock(return_value="Same answer, here.")
+        )
+        self.assertEqual(failing.text, "same answer here")
+        self.assertEqual(echo.text, "same answer here")
+
+    async def test_pivot_is_rate_limited(self):
+        auditor = make_auditor()
+        pivot = AsyncMock(return_value="direct and upfront now")
+        await auditor.review_reply("g:c:u", "one answer", pivot=pivot)
+        for _ in range(4):
+            await auditor.review_reply("g:c:u", "one answer", pivot=pivot)
+        self.assertEqual(pivot.await_count, 1)
 
 
 class NormalReplyTests(unittest.IsolatedAsyncioTestCase):
@@ -239,8 +260,9 @@ class NormalReplyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(auditor.recent_events(), [])
         self.assertEqual(logs, [])
 
-    def test_varied_clean_replies_are_unchanged(self):
+    async def test_varied_clean_replies_are_unchanged(self):
         auditor = make_auditor()
+        pivot = AsyncMock()
         replies = [
             "rough week. sit with it, you don't have to fix it tonight.",
             "lol no. that cat has a better retirement plan than you.",
@@ -248,9 +270,10 @@ class NormalReplyTests(unittest.IsolatedAsyncioTestCase):
             "fair. go sleep, the void keeps.",
         ]
         for reply in replies:
-            review = auditor.review_reply("g:c:u", reply)
+            review = await auditor.review_reply("g:c:u", reply, pivot=pivot)
             self.assertEqual(review.text, reply)
             self.assertIsNone(review.event)
+        pivot.assert_not_awaited()
         self.assertEqual(auditor.recent_events(), [])
 
     async def test_main_hook_keeps_a_normal_reply(self):
@@ -260,7 +283,7 @@ class NormalReplyTests(unittest.IsolatedAsyncioTestCase):
             main, "generate_contextual_reply", AsyncMock(return_value=reply)
         ):
             result = await main.audited_contextual_reply(make_message())
-            sent = main.audit_outgoing_reply(make_message(), result.text)
+            sent = await main.audit_outgoing_reply(make_message(), result.text)
         self.assertIs(result, reply)
         self.assertEqual(sent, "just a reply")
 
@@ -277,10 +300,10 @@ class NormalReplyTests(unittest.IsolatedAsyncioTestCase):
         work.assert_awaited_once()
 
 
-class StyleTests(unittest.TestCase):
-    def test_dash_and_opener_are_nudged_not_blocked(self):
+class StyleTests(unittest.IsolatedAsyncioTestCase):
+    async def test_dash_and_opener_are_nudged_not_blocked(self):
         auditor = make_auditor()
-        review = auditor.review_reply("g:c:u", "Ah, the void \u2014 patient as ever.")
+        review = await auditor.review_reply("g:c:u", "Ah, the void \u2014 patient as ever.")
         self.assertEqual(review.text, "the void, patient as ever.")
         self.assertEqual(review.event, "style")
         self.assertEqual(set(review.flags), {"dash", "opener"})
@@ -289,28 +312,20 @@ class StyleTests(unittest.TestCase):
         text = "```\na \u2014 b\n```"
         self.assertEqual(reply_auditor.nudge_style(text), (text, ()))
 
-    def test_stock_line_across_conversations_is_flagged(self):
+    async def test_stock_line_across_conversations_is_flagged(self):
         auditor = make_auditor()
         line = "the void remembers everything you forgot. anyway."
-        flags = [auditor.review_reply(f"g:c:{user}", line).flags for user in range(4)]
+        flags = [(await auditor.review_reply(f"g:c:{user}", line)).flags for user in range(4)]
         self.assertNotIn("stock_line", flags[2])
         self.assertIn("stock_line", flags[3])
 
-    def test_question_streak_is_flagged(self):
+    async def test_question_streak_is_flagged(self):
         auditor = make_auditor()
         flags = [
-            auditor.review_reply("g:c:u", text).flags
+            (await auditor.review_reply("g:c:u", text)).flags
             for text in ("you good?", "what happened then?", "and after that, who called?")
         ]
         self.assertIn("question_streak", flags[2])
-
-    def test_events_hold_no_message_content(self):
-        auditor = make_auditor()
-        secret = "my password is hunter2 \u2014 do not tell"
-        auditor.review_reply("g:c:u", secret)
-        dumped = repr(auditor.recent_events()) + format_events(auditor)
-        self.assertNotIn("hunter2", dumped)
-        self.assertNotIn("g:c:u", dumped)
 
 
 class AuditorFailureTests(unittest.IsolatedAsyncioTestCase):
@@ -319,6 +334,7 @@ class AuditorFailureTests(unittest.IsolatedAsyncioTestCase):
         auditor.note_turn = lambda conversation: 1 / 0
         result = await auditor.guarded_reply("reply", "g:c:u", AsyncMock(return_value="fine"))
         self.assertEqual(result.value, "fine")
+        self.assertEqual(auditor.counts().get("auditor_error"), 1)
 
     async def test_recovery_errors_fail_open_to_the_old_timeout(self):
         auditor = make_auditor()
@@ -327,23 +343,29 @@ class AuditorFailureTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(result.recovery)
         self.assertEqual(result.event, "timeout")
 
-    def test_review_errors_return_the_original_text(self):
+    async def test_review_errors_return_the_original_text(self):
         auditor = make_auditor()
         with patch.object(reply_auditor, "_normalize", side_effect=RuntimeError("boom")):
-            review = auditor.review_reply("g:c:u", "original \u2014 text")
+            review = await auditor.review_reply("g:c:u", "original \u2014 text")
         self.assertEqual(review.text, "original \u2014 text")
+
+    async def test_broken_save_and_notify_do_not_break_recording(self):
+        auditor = make_auditor(save=lambda events: 1 / 0, notify=lambda entry: 1 / 0)
+        auditor.record("timeout", "reply", duration=1)
+        self.assertEqual(auditor.counts(), {"timeout": 1})
 
     def test_broken_reset_hook_does_not_stop_the_reset(self):
         auditor = make_auditor()
         auditor.register_reset(lambda conversation: 1 / 0)
-        auditor.review_reply("g:c:u", "a line")
+        auditor._replies["g:c:u"] = "x"
         auditor.reset_conversation("g:c:u")
         self.assertNotIn("g:c:u", auditor._replies)
 
     async def test_main_hook_survives_a_broken_auditor(self):
         broken = SimpleNamespace(
             guarded_reply=AsyncMock(side_effect=RuntimeError("auditor down")),
-            review_reply=lambda *a, **k: 1 / 0,
+            review_reply=AsyncMock(side_effect=RuntimeError("auditor down")),
+            fail_open=lambda where, error: 1 / 0,
         )
         reply = main.ContextualReply(text="grim still talks")
         generate = AsyncMock(return_value=reply)
@@ -351,7 +373,7 @@ class AuditorFailureTests(unittest.IsolatedAsyncioTestCase):
             main, "generate_contextual_reply", generate
         ):
             result = await main.audited_contextual_reply(make_message())
-            sent = main.audit_outgoing_reply(make_message(), result.text)
+            sent = await main.audit_outgoing_reply(make_message(), result.text)
         self.assertIs(result, reply)
         self.assertEqual(sent, "grim still talks")
         generate.assert_awaited_once()
@@ -370,11 +392,11 @@ class AuditorFailureTests(unittest.IsolatedAsyncioTestCase):
     def test_bad_env_values_fall_back_to_defaults(self):
         with patch.dict(
             "os.environ",
-            {"GRIM_AUDITOR_TIMEOUT_REPLY": "nope", "GRIM_AUDITOR_LOOP_REPEATS": "-4"},
+            {"GRIM_AUDITOR_TIMEOUT_REPLY": "nope", "GRIM_AUDITOR_TOOL_REPEATS": "-4"},
         ):
             config = AuditorConfig.from_env()
         self.assertEqual(config.timeout_for("reply"), 45.0)
-        self.assertEqual(config.loop_repeat_limit, 3)
+        self.assertEqual(config.tool_repeat_limit, 4)
 
     def test_env_overrides_apply(self):
         with patch.dict(
@@ -411,11 +433,139 @@ class RateLimitTests(unittest.IsolatedAsyncioTestCase):
         allowed = [auditor.allow_intervention(f"g:c:{user}") for user in range(4)]
         self.assertEqual(allowed, [True, True, False, False])
 
-    def test_loop_breaker_cannot_loop_itself(self):
-        auditor = make_auditor()
-        texts = [auditor.review_reply("g:c:u", "same thing again and again").text for _ in range(9)]
-        self.assertEqual(texts.count(LOOP_LINE), 1)
-        self.assertEqual(auditor.review_reply("g:c:u", LOOP_LINE).text, LOOP_LINE)
+    async def test_audit_notes_are_spaced_out(self):
+        posted = []
+
+        async def post(note):
+            posted.append(note)
+            return True
+
+        clock = FakeClock()
+        notes = AuditNotes(post, delays={2: 0}, gaps={2: 300}, clock=clock, log=lambda line: None)
+        notes.add({"at": 1, "event": "tool_loop", "kind": "live_search"})
+        await asyncio.sleep(0.01)
+        notes.add({"at": 2, "event": "tool_loop", "kind": "live_search"})
+        notes.add({"at": 3, "event": "recovery_failed", "kind": "reply"})
+        await asyncio.sleep(0.01)
+        self.assertEqual(len(posted), 1)
+        self.assertEqual(len(notes.pending(2)), 2)
+
+
+class PersistenceTests(unittest.IsolatedAsyncioTestCase):
+    def test_events_are_saved_and_reloaded_without_content(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = os.path.join(folder, "auditor_events.json")
+
+            def load():
+                with open(path) as handle:
+                    return json.load(handle)
+
+            def save(events):
+                with open(path, "w") as handle:
+                    json.dump(events, handle)
+
+            first = make_auditor(save=save)
+            first.record("timeout", "reply", duration=45.5)
+            first.record("style", "dash")
+            second = make_auditor(load=load)
+            self.assertEqual(
+                [(e["event"], e["kind"]) for e in second.saved_events()],
+                [("timeout", "reply"), ("style", "dash")],
+            )
+            self.assertEqual(set(load()[0]), {"at", "event", "kind", "duration"})
+
+    def test_saved_file_cannot_smuggle_extra_fields(self):
+        saved = [{"event": "timeout", "kind": "reply", "at": 1, "user": "someone", "text": "hi"}]
+        auditor = make_auditor(load=lambda: saved)
+        self.assertEqual(auditor.saved_events(), [{"event": "timeout", "kind": "reply", "at": 1.0}])
+
+    async def test_events_hold_no_message_content(self):
+        saved = []
+        auditor = make_auditor(save=lambda events: saved.append(events))
+        secret = "my password is hunter2 \u2014 do not tell"
+        await auditor.review_reply("g:c:u", secret)
+        dumped = repr(auditor.recent_events()) + repr(saved) + format_events(auditor.saved_events())
+        self.assertNotIn("hunter2", dumped)
+        self.assertNotIn("g:c:u", dumped)
+
+    def test_main_saves_under_grim_data(self):
+        self.assertEqual(
+            main.AUDITOR_EVENTS_FILE,
+            os.path.join(main.DATA_DIR, "auditor_events.json"),
+        )
+
+
+class DefconNoteTests(unittest.IsolatedAsyncioTestCase):
+    def test_defcon_mapping(self):
+        self.assertEqual(defcon_for("auditor_error"), 1)
+        self.assertEqual(defcon_for("recovery_failed"), 2)
+        self.assertEqual(defcon_for("tool_loop"), 2)
+        self.assertEqual(defcon_for("timeout"), 3)
+        self.assertEqual(defcon_for("recovered"), 3)
+        self.assertEqual(defcon_for("reply_chain"), 3)
+        self.assertEqual(defcon_for("intervention_suppressed"), 4)
+        self.assertEqual(defcon_for("repeat_subject"), 4)
+        self.assertEqual(defcon_for("style"), 5)
+        self.assertEqual(defcon_for("something_new"), 1)
+
+    def test_note_aggregates_counts_only(self):
+        note = build_audit_note(3, [
+            {"at": 1, "event": "timeout", "kind": "reply", "duration": 40},
+            {"at": 2, "event": "timeout", "kind": "reply", "duration": 50},
+            {"at": 3, "event": "recovered", "kind": "reply", "duration": 12},
+        ])
+        self.assertEqual(note["title"], "DEFCON 3 · ROUND HOUSE")
+        self.assertEqual(note["lines"][0], "`x2` stuck call cancelled · reply · avg 45.0s")
+        self.assertEqual(note["total"], 3)
+        self.assertTrue(note["fixes"])
+
+    async def test_high_urgency_posts_at_once(self):
+        posted = []
+
+        async def post(note):
+            posted.append(note)
+            return True
+
+        notes = AuditNotes(post, log=lambda line: None)
+        notes.add({"at": 1, "event": "auditor_error", "kind": "review"})
+        await asyncio.sleep(0.01)
+        self.assertEqual([note["level"] for note in posted], [1])
+
+    async def test_style_waits_and_rolls_up(self):
+        post = AsyncMock(return_value=True)
+        notes = AuditNotes(post, log=lambda line: None)
+        for _ in range(3):
+            notes.add({"at": 1, "event": "style", "kind": "dash"})
+        await asyncio.sleep(0.01)
+        post.assert_not_awaited()
+        self.assertEqual(len(notes.pending(5)), 3)
+        await notes.flush(5)
+        self.assertEqual(post.await_args.args[0]["lines"], ["`x3` voice slip · dash"])
+
+    def test_embed_matches_the_patch_note_box(self):
+        note = build_audit_note(2, [{"at": 1, "event": "tool_loop", "kind": "live_search", "count": 4}])
+        embed = main.build_audit_note_embed(note)
+        self.assertEqual(embed.title, "Grim · Audit Note · DEFCON 2 · FAST PACE")
+        self.assertEqual(embed.color, discord.Color.from_rgb(18, 18, 18))
+        self.assertEqual(embed.footer.text, main.xsi_footer())
+        self.assertEqual([field.name for field in embed.fields], ["Quick Fix", "Events"])
+
+    async def test_post_goes_to_grim_updates_channels_publicly(self):
+        channel = SimpleNamespace(send=AsyncMock())
+        note = build_audit_note(1, [{"at": 1, "event": "auditor_error", "kind": "hook"}])
+        with patch.dict(main.updates_channels, {"1": {"channel_id": "55"}}, clear=True), patch.object(
+            main.bot, "fetch_channel", AsyncMock(return_value=channel)
+        ) as fetch:
+            self.assertTrue(await main.post_audit_note(note))
+        fetch.assert_awaited_once_with(55)
+        kwargs = channel.send.await_args.kwargs
+        self.assertIsInstance(kwargs["embed"], discord.Embed)
+        self.assertNotIn("ephemeral", kwargs)
+        self.assertNotIn("view", kwargs)
+
+    async def test_no_updates_channel_means_no_post(self):
+        with patch.dict(main.updates_channels, {}, clear=True):
+            self.assertFalse(await main.post_audit_note(build_audit_note(5, [])))
 
 
 class AdminCommandTests(unittest.IsolatedAsyncioTestCase):
@@ -426,18 +576,18 @@ class AdminCommandTests(unittest.IsolatedAsyncioTestCase):
             await main.grim_auditor.callback(interaction)
         response.send_message.assert_not_awaited()
 
-    async def test_auditor_command_shows_events_privately(self):
-        auditor = make_auditor()
-        auditor.record("timeout", "reply", duration=45)
+    async def test_auditor_command_reads_saved_events(self):
+        saved = [{"at": 1, "event": "timeout", "kind": "reply", "duration": 45}]
+        auditor = make_auditor(load=lambda: saved)
         response = SimpleNamespace(send_message=AsyncMock())
-        interaction = SimpleNamespace(response=response)
+        interaction = SimpleNamespace(response=response, guild_id=1, channel_id=55)
         with patch.object(main, "reply_auditor", auditor), patch.object(
             main, "require_permission", AsyncMock(return_value=True)
-        ):
+        ), patch.dict(main.updates_channels, {"1": {"channel_id": "55"}}, clear=True):
             await main.grim_auditor.callback(interaction)
-        args, kwargs = response.send_message.await_args
-        self.assertIn("timeout (reply) 45.0s", args[0])
-        self.assertTrue(kwargs["ephemeral"])
+        kwargs = response.send_message.await_args.kwargs
+        self.assertIn("D3 timeout (reply) 45.0s", kwargs["embed"].description)
+        self.assertFalse(kwargs["ephemeral"])
 
 
 if __name__ == "__main__":
