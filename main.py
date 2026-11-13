@@ -2256,8 +2256,20 @@ _LIVE_CREATIVE_OR_OPINION = (
     "joke", "jokes", "poem", "haiku", "story", "roast", "rap", "riddle", "pun",
     "limerick", "write me", "make up", "imagine", "pretend", "would you rather",
     "what do you think", "your opinion", "your take", "how are you", "how r u",
-    "wyd", "hbu",
+    "wyd", "hbu", "how is it going", "hows it going", "whats up", "what up",
 )
+_CASUAL_PHRASES = (
+    "how are you", "how r u", "how is it going", "hows it going",
+    "how you doing", "how you been", "whats up", "what up", "what is up",
+    "wyd", "hbu", "you good", "how goes it", "how goes",
+    "whats going on", "what is going on", "huh bruh",
+)
+_CASUAL_VOCAB = frozenset({
+    "going", "pal", "buddy", "friend", "huh", "hey", "hi", "hello", "yo",
+    "sup", "wassup", "morning", "evening", "night", "gn", "gm", "howdy",
+    "greetings", "welcome", "cya", "bye", "later", "ping", "vibes", "chat",
+    "talk", "talking", "bruh", "bro",
+})
 _LIVE_EVENT_CLAIM = re.compile(
     r"(?<!\w)(?:"
     r"(?:fired|ousted|removed|replaced|sacked|suspended|impeached|arrested|indicted)"
@@ -2273,12 +2285,41 @@ LIVE_FAILURE_MEMORY_SECONDS = 1800
 _LIVE_RESEARCH_FAILURES: dict[str, float] = {}
 
 def _has_concrete_topic(text: str) -> bool:
-    return any(
-        token not in _OUTPUT_STOPWORDS
-        and token not in _CONVERSATION_SMALL_TALK
-        and len(token) >= 2
+    return bool(_noncasual_tokens(text))
+
+def _noncasual_tokens(text: str) -> list[str]:
+    skip = _OUTPUT_STOPWORDS | _CONVERSATION_SMALL_TALK | _CASUAL_VOCAB
+    return [
+        token
         for token in text.split()
-    )
+        if token not in skip and len(token) >= 2
+    ]
+
+def _strip_quote_lines(text: str) -> str:
+    kept = [
+        line
+        for line in str(text or "").splitlines()
+        if not line.lstrip().startswith(">")
+    ]
+    return "\n".join(kept)
+
+def _is_casual_or_personality(current_text: str) -> bool:
+    """Greetings, quotes of someone else's take, and vicarious chat are not news."""
+    folded = _output_match_text(_conversation_text(current_text))
+    if not folded:
+        return True
+    if (
+        _contains_research_phrase(folded, _FACT_REQUEST_PHRASES)
+        or _contains_research_phrase(folded, LIVE_RESEARCH_SIGNALS)
+        or _contains_research_phrase(folded, LIVE_RESEARCH_REQUESTS)
+        or _states_current_event(folded)
+    ):
+        return False
+    if _FIRST_PERSON.search(folded):
+        return True
+    if _contains_research_phrase(folded, _CASUAL_PHRASES) and not _noncasual_tokens(folded):
+        return True
+    return not _noncasual_tokens(folded)
 
 def _states_current_event(folded: str) -> bool:
     """A third-person claim that someone was removed, arrested, resigned..."""
@@ -2348,14 +2389,18 @@ def _needs_live_sources(
 ) -> bool:
     """Factual or current asks must be checked against live sources first.
 
-    Casual talk, creative asks, opinions, and questions about Grim's own
-    search capability stay off the news-search path.
+    Casual talk, quotes, greetings, creative asks, opinions, and questions
+    about Grim's own search capability stay off the news-search path.
+    Channel fail-memory only re-searches a real current-topic follow-up.
     """
-    if _is_self_capability_question(current_text):
+    own_text = _strip_quote_lines(current_text)
+    if _is_self_capability_question(own_text):
         return False
-    if _should_use_live_research(current_text, recent_channel_text):
+    if _is_casual_or_personality(own_text):
+        return False
+    if _should_use_live_research(own_text, recent_channel_text):
         return True
-    folded = _output_match_text(_conversation_text(current_text))[:1000]
+    folded = _output_match_text(_conversation_text(own_text))[:1000]
     if not folded:
         return False
     if _contains_research_phrase(folded, _FACT_REQUEST_PHRASES):
@@ -2364,9 +2409,16 @@ def _needs_live_sources(
         return True
     if _contains_research_phrase(folded, _LIVE_CREATIVE_OR_OPINION):
         return False
-    if mention_asks_for_facts(current_text):
+    tokens = folded.split()
+    if tokens and tokens[0] in {"why", "how"}:
+        return False
+    if mention_asks_for_facts(own_text):
         return True
-    return recent_failure and _has_concrete_topic(folded)
+    return bool(
+        recent_failure
+        and _has_concrete_topic(folded)
+        and len(tokens) <= 6
+    )
 
 def _remember_live_failure(scope: str) -> None:
     _LIVE_RESEARCH_FAILURES[scope] = time.time()
@@ -2950,17 +3002,21 @@ _CONVERSATION_SMALL_TALK = frozenset({
 })
 
 def _conversation_text(text: str | None) -> str:
-    cleaned = re.sub(r"<@!?\d+>", " ", str(text or ""))
+    cleaned = _strip_quote_lines(str(text or ""))
+    cleaned = re.sub(r"<@!?\d+>", " ", cleaned)
     cleaned = re.sub(r"(?<!\w)@grim\b", " ", cleaned, flags=re.IGNORECASE)
     return " ".join(cleaned.split())
 
 def mention_asks_for_facts(text: str | None) -> bool:
     """True when an @Grim mention asks for accuracy or information.
 
-    A compliment, reaction, or follow-up is conversation unless it asks a
-    question with a concrete topic, or it uses a verification, lookup, or
-    trivia phrase. "Damn accurate" stays conversation. "is this true" does not.
+    A compliment, reaction, greeting, quote of someone else, or follow-up is
+    conversation unless it asks a question with a concrete topic, or it uses a
+    verification, lookup, or trivia phrase. "Damn accurate" stays conversation.
+    "is this true" does not. "how is it going pal" does not.
     """
+    if _is_casual_or_personality(text or ""):
+        return False
     visible = _conversation_text(text)
     if not visible:
         return False
@@ -4217,7 +4273,7 @@ async def generate_contextual_reply(message: discord.Message) -> ContextualReply
                 text=await _sourced_live_reply(research, current_text)
             )
         return ContextualReply(text=live_source_failure_text(research.get("status")))
-    if recent_failure:
+    if recent_failure and not _is_casual_or_personality(current_text):
         live_context_block = (
             "\n\n<LIVE_RESEARCH_STATUS>"
             "The last live search in this channel failed or came back empty, and that "

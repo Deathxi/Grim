@@ -133,7 +133,6 @@ class LiveSourcesTests(unittest.TestCase):
             "the board removed him",
             "is this true",
             "latest news on the election",
-            "why is the sky blue?",
         ):
             self.assertTrue(main._needs_live_sources(text, ""), text)
 
@@ -142,13 +141,21 @@ class LiveSourcesTests(unittest.TestCase):
             "tell me a joke",
             "lol",
             "how are you",
+            "how is it going pal",
+            "huh bruh",
             "damn accurate",
             "write me a poem about the void?",
             "i got fired and i feel awful",
             "they fired me",
             "what do you think of my build?",
+            "why is the sky blue?",
+            "> exactly they’ve got their priorities jacked up\nhuh bruh",
         ):
             self.assertFalse(main._needs_live_sources(text, ""), text)
+            self.assertFalse(
+                main._needs_live_sources(text, "", recent_failure=True),
+                text,
+            )
 
     def test_capability_question_is_not_a_news_search(self):
         for text in (
@@ -175,6 +182,9 @@ class LiveSourcesTests(unittest.TestCase):
         self.assertTrue(main._needs_live_sources("nvidia though", "", recent_failure=True))
         self.assertFalse(main._needs_live_sources("nvidia though", "", recent_failure=False))
         self.assertFalse(main._needs_live_sources("lol ok", "", recent_failure=True))
+        self.assertFalse(
+            main._needs_live_sources("how is it going pal", "", recent_failure=True)
+        )
 
     def test_no_current_sources_sentinel_is_not_an_answer(self):
         self.assertIsNone(main._extract_grok_research_response({
@@ -275,7 +285,7 @@ class LiveSourcesTests(unittest.TestCase):
         for reply in replies:
             self.assert_plain_failure(reply, "empty")
 
-    def test_casual_followup_after_failure_carries_the_failure_forward(self):
+    def test_casual_followup_after_failure_is_not_a_news_miss(self):
         research = AsyncMock(return_value={"status": "empty"})
         replies, model = self.converse(
             ["what's jensen huang's position?", "lol ok"],
@@ -284,9 +294,9 @@ class LiveSourcesTests(unittest.TestCase):
         )
         self.assertEqual(research.await_count, 1)
         self.assertEqual(replies[1].text, "the void keeps its secrets.")
+        self.assertNotIn("where it stands", replies[1].text)
         prompt = model.await_args.args[2]
-        self.assertIn("<LIVE_RESEARCH_STATUS>", prompt)
-        self.assertIn("never describe anything as stable", prompt)
+        self.assertNotIn("<LIVE_RESEARCH_STATUS>", prompt)
 
     def test_success_clears_failure_memory(self):
         research = AsyncMock(side_effect=[{"status": "empty"}, SUCCESS])
@@ -304,6 +314,35 @@ class LiveSourcesTests(unittest.TestCase):
         (reply,), model = self.converse(["tell me a joke"], research, model_reply="death walks into a bar.")
         research.assert_not_awaited()
         self.assertEqual(reply.text, "death walks into a bar.")
+
+    def test_greeting_and_quote_do_not_take_the_news_miss_path(self):
+        research = AsyncMock(return_value={"status": "empty"})
+        main._remember_live_failure("50:9")
+        (hello,), model = self.converse(
+            ["how is it going pal"],
+            research,
+            model_reply="still here. the void's quiet.",
+        )
+        research.assert_not_awaited()
+        model.assert_awaited()
+        self.assertEqual(hello.text, "still here. the void's quiet.")
+        self.assertNotIn("where it stands", hello.text)
+        self.assertNotEqual(hello.text, main.LIVE_SOURCE_FAILURE_LINES["empty"])
+        self.assertNotIn("<LIVE_RESEARCH_STATUS>", model.await_args.args[2])
+
+        main._remember_live_failure("50:9")
+        quoted = (
+            "> exactly they've got their priorities jacked up\n"
+            "huh bruh"
+        )
+        (quote_reply,), model = self.converse(
+            [quoted],
+            research,
+            model_reply="yeah. priorities are a mess.",
+        )
+        research.assert_not_awaited()
+        self.assertEqual(quote_reply.text, "yeah. priorities are a mess.")
+        self.assertNotIn("where it stands", quote_reply.text)
 
     def test_capability_question_uses_a_successful_search(self):
         research = AsyncMock(return_value=SUCCESS)

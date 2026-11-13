@@ -1,8 +1,9 @@
-"""Grim's reply auditor: notice stuck, looping, or off-voice replies and recover.
+"""Grim's reply auditor: rare backstop for stalled jobs and hard errors.
 
-The auditor sits around Grim's reply work. It never decides what Grim says on a
-normal turn; it only steps in when work stalls or a mechanical loop fires, nudges
-light voice slips, and gets out of the way if it fails itself.
+Normal chat is not paced, restyled, or interrupted. The auditor only steps in
+when a job or command runs longer than ten minutes, or when Grim hits an error.
+Optional chat pacing (bursts, tool loops, voice review) stays off unless env
+turns it on. The OPSEC REPORT / DEFCON board is a separate module.
 
 OpSec: events hold only an event type, a work kind, a duration, and a count.
 Message text, invoker names, user ids, and channel ids are never logged, saved,
@@ -23,15 +24,16 @@ from collections import Counter, deque
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, NamedTuple
 
+AUDITOR_STALL_SECONDS = 600.0
 DEFAULT_TIMEOUTS = {
-    "reply": 45.0,
-    "fact_reply": 60.0,
-    "image_reply": 50.0,
-    "live_search": 25.0,
-    "fact_check": 25.0,
-    "chime": 60.0,
-    "retry": 15.0,
-    "pivot": 15.0,
+    "reply": AUDITOR_STALL_SECONDS,
+    "fact_reply": AUDITOR_STALL_SECONDS,
+    "image_reply": AUDITOR_STALL_SECONDS,
+    "live_search": AUDITOR_STALL_SECONDS,
+    "fact_check": AUDITOR_STALL_SECONDS,
+    "chime": AUDITOR_STALL_SECONDS,
+    "retry": AUDITOR_STALL_SECONDS,
+    "pivot": AUDITOR_STALL_SECONDS,
 }
 
 STUCK_BACK_LINE = "was MIA for a mike. back now."
@@ -41,11 +43,13 @@ STUCK_FACT_LINE = (
     "so i won't guess. call me again."
 )
 STUCK_IMAGE_LINE = "was MIA for a mike on that image. couldn't read it this time, call me again."
+ERROR_LINE = "something broke on my end just now. try again in a bit."
 BURST_LINE = "that's a lot of calls in a row. give me a breath, then ask once."
 AUDITOR_LINES = frozenset({
     STUCK_FAIL_LINE,
     STUCK_FACT_LINE,
     STUCK_IMAGE_LINE,
+    ERROR_LINE,
     BURST_LINE,
 })
 
@@ -80,6 +84,8 @@ def _env_flag(name: str, default: bool) -> bool:
 class AuditorConfig:
     enabled: bool = True
     timeouts: dict[str, float] = field(default_factory=lambda: dict(DEFAULT_TIMEOUTS))
+    pace_chat: bool = False
+    review_replies: bool = False
     repeat_similarity: float = 0.9
     repeat_window_seconds: float = 600.0
     pivot_cooldown_seconds: float = 120.0
@@ -97,12 +103,14 @@ class AuditorConfig:
     @classmethod
     def from_env(cls) -> "AuditorConfig":
         timeouts = {
-            kind: _env_number(f"GRIM_AUDITOR_TIMEOUT_{kind.upper()}", seconds, 1, 300)
+            kind: _env_number(f"GRIM_AUDITOR_TIMEOUT_{kind.upper()}", seconds, 1, 3600)
             for kind, seconds in DEFAULT_TIMEOUTS.items()
         }
         return cls(
             enabled=_env_flag("GRIM_AUDITOR_ENABLED", True),
             timeouts=timeouts,
+            pace_chat=_env_flag("GRIM_AUDITOR_PACE_CHAT", False),
+            review_replies=_env_flag("GRIM_AUDITOR_REVIEW", False),
             repeat_similarity=_env_number("GRIM_AUDITOR_REPEAT_SIMILARITY", 0.9, 0.5, 1.0),
             repeat_window_seconds=_env_number("GRIM_AUDITOR_REPEAT_WINDOW", 600, 30, 86400),
             tool_repeat_limit=int(_env_number("GRIM_AUDITOR_TOOL_REPEATS", 4, 2, 50)),
@@ -423,7 +431,15 @@ class ReplyAuditor:
                 return GuardedReply(event="reply_chain")
         except Exception as error:
             self.fail_open("guard", error)
-        outcome = await self.run(kind, work, conversation=conversation)
+        try:
+            outcome = await self.run(kind, work, conversation=conversation)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            self.record("error", kind)
+            if user_waiting and self.allow_intervention(conversation):
+                return GuardedReply(recovery=ERROR_LINE, event="error")
+            return GuardedReply(event="error")
         if not outcome.timed_out:
             return GuardedReply(outcome.value)
         try:
@@ -469,6 +485,8 @@ class ReplyAuditor:
 
     def note_turn(self, conversation: str) -> bool:
         """False when one conversation calls Grim faster than a person plausibly would."""
+        if not self.config.pace_chat:
+            return True
         now = self._clock()
         self._prune(now)
         turns = self._turns.setdefault(conversation, deque())
@@ -494,7 +512,7 @@ class ReplyAuditor:
         """False when this conversation keeps firing the same tool call."""
         try:
             conversation = current_conversation()
-            if not conversation or not self.config.enabled:
+            if not conversation or not self.config.enabled or not self.config.pace_chat:
                 return True
             now = self._clock()
             calls = self._tools.setdefault(conversation, deque())
@@ -552,6 +570,8 @@ class ReplyAuditor:
         """
         try:
             if not self.config.enabled or not isinstance(text, str) or not text.strip():
+                return Review(text)
+            if not self.config.review_replies:
                 return Review(text)
             if text in AUDITOR_LINES or text.startswith(STUCK_BACK_LINE):
                 return Review(text)
