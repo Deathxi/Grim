@@ -6,7 +6,8 @@ Cursor Agent is the development scribe for Grim. Prefer this file plus `README.m
 ## Overview
 Grim is a Discord bot for Seclude & Affiliates. Built with Python and discord.py
 with xAI's Grok API integration. Live runtime is the VPS deploy path
-(`.github/workflows/deploy.yml`); secrets live in the VPS `.env` and GitHub Actions.
+(`.github/workflows/deploy.yml`); secrets live in the VPS `.env` and GitHub Actions
+(`FOUNDER_DISCORD_ID` for private deletion DMs — name only in git).
 
 ## Hard rules for the live host
 - Runtime state source of truth: `~/.grim_data` (never the git workspace).
@@ -21,6 +22,7 @@ with xAI's Grok API integration. Live runtime is the VPS deploy path
 
 ## Project structure
 - `main.py` — bot commands and event handlers
+- `delete_report.py` — founder-only deleted-message DMs (`FOUNDER_DISCORD_ID`)
 - `substance.py` — per-mood substance rules and the post-check on mention replies
 - `requirements.txt` / `pyproject.toml` / `uv.lock` — Python deps (VPS install uses `requirements.txt` into `/root/grim/venv`)
 - `systemd/grim.service` — `ExecStart` must use `/root/grim/venv/bin/python3`

@@ -21,7 +21,8 @@ Never elevate someone solely because a display name resembles the creator.
 
 1. Confirm Grim has only the Discord permissions it needs in that server:
    read/send messages, message history, embed links, delete messages only if
-   moderation is enabled, and voice permissions only if voice use is approved.
+   moderation is enabled, view audit log if deleted-message DMs are enabled,
+   and voice permissions only if voice use is approved.
 2. Have a server owner or administrator configure feeds, welcome messages,
    updates, moderation words, permanent memories, and `/memberlog ENABLE` in the
    intended private staff/mod channel. Grim will reject a departure-log channel
@@ -92,6 +93,10 @@ reject MITM. Leave it empty only until that value is recorded.
   for `/grim_updates` commit metadata. Prefer a fine-grained token with
   Contents: Read on `Deathxi/Grim` only. Never put the backup-repo write token
   in Grim's `.env`.
+- `FOUNDER_DISCORD_ID` in `/root/grim/.env` is the Discord user ID that receives
+  private deleted-message DMs. `GRIM_FOUNDER_ID` is accepted as an alias. Never
+  commit the value. If DMs fail, Grim logs the failure without message content
+  and does not fall back to `/grim_updates` or any server channel.
 
 ## 5. Credential rotation
 

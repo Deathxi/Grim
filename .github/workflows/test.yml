@@ -32,6 +32,6 @@ jobs:
 
       - name: Compile and unit tests
         run: |
-          python -m py_compile main.py backup_grim_data.py image_clean.py post_preview.py reply_auditor.py grim_health.py substance.py zork/machine.py zork/play.py zork/ui.py
-          python -m unittest tests.test_security_controls tests.test_trivia tests.test_zork tests.test_relay tests.test_image_clean tests.test_live_sources tests.test_substance tests.test_reply_auditor tests.test_grim_health
+          python -m py_compile main.py backup_grim_data.py delete_report.py image_clean.py post_preview.py reply_auditor.py grim_health.py substance.py zork/machine.py zork/play.py zork/ui.py
+          python -m unittest tests.test_security_controls tests.test_trivia tests.test_zork tests.test_relay tests.test_image_clean tests.test_live_sources tests.test_substance tests.test_reply_auditor tests.test_grim_health tests.test_delete_report
           bash scripts/post-merge.sh

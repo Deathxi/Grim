@@ -36,7 +36,7 @@ Grim respects your shadows. Here’s exactly what is collected, where it lives, 
 ### 1. What We Collect
 - **Discord user IDs, usernames, display names, and avatar URLs** — for member history, language preferences, stats, and staff directory views.
 - **Server (guild) IDs and channel IDs** — for server-scoped settings, feeds, welcome/updates channels, and schedules.
-- **Message content in guild channels Grim can see** — persisted for conversational context, digests, and member profile synthesis (not only when you @Grim).
+- **Message content in guild channels Grim can see** — persisted for conversational context, digests, and member profile synthesis (not only when you @Grim). Guild message deletions Grim observes may be DMed privately to the operator user ID set in `FOUNDER_DISCORD_ID`, not posted to staff or public channels.
 - **Voice-channel presence timing** — aggregate time-in-voice totals for `/stats`.
 - **Command and preference data** — reminders, language preferences, moderation word lists, welcome/member-log settings, feed schedules, and similar bot configuration.
 - **Zork slots** — one saved position per player per Zork title (I, II, or III), under `~/.grim_data`, included in the encrypted weekly backup. The same slot remembers a HUD or TERMINAL choice for that title, and the compass links that player has walked for `/zork-map`. Until the player picks one, the panel is the move list. The panel is private to that player. Moves are interpreted locally and are not sent to xAI.
@@ -57,7 +57,7 @@ Grim respects your shadows. Here’s exactly what is collected, where it lives, 
 
 ### 4. Sharing
 - Never sold.
-- Shared only as needed to run the bot: Discord (messages Grim sends), xAI (prompts for AI replies), and the private encrypted-backup repository operators configure.
+- Shared only as needed to run the bot: Discord (messages Grim sends, including private deletion DMs to the `FOUNDER_DISCORD_ID` operator), xAI (prompts for AI replies), and the private encrypted-backup repository operators configure.
 - Staff in a server may see member-directory and departure cards Grim posts to configured staff channels.
 
 ### 5. Deletion & Access
