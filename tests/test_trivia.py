@@ -602,7 +602,7 @@ class TriviaTests(unittest.TestCase):
         voice = main.GRIM_CHAT_VOICE
         self.assertIn("Think about the situation before speaking", voice)
         self.assertIn("how to be useful", voice)
-        self.assertIn("Restate only when teaching", voice)
+        self.assertIn("Restate only as an introspection tool", voice)
         self.assertIn("just presence", voice)
         self.assertIn("not a checklist", voice)
         self.assertIn("Vary the length and the shape", voice)
@@ -624,7 +624,7 @@ class TriviaTests(unittest.TestCase):
             main.TRIVIA_REVISION_SYSTEM,
             main.with_grim_voice("notes"),
         ):
-            self.assertIn("Restate only when teaching", spoken)
+            self.assertIn("Restate only as an introspection tool", spoken)
         for name in (
             "generate_haiku",
             "generate_death_scene",
@@ -696,7 +696,7 @@ class TriviaTests(unittest.TestCase):
             prompt = model.await_args.args[2]
             self.assertIn("Think about the situation before speaking", prompt)
             self.assertIn("not a checklist", prompt)
-            self.assertIn("Restate only when teaching", prompt)
+            self.assertIn("Restate only as an introspection tool", prompt)
             self.assertIn("X-post cadence", prompt)
             self.assertIn('No "great point" padding', prompt)
             self.assertNotIn("Do not make every reply avoid a restatement, add a reference, and take a stance.\nAdd substance", prompt)

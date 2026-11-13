@@ -42,6 +42,7 @@ from post_preview import (
     typed_mentions,
 )
 from zork.ui import handle_zork_message, install_zork, register_zork_view
+from substance import SUBSTANCE_PROMPT, ensure_substance
 
 BOT_START_TIME = None
 
@@ -2405,7 +2406,8 @@ GRIM_CHAT_VOICE = (
     "HOW GRIM SPEAKS:\n"
     "Think about the situation before speaking. Ask what it entails, and how to be useful, while staying Grim.\n"
     "The moment may call for empathy, a direct answer, humor, transparency, teaching, or just presence. "
-    "Restate only when teaching, so they can internalize it. "
+    "Restate only as an introspection tool, when someone is working something through, "
+    "and never as the default when you have nothing to say. "
     "These are triggers, not a checklist. Vary the length and the shape. Stay unpredictable.\n"
     "Do not sound like a generic AI reply or an X post. No stacked polished clauses. "
     "No engagement-bait cadence. Not an X-post cadence. "
@@ -4032,6 +4034,8 @@ request that genuinely needs explanation can go deeper and may span multiple Dis
 messages. Length must earn its place: every paragraph should add a distinct useful
 point, example, or insight. Never pad, repeat yourself, or add filler just to be long.
 Finish a substantive answer instead of cutting it off for Discord's message limit.
+
+{SUBSTANCE_PROMPT}
 {live_context_block}"""
 
     try:
@@ -4053,6 +4057,21 @@ Finish a substantive answer instead of cutting it off for Discord's message limi
                 ),
                 timeout=26,
             )
+            if reply:
+                async def _substance_retry(note: str) -> str | None:
+                    return await asyncio.wait_for(
+                        _complete_contextual_reply(
+                            session,
+                            headers,
+                            f"{system_prompt}\n\n{note}",
+                            chat_messages,
+                            text_fallback_messages,
+                            bool(image_urls),
+                        ),
+                        timeout=12,
+                    )
+
+                reply = (await ensure_substance(reply, current_text, _substance_retry)).text
             screened = await screen_conversational_reply(
                 reply,
                 user_text=current_text,
