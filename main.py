@@ -42,13 +42,8 @@ from post_preview import (
     typed_mentions,
 )
 from zork.ui import handle_zork_message, install_zork, register_zork_view
-from reply_auditor import (
-    AuditNotes,
-    AuditorConfig,
-    ReplyAuditor,
-    conversation_key,
-    format_events,
-)
+from grim_health import HealthBoard, build_health_embed, classify_security_rows, health_window_seconds, score_health
+from reply_auditor import AuditorConfig, ReplyAuditor, conversation_key
 from substance import SUBSTANCE_PROMPT, ensure_substance
 
 BOT_START_TIME = None
@@ -5397,6 +5392,16 @@ async def health_monitor():
         else:
             tasks_status.append("heartbeat: OK")
 
+        if not health_board_refresh.is_running():
+            print("[Health Monitor] Health board refresh not running, restarting...")
+            try:
+                health_board_refresh.start()
+                tasks_status.append("health_board: RESTARTED")
+            except Exception as e:
+                tasks_status.append(f"health_board: FAILED ({e})")
+        else:
+            tasks_status.append("health_board: OK")
+
         print(f"[Health Monitor] Status: {', '.join(tasks_status)}")
     except Exception as e:
         print(f"[Health Monitor] Error in health check: {e}")
@@ -5611,6 +5616,10 @@ async def on_ready():
     if not synthesize_server_digest.is_running():
         synthesize_server_digest.start()
         print("Started server digest synthesizer (runs every 4 hours)")
+
+    if not health_board_refresh.is_running():
+        health_board_refresh.start()
+        print("Started health board refresh")
 
     if not health_monitor.is_running():
         health_monitor.start()
@@ -7852,6 +7861,7 @@ async def grim_status(interaction: discord.Interaction):
         "RemindMe": check_remindme,
         "Digest": synthesize_server_digest,
         "Health Monitor": health_monitor,
+        "Health Board": health_board_refresh,
         "VC Monitor": vc_empty_monitor,
     }
 
@@ -8751,7 +8761,7 @@ async def grim_updates(interaction: discord.Interaction):
             title="Grim Operations Log Disabled",
             description=(
                 "Grim will no longer post patch notes, offline after-reports, "
-                "audit notes, or `/clear` deletion logs in this server."
+                "the health board, or `/clear` deletion logs in this server."
             ),
             color=discord.Color.from_rgb(18, 18, 18)
         )
@@ -8765,7 +8775,7 @@ async def grim_updates(interaction: discord.Interaction):
         embed = discord.Embed(
             title="Grim Operations Log Enabled",
             description=(
-                f"Grim will post patch notes, offline after-reports, audit notes, "
+                f"Grim will post patch notes, offline after-reports, the health board, "
                 f"and `/clear` deletion logs in "
                 f"<#{interaction.channel_id}>."
             ),
@@ -9653,6 +9663,7 @@ async def _read_relay_image(
         result = await asyncio.to_thread(clean_image_report, original)
     except ImageCleanError as error:
         print(f"[Relay] metadata strip failed: {error}")
+        record_security_event(None, "image_strip", "failed")
         raise RelayImageError("Couldn't clean that image's metadata, so Grim won't post it.")
     if len(result.data) > max_bytes:
         raise RelayImageError("That image is too large to post in this server.")
@@ -9834,7 +9845,7 @@ async def say(
 # touches Grim, so the reply and live-search bodies above stay unchanged.
 
 AUDITOR_EVENTS_FILE = _data_path("auditor_events.json")
-AUDIT_NOTE_COLOR = discord.Color.from_rgb(18, 18, 18)
+HEALTH_BOARD_FILE = _data_path("health_dashboard.json")
 
 def _load_auditor_events():
     if not os.path.exists(AUDITOR_EVENTS_FILE):
@@ -9845,48 +9856,108 @@ def _load_auditor_events():
 def _save_auditor_events(events: list):
     _atomic_json_write(AUDITOR_EVENTS_FILE, events)
 
-def build_audit_note_embed(note: dict) -> discord.Embed:
-    """Same monochrome box as the patch notes. Counts and kinds only."""
-    embed = discord.Embed(
-        title=f"Grim · Audit Note · {note['title']}",
-        description="\n".join(note["lines"]) or "No detail.",
-        color=AUDIT_NOTE_COLOR,
-    )
-    if note.get("fixes"):
-        embed.add_field(
-            name="Quick Fix",
-            value="\n".join(note["fixes"])[:1024],
-            inline=False,
-        )
-    embed.add_field(name="Events", value=str(note.get("total", 0)), inline=True)
-    embed.set_footer(text=xsi_footer())
-    return embed
+def _load_health_board():
+    if not os.path.exists(HEALTH_BOARD_FILE):
+        return {}
+    with open(HEALTH_BOARD_FILE, "r") as handle:
+        return json.load(handle)
 
-async def post_audit_note(note: dict) -> bool:
-    """Post to the channels configured by /grim_updates, like the patch notes."""
+def _save_health_board(state: dict):
+    _atomic_json_write(HEALTH_BOARD_FILE, state)
+
+def _health_security_rows(since: float):
+    conn = sqlite3.connect(CHAT_DB_FILE)
+    try:
+        return conn.execute(
+            "SELECT action, outcome, COUNT(*), MAX(occurred_at) FROM security_audit_events "
+            "WHERE occurred_at >= ? GROUP BY action, outcome",
+            (since,),
+        ).fetchall()
+    finally:
+        conn.close()
+
+async def compute_health():
+    """Score security and mechanical health. Counts only; connectivity is not scored."""
+    window = health_window_seconds()
+    now = time.time()
+    try:
+        rows = await asyncio.to_thread(_health_security_rows, now - window)
+    except Exception as error:
+        print(f"[Health] Could not read security events: {type(error).__name__}")
+        rows = []
+    return score_health(
+        reply_auditor.recent_events(reply_auditor.config.event_log_size),
+        classify_security_rows(rows),
+        now=now,
+        window_seconds=window,
+    )
+
+async def deliver_health_board(health, messages: dict, repost: bool):
+    """Edit the standing board in each /grim_updates channel; post a new one if it is gone.
+
+    On a repost the old message is deleted after the new one lands, so the channel
+    shows one current board and a drop to DEFCON 1 or 2 still notifies once.
+    """
     if not updates_channels:
-        return False
-    embed = build_audit_note_embed(note)
-    posted = False
+        return None
+    embed = build_health_embed(health, xsi_footer())
+    delivered = {}
     for guild_id, data in list(updates_channels.items()):
+        channel_id = str(data.get("channel_id", ""))
         try:
-            channel = await bot.fetch_channel(int(data["channel_id"]))
-            await channel.send(embed=embed)
-            posted = True
+            channel = await bot.fetch_channel(int(channel_id))
+            old_id = messages.get(channel_id)
+            if old_id and not repost:
+                try:
+                    await channel.get_partial_message(int(old_id)).edit(embed=embed)
+                    delivered[channel_id] = old_id
+                    continue
+                except discord.NotFound:
+                    old_id = None
+            sent = await channel.send(embed=embed)
+            delivered[channel_id] = str(sent.id)
+            if old_id:
+                try:
+                    await channel.get_partial_message(int(old_id)).delete()
+                except Exception:
+                    pass
         except Exception as e:
             print(
-                f"[Auditor] Could not post audit note to channel "
-                f"{data.get('channel_id')} in guild {guild_id}: {type(e).__name__}"
+                f"[Health] Could not update the board in channel {channel_id} "
+                f"in guild {guild_id}: {type(e).__name__}"
             )
-    return posted
+            if messages.get(channel_id):
+                delivered[channel_id] = messages[channel_id]
+    return delivered or None
 
-audit_notes = AuditNotes(post_audit_note)
+health_board = HealthBoard(
+    compute_health,
+    deliver_health_board,
+    load=_load_health_board,
+    save=_save_health_board,
+)
 reply_auditor = ReplyAuditor(
     AuditorConfig.from_env(),
     load=_load_auditor_events,
     save=_save_auditor_events,
-    notify=audit_notes.add,
+    notify=lambda entry: health_board.request_refresh(),
 )
+
+@tasks.loop(minutes=10)
+async def health_board_refresh():
+    """Keep the standing health board current as events age out of its window."""
+    await health_board.refresh()
+
+@health_board_refresh.before_loop
+async def before_health_board_refresh():
+    await bot.wait_until_ready()
+
+@health_board_refresh.after_loop
+async def after_health_board_refresh():
+    if health_board_refresh.is_being_cancelled():
+        print("[Health] Board refresh was cancelled")
+    else:
+        print("[Health] Board refresh stopped unexpectedly, will restart on next health check")
 
 def _auditor_hook_failed(where: str, error: Exception):
     try:
@@ -10069,19 +10140,17 @@ async def _audited_chime(message):
 
 _evaluate_and_chime = _audited_chime
 
-@bot.tree.command(name="grim_auditor", description="Saved reply auditor events (admin only)")
+@bot.tree.command(name="grim_auditor", description="Current health board and saved auditor events (admin only)")
 async def grim_auditor(interaction: discord.Interaction):
     if not await require_permission(interaction, "administrator", "auditor_view", administrator=True):
         return
-    embed = discord.Embed(
-        title="Grim · Auditor Log",
-        description=format_events(reply_auditor.saved_events(20)),
-        color=AUDIT_NOTE_COLOR,
-    )
-    embed.set_footer(text=xsi_footer())
-    updates = updates_channels.get(str(interaction.guild_id)) or {}
-    in_updates_channel = str(updates.get("channel_id", "")) == str(interaction.channel_id)
-    await interaction.response.send_message(embed=embed, ephemeral=not in_updates_channel)
+    health = await compute_health()
+    recent = [
+        f"`{max(0, int(time.time() - e['at'])) // 60}m ago` {e['event']} ({e['kind']})"
+        for e in reversed(reply_auditor.saved_events(5))
+    ]
+    embed = build_health_embed(health, xsi_footer(), recent=recent)
+    await interaction.response.send_message(embed=embed, ephemeral=True)
 
 def run_bot():
     token = os.environ.get("DISCORD_TOKEN")

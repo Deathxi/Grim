@@ -15,11 +15,8 @@ from reply_auditor import (
     STUCK_BACK_LINE,
     STUCK_FACT_LINE,
     STUCK_FAIL_LINE,
-    AuditNotes,
     AuditorConfig,
     ReplyAuditor,
-    build_audit_note,
-    defcon_for,
     format_events,
 )
 
@@ -433,23 +430,6 @@ class RateLimitTests(unittest.IsolatedAsyncioTestCase):
         allowed = [auditor.allow_intervention(f"g:c:{user}") for user in range(4)]
         self.assertEqual(allowed, [True, True, False, False])
 
-    async def test_audit_notes_are_spaced_out(self):
-        posted = []
-
-        async def post(note):
-            posted.append(note)
-            return True
-
-        clock = FakeClock()
-        notes = AuditNotes(post, delays={2: 0}, gaps={2: 300}, clock=clock, log=lambda line: None)
-        notes.add({"at": 1, "event": "tool_loop", "kind": "live_search"})
-        await asyncio.sleep(0.01)
-        notes.add({"at": 2, "event": "tool_loop", "kind": "live_search"})
-        notes.add({"at": 3, "event": "recovery_failed", "kind": "reply"})
-        await asyncio.sleep(0.01)
-        self.assertEqual(len(posted), 1)
-        self.assertEqual(len(notes.pending(2)), 2)
-
 
 class PersistenceTests(unittest.IsolatedAsyncioTestCase):
     def test_events_are_saved_and_reloaded_without_content(self):
@@ -495,79 +475,6 @@ class PersistenceTests(unittest.IsolatedAsyncioTestCase):
         )
 
 
-class DefconNoteTests(unittest.IsolatedAsyncioTestCase):
-    def test_defcon_mapping(self):
-        self.assertEqual(defcon_for("auditor_error"), 1)
-        self.assertEqual(defcon_for("recovery_failed"), 2)
-        self.assertEqual(defcon_for("tool_loop"), 2)
-        self.assertEqual(defcon_for("timeout"), 3)
-        self.assertEqual(defcon_for("recovered"), 3)
-        self.assertEqual(defcon_for("reply_chain"), 3)
-        self.assertEqual(defcon_for("intervention_suppressed"), 4)
-        self.assertEqual(defcon_for("repeat_subject"), 4)
-        self.assertEqual(defcon_for("style"), 5)
-        self.assertEqual(defcon_for("something_new"), 1)
-
-    def test_note_aggregates_counts_only(self):
-        note = build_audit_note(3, [
-            {"at": 1, "event": "timeout", "kind": "reply", "duration": 40},
-            {"at": 2, "event": "timeout", "kind": "reply", "duration": 50},
-            {"at": 3, "event": "recovered", "kind": "reply", "duration": 12},
-        ])
-        self.assertEqual(note["title"], "DEFCON 3 · ROUND HOUSE")
-        self.assertEqual(note["lines"][0], "`x2` stuck call cancelled · reply · avg 45.0s")
-        self.assertEqual(note["total"], 3)
-        self.assertTrue(note["fixes"])
-
-    async def test_high_urgency_posts_at_once(self):
-        posted = []
-
-        async def post(note):
-            posted.append(note)
-            return True
-
-        notes = AuditNotes(post, log=lambda line: None)
-        notes.add({"at": 1, "event": "auditor_error", "kind": "review"})
-        await asyncio.sleep(0.01)
-        self.assertEqual([note["level"] for note in posted], [1])
-
-    async def test_style_waits_and_rolls_up(self):
-        post = AsyncMock(return_value=True)
-        notes = AuditNotes(post, log=lambda line: None)
-        for _ in range(3):
-            notes.add({"at": 1, "event": "style", "kind": "dash"})
-        await asyncio.sleep(0.01)
-        post.assert_not_awaited()
-        self.assertEqual(len(notes.pending(5)), 3)
-        await notes.flush(5)
-        self.assertEqual(post.await_args.args[0]["lines"], ["`x3` voice slip · dash"])
-
-    def test_embed_matches_the_patch_note_box(self):
-        note = build_audit_note(2, [{"at": 1, "event": "tool_loop", "kind": "live_search", "count": 4}])
-        embed = main.build_audit_note_embed(note)
-        self.assertEqual(embed.title, "Grim · Audit Note · DEFCON 2 · FAST PACE")
-        self.assertEqual(embed.color, discord.Color.from_rgb(18, 18, 18))
-        self.assertEqual(embed.footer.text, main.xsi_footer())
-        self.assertEqual([field.name for field in embed.fields], ["Quick Fix", "Events"])
-
-    async def test_post_goes_to_grim_updates_channels_publicly(self):
-        channel = SimpleNamespace(send=AsyncMock())
-        note = build_audit_note(1, [{"at": 1, "event": "auditor_error", "kind": "hook"}])
-        with patch.dict(main.updates_channels, {"1": {"channel_id": "55"}}, clear=True), patch.object(
-            main.bot, "fetch_channel", AsyncMock(return_value=channel)
-        ) as fetch:
-            self.assertTrue(await main.post_audit_note(note))
-        fetch.assert_awaited_once_with(55)
-        kwargs = channel.send.await_args.kwargs
-        self.assertIsInstance(kwargs["embed"], discord.Embed)
-        self.assertNotIn("ephemeral", kwargs)
-        self.assertNotIn("view", kwargs)
-
-    async def test_no_updates_channel_means_no_post(self):
-        with patch.dict(main.updates_channels, {}, clear=True):
-            self.assertFalse(await main.post_audit_note(build_audit_note(5, [])))
-
-
 class AdminCommandTests(unittest.IsolatedAsyncioTestCase):
     async def test_auditor_command_is_admin_only(self):
         response = SimpleNamespace(send_message=AsyncMock())
@@ -576,18 +483,22 @@ class AdminCommandTests(unittest.IsolatedAsyncioTestCase):
             await main.grim_auditor.callback(interaction)
         response.send_message.assert_not_awaited()
 
-    async def test_auditor_command_reads_saved_events(self):
+    async def test_auditor_command_shows_the_board_privately(self):
         saved = [{"at": 1, "event": "timeout", "kind": "reply", "duration": 45}]
         auditor = make_auditor(load=lambda: saved)
         response = SimpleNamespace(send_message=AsyncMock())
         interaction = SimpleNamespace(response=response, guild_id=1, channel_id=55)
         with patch.object(main, "reply_auditor", auditor), patch.object(
             main, "require_permission", AsyncMock(return_value=True)
-        ), patch.dict(main.updates_channels, {"1": {"channel_id": "55"}}, clear=True):
+        ), patch.object(main, "_health_security_rows", return_value=[]), patch.dict(
+            main.updates_channels, {"1": {"channel_id": "55"}}, clear=True
+        ):
             await main.grim_auditor.callback(interaction)
         kwargs = response.send_message.await_args.kwargs
-        self.assertIn("D3 timeout (reply) 45.0s", kwargs["embed"].description)
-        self.assertFalse(kwargs["ephemeral"])
+        self.assertTrue(kwargs["ephemeral"])
+        self.assertIn("DEFCON", kwargs["embed"].title)
+        recent = [f for f in kwargs["embed"].fields if f.name == "Recent"][0]
+        self.assertIn("timeout (reply)", recent.value)
 
 
 if __name__ == "__main__":
