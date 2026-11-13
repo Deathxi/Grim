@@ -55,6 +55,12 @@ SAVE_VERSION = 1
 TRANSCRIPT_LIMIT = 3400
 HUD = "hud"
 TERMINAL = "terminal"
+# Inside the fenced dump: a thin terminal divider, not Discord chrome.
+OPENING_SPACER = "---"
+_RELEASE_LINE = re.compile(
+    r"^Release \d+ / Serial number \S+\s*$",
+    re.IGNORECASE | re.MULTILINE,
+)
 
 
 @dataclass
@@ -155,6 +161,7 @@ class Session:
             shown = _hud_body(self.place, self.latest, previous_place=previous_place)
         else:
             shown = self.transcript
+        shown = _split_opening_banner(shown)
         title, status, description = render_panel(
             info.label,
             self.room,
@@ -696,6 +703,28 @@ def _game_text(output: str) -> str:
     elif text == ">":
         return ""
     return text.strip("\n")
+
+
+def _split_opening_banner(text: str) -> str:
+    """Infocom banner first, a thin divider, then the first room dump.
+
+    Later turns with no banner are unchanged. The stored transcript is not
+    rewritten; this only shapes the panel body.
+    """
+    raw = (text or "").strip("\n")
+    if not raw:
+        return raw
+    folded = raw.casefold()
+    if "infocom" not in folded or "serial number" not in folded:
+        return raw
+    match = _RELEASE_LINE.search(raw)
+    if not match:
+        return raw
+    following = raw[match.end() :].lstrip("\n")
+    if not following or following.startswith(OPENING_SPACER):
+        return raw
+    banner = raw[: match.end()].rstrip("\n")
+    return f"{banner}\n\n{OPENING_SPACER}\n\n{following}"
 
 
 def _split_latest(latest: str) -> tuple[str, str]:

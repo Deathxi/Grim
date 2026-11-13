@@ -7,6 +7,7 @@ from zork.machine import encode_word
 from zork.play import (
     DEATH_LINES,
     GAMES,
+    OPENING_SPACER,
     choose_aside,
     command_session,
     load_story,
@@ -20,6 +21,7 @@ from zork.play import (
     map_sketch,
     render_sketch,
     toggle_ui,
+    _split_opening_banner,
 )
 
 
@@ -76,6 +78,66 @@ class ZorkInterpreterTests(unittest.TestCase):
         )
         death = choose_aside(game_id="zork1", died=True, delta=40, max_score=350, key="dead")
         self.assertIn(death, DEATH_LINES)
+
+    def test_opening_puts_banner_above_a_spacer_then_the_room(self):
+        only_room = (
+            "West of House\n"
+            "You are standing in an open field west of a white house, "
+            "with a boarded front door.\n"
+            "There is a small mailbox here."
+        )
+        self.assertEqual(_split_opening_banner(only_room), only_room)
+        self.assertNotIn(OPENING_SPACER, only_room)
+
+        opening = open_session(self.root, self.player, "zork1")
+        self.assertEqual(opening.ui, TERMINAL)
+        self.assertEqual(opening.title, "WEST OF HOUSE")
+        self.assertEqual(opening.status, "ZORK I // WEST OF HOUSE // SCORE 0/350 // MOVES 0")
+        self.assertNotIn(f"\n{OPENING_SPACER}\n", opening.transcript)
+        panel = opening.description
+        self.assertIn(opening.status, panel)
+        self.assertEqual(panel.count("```"), 2)
+        fenced = panel.split("```")[1]
+        divider = f"\n{OPENING_SPACER}\n"
+        self.assertEqual(fenced.count(divider), 1)
+        folded = fenced.casefold()
+        self.assertIn("zork i: the great underground empire", folded)
+        self.assertIn("infocom", folded)
+        self.assertIn("release 119 / serial number 880429", folded)
+        self.assertIn("west of house", folded)
+        self.assertIn("white house", folded)
+        self.assertIn("small mailbox", folded)
+        self.assertLess(folded.index("zork i: the great underground empire"), folded.index(divider))
+        self.assertLess(folded.index("infocom"), folded.index(divider))
+        self.assertLess(folded.index("serial number 880429"), folded.index(divider))
+        self.assertLess(folded.index(divider), folded.index("west of house"))
+        self.assertLess(folded.index(divider), folded.index("you are standing"))
+
+        looked = command_session(self.root, self.player, "zork1", "look")
+        self.assertEqual(looked.ui, TERMINAL)
+        later = looked.description.split("```")[1]
+        self.assertEqual(later.count(divider), 1)
+        self.assertLess(later.casefold().index("infocom"), later.index(divider))
+        self.assertLess(later.index(divider), later.casefold().index("west of house"))
+        self.assertIn("> look", later)
+        look_at = later.index("> look")
+        self.assertGreater(look_at, later.index(divider))
+        self.assertNotIn(divider, later[look_at:])
+
+        hud = toggle_ui(self.root, self.player, "zork1")
+        self.assertEqual(hud.ui, HUD)
+        hud_fenced = hud.description.split("```")[1]
+        self.assertNotIn("Infocom", hud_fenced)
+        self.assertNotIn(divider, hud_fenced)
+        self.assertIn("white house", hud_fenced.lower())
+        self.assertIn("small mailbox", hud_fenced.lower())
+
+        for game_id in ("zork2", "zork3"):
+            started = open_session(self.root, f"open-{game_id}", game_id)
+            body = started.description.split("```")[1]
+            self.assertEqual(body.count(divider), 1)
+            self.assertLess(body.casefold().index("infocom"), body.index(divider))
+            self.assertLess(body.index(divider), body.casefold().index(started.room.casefold()))
 
     def test_zork1_command_round_trip(self):
         opening = open_session(self.root, self.player, "zork1")
