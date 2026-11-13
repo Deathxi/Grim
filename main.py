@@ -50,6 +50,7 @@ from grim_health import (
     classify_security_rows,
     health_window_seconds,
     heartbeat_due,
+    live_discord_connectivity,
     score_health,
 )
 from reply_auditor import AuditorConfig, ReplyAuditor, conversation_key, format_events
@@ -10335,7 +10336,7 @@ def _health_security_rows(since: float):
         conn.close()
 
 async def compute_health():
-    """Score security and mechanical health. Counts only; connectivity is not scored."""
+    """Score security and mechanical health. Counts only; connectivity is posted, not scored."""
     window = health_window_seconds()
     now = time.time()
     try:
@@ -10348,6 +10349,7 @@ async def compute_health():
         classify_security_rows(rows),
         now=now,
         window_seconds=window,
+        connectivity=live_discord_connectivity(bot),
     )
 
 async def deliver_health_board(health, messages: dict, repost: bool):
