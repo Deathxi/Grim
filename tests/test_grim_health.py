@@ -15,19 +15,59 @@ import grim_health
 import main
 from grim_health import (
     CHECKS,
+    RECEIPT_FIELD,
+    UNKNOWN_CONNECTIVITY,
     AuditBulletin,
     HealthBoard,
     build_audit_embed,
     build_opsec_report,
     classify_security_rows,
+    format_check_time,
+    format_connectivity,
     heartbeat_due,
     heartbeat_slot,
+    live_discord_connectivity,
     score_health,
 )
 
+DISCLAIMER = "Connectivity is not part of this score."
 LA = ZoneInfo("America/Los_Angeles")
-
 NOW = 100_000.0
+RECEIPT_SHAPE = r"^[A-Z][a-z]+ \d{1,2}, \d{4} • \d{2}:\d{2}:\d{2} (AM|PM) (PST|PDT)$"
+
+
+def report_body(embed):
+    parts = [embed.title or "", embed.description or ""]
+    parts.extend(f"{field.name}\n{field.value}" for field in embed.fields)
+    return "\n".join(parts)
+
+
+def assert_posts_connectivity(test, embed, status=None):
+    dumped = repr(embed.to_dict())
+    body = report_body(embed)
+    test.assertNotIn(DISCLAIMER, dumped)
+    test.assertNotIn(DISCLAIMER, body)
+    test.assertIn("Connectivity:", body)
+    expected = status or UNKNOWN_CONNECTIVITY
+    test.assertIn(f"Connectivity: {expected}", embed.description)
+
+
+def assert_receipt_at_bottom(test, embed, checked_at=NOW):
+    receipt = format_check_time(checked_at)
+    last = embed.fields[-1]
+    test.assertEqual(last.name, RECEIPT_FIELD)
+    test.assertEqual(last.value, receipt)
+    test.assertRegex(last.value, RECEIPT_SHAPE)
+    test.assertIn(" • ", last.value)
+    test.assertNotEqual(last.name, embed.footer.text)
+    test.assertNotIn(receipt, embed.title)
+    test.assertFalse((embed.description or "").startswith(receipt))
+    test.assertNotIn(receipt, embed.description or "")
+    test.assertNotIn(receipt, embed.footer.text or "")
+    test.assertNotIn("Powered by XSI", last.value)
+    for field in embed.fields[:-1]:
+        test.assertNotEqual(field.name, RECEIPT_FIELD)
+        test.assertNotIn(receipt, field.value)
 
 
 def ev(event, kind="reply", ago=60, **extra):
@@ -90,6 +130,14 @@ class ScoringTests(unittest.TestCase):
         keys = {spec.key for spec in CHECKS}
         self.assertFalse(keys & {"gateway", "latency", "connectivity", "outage"})
         self.assertEqual(score([ev("gateway_down", "x") for _ in range(20)]).level, 5)
+        self.assertEqual(score(connectivity="Discord disconnected").level, 5)
+        self.assertEqual(score(connectivity="Discord online · 9999ms").level, 5)
+        quiet = score()
+        disconnected = score(connectivity="Discord disconnected")
+        self.assertEqual(quiet.signature, disconnected.signature)
+        later = score_health([], now=NOW + 90, window_seconds=6 * 3600)
+        self.assertEqual(quiet.signature, later.signature)
+        self.assertNotEqual(quiet.checked_at, later.checked_at)
 
     def test_window_env(self):
         with patch.dict(os.environ, {"GRIM_HEALTH_WINDOW_HOURS": "12"}):
@@ -136,10 +184,12 @@ class EmbedTests(unittest.TestCase):
         self.assertEqual(embed.title, "OPSEC REPORT")
         self.assertTrue(embed.description.startswith("**DEFCON 5 · FADE OUT**\n"))
         self.assertIn("Security and mechanical function: all checks healthy.", embed.description)
+        assert_posts_connectivity(self, embed)
+        assert_receipt_at_bottom(self, embed)
         fields = self.fields(embed)
         self.assertEqual(
             list(fields),
-            ["Healthy", "Degraded", "Counts · last 6h", "Last Event", "Quick Fix"],
+            ["Healthy", "Degraded", "Counts · last 6h", "Last Event", "Quick Fix", RECEIPT_FIELD],
         )
         self.assertEqual(fields["Degraded"], "none")
         self.assertEqual(fields["Counts · last 6h"], "none")
@@ -153,6 +203,8 @@ class EmbedTests(unittest.TestCase):
         fields = self.fields(embed)
         self.assertEqual(embed.title, "OPSEC REPORT")
         self.assertTrue(embed.description.startswith("**DEFCON 3 · ROUND HOUSE**\n"))
+        assert_posts_connectivity(self, embed)
+        assert_receipt_at_bottom(self, embed)
         self.assertIn(
             "Security and mechanical function: 2 of 10 checks degraded. Worst: Loops.",
             embed.description,
@@ -172,6 +224,88 @@ class EmbedTests(unittest.TestCase):
         dumped = repr(embed.to_dict())
         for leaked in ("alice", "hunter2"):
             self.assertNotIn(leaked, dumped)
+        assert_posts_connectivity(self, embed)
+        assert_receipt_at_bottom(self, embed)
+
+    def test_report_body_includes_connectivity_and_omits_the_disclaimer(self):
+        embed = build_opsec_report(score(connectivity="Discord online · 42ms"), "f")
+        assert_posts_connectivity(self, embed, "Discord online · 42ms")
+        assert_receipt_at_bottom(self, embed)
+        self.assertNotIn(DISCLAIMER, embed.description)
+        self.assertNotIn("SCOPE_LINE", repr(embed.to_dict()))
+
+    def test_empty_connectivity_still_posts_a_status(self):
+        embed = build_opsec_report(score(connectivity="  "), "f")
+        assert_posts_connectivity(self, embed, UNKNOWN_CONNECTIVITY)
+        assert_receipt_at_bottom(self, embed)
+
+    def test_receipt_is_the_last_line_not_the_heading_or_xsi_footer(self):
+        embed = build_opsec_report(score(), "Powered by XSI • v")
+        assert_receipt_at_bottom(self, embed, NOW)
+        self.assertEqual(embed.title, "OPSEC REPORT")
+        self.assertEqual(embed.footer.text, "Powered by XSI • v")
+        self.assertEqual(embed.fields[-1].value, format_check_time(NOW))
+        self.assertEqual([field.name for field in embed.fields][-1], RECEIPT_FIELD)
+
+    def test_receipt_is_pacific_to_the_second_in_both_daylight_periods(self):
+        winter = datetime(2026, 1, 15, 0, 0, 7, tzinfo=LA).timestamp()
+        summer = datetime(2026, 7, 15, 12, 0, 7, tzinfo=LA).timestamp()
+        self.assertEqual(format_check_time(winter), "January 15, 2026 • 12:00:07 AM PST")
+        self.assertEqual(format_check_time(summer), "July 15, 2026 • 12:00:07 PM PDT")
+        winter_report = build_opsec_report(score_health([], now=winter, window_seconds=6 * 3600), "f")
+        summer_report = build_opsec_report(score_health([], now=summer, window_seconds=6 * 3600), "f")
+        assert_receipt_at_bottom(self, winter_report, winter)
+        assert_receipt_at_bottom(self, summer_report, summer)
+
+    def test_receipt_matches_the_screenshot_style(self):
+        checked = datetime(2026, 11, 13, 14, 1, 29, tzinfo=LA)
+        self.assertEqual(format_check_time(checked.timestamp()), "November 13, 2026 • 02:01:29 PM PST")
+        embed = build_opsec_report(score_health([], now=checked.timestamp(), window_seconds=6 * 3600), "Powered by XSI • v")
+        assert_receipt_at_bottom(self, embed, checked.timestamp())
+        self.assertEqual(embed.fields[-1].value, "November 13, 2026 • 02:01:29 PM PST")
+        self.assertEqual(embed.footer.text, "Powered by XSI • v")
+        self.assertNotIn("November 13, 2026 • 02:01:29 PM PST", embed.footer.text)
+
+
+class ConnectivityStatusTests(unittest.TestCase):
+    def test_online_ping_disconnected_and_connecting(self):
+        self.assertEqual(
+            format_connectivity(ready=True, closed=False, latency_s=0.042),
+            "Discord online · 42ms",
+        )
+        self.assertEqual(
+            format_connectivity(ready=False, closed=False, latency_s=0.042),
+            "Discord disconnected",
+        )
+        self.assertEqual(
+            format_connectivity(ready=True, closed=True, latency_s=0.042),
+            "Discord disconnected",
+        )
+        self.assertEqual(
+            format_connectivity(ready=True, closed=False, latency_s=float("nan")),
+            "Discord connecting",
+        )
+        self.assertEqual(
+            format_connectivity(ready=True, closed=False, latency_s=float("inf")),
+            "Discord connecting",
+        )
+        self.assertEqual(
+            format_connectivity(ready=True, closed=False, latency_s=None),
+            "Discord connecting",
+        )
+
+    def test_live_reader_uses_the_client_and_never_raises(self):
+        client = SimpleNamespace(
+            is_ready=lambda: True, is_closed=lambda: False, latency=0.12
+        )
+        self.assertEqual(live_discord_connectivity(client), "Discord online · 120ms")
+        self.assertEqual(live_discord_connectivity(None), UNKNOWN_CONNECTIVITY)
+
+        class Broken:
+            def is_ready(self):
+                raise RuntimeError("no gateway")
+
+        self.assertEqual(live_discord_connectivity(Broken()), UNKNOWN_CONNECTIVITY)
 
 
 class BoardTests(unittest.IsolatedAsyncioTestCase):
@@ -342,6 +476,8 @@ class MainWiringTests(unittest.IsolatedAsyncioTestCase):
         kwargs = channel.send.await_args.kwargs
         self.assertEqual(set(kwargs), {"embed"})
         self.assertEqual(kwargs["embed"].title, "OPSEC REPORT")
+        assert_posts_connectivity(self, kwargs["embed"])
+        assert_receipt_at_bottom(self, kwargs["embed"])
         self.assertNotIn("embeds", kwargs)
 
     async def test_later_delivery_edits_the_same_message(self):
@@ -384,13 +520,29 @@ class MainWiringTests(unittest.IsolatedAsyncioTestCase):
             health = await main.compute_health()
         self.assertEqual(health.level, 3)
         self.assertEqual({c.key for c in health.degraded}, {"recovery", "denials"})
+        self.assertTrue(health.connectivity.startswith("Discord "))
+        self.assertNotIn(DISCLAIMER, health.connectivity)
+
+    async def test_compute_health_attaches_live_discord_connectivity(self):
+        auditor = main.ReplyAuditor(main.AuditorConfig(), log=lambda line: None)
+        with patch.object(main, "reply_auditor", auditor), patch.object(
+            main, "_health_security_rows", return_value=[]
+        ), patch.object(main, "live_discord_connectivity", return_value="Discord online · 42ms") as live:
+            health = await main.compute_health()
+        live.assert_called_once_with(main.bot)
+        self.assertEqual(health.level, 5)
+        self.assertEqual(health.connectivity, "Discord online · 42ms")
+        assert_posts_connectivity(self, build_opsec_report(health, "f"), "Discord online · 42ms")
+        assert_receipt_at_bottom(self, build_opsec_report(health, "f"), health.checked_at)
 
     async def test_compute_health_survives_an_unreadable_database(self):
         auditor = main.ReplyAuditor(main.AuditorConfig(), log=lambda line: None)
         with patch.object(main, "reply_auditor", auditor), patch.object(
             main, "_health_security_rows", side_effect=sqlite3.OperationalError("locked")
         ):
-            self.assertEqual((await main.compute_health()).level, 5)
+            health = await main.compute_health()
+        self.assertEqual(health.level, 5)
+        self.assertTrue(health.connectivity.startswith("Discord "))
 
     def test_security_query_matches_the_audit_table(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -468,6 +620,8 @@ class AuditPostTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(await main.post_opsec_audit(entries))
         kwargs = channel.send.await_args.kwargs
         self.assertEqual([embed.title for embed in kwargs["embeds"]], ["OPSEC REPORT", "AUDIT"])
+        assert_posts_connectivity(self, kwargs["embeds"][0])
+        assert_receipt_at_bottom(self, kwargs["embeds"][0])
         self.assertNotIn("embed", kwargs)
         self.assertNotIn("view", kwargs)
         self.assertEqual(main.audit_bulletin._posted_signature, score([ev("recovery_failed")]).signature)
@@ -504,6 +658,8 @@ class AuditPostTests(unittest.IsolatedAsyncioTestCase):
         kwargs = followup.send.await_args.kwargs
         self.assertTrue(kwargs["ephemeral"])
         self.assertEqual(kwargs["embed"].title, "OPSEC REPORT")
+        assert_posts_connectivity(self, kwargs["embed"])
+        assert_receipt_at_bottom(self, kwargs["embed"])
         self.assertNotIn("embeds", kwargs)
         self.assertNotIn("AUDIT", repr(kwargs["embed"].to_dict()))
 
@@ -542,6 +698,8 @@ class HeartbeatTests(unittest.IsolatedAsyncioTestCase):
         kwargs = channel.send.await_args.kwargs
         self.assertEqual(set(kwargs), {"embed"})
         self.assertEqual(kwargs["embed"].title, "OPSEC REPORT")
+        assert_posts_connectivity(self, kwargs["embed"])
+        assert_receipt_at_bottom(self, kwargs["embed"])
         self.assertNotIn("AUDIT", repr(kwargs["embed"].to_dict()))
         channel.send.assert_awaited_once()
 

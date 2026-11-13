@@ -33,7 +33,10 @@ DEFCON_NAMES = {
 DEFAULT_WINDOW_HOURS = 6.0
 REPORT_TITLE = "OPSEC REPORT"
 AUDIT_TITLE = "AUDIT"
-SCOPE_LINE = "Connectivity is not part of this score."
+UNKNOWN_CONNECTIVITY = "Discord unknown"
+REPORT_ZONE = ZoneInfo("America/Los_Angeles")
+CHECK_TIME_FORMAT = "%B %d, %Y • %I:%M:%S %p %Z"
+RECEIPT_FIELD = "\u200b"
 
 SEARCH_FAILURES = frozenset({
     "failed", "timeout", "provider_error", "unavailable", "parse_error",
@@ -205,6 +208,8 @@ class Health:
     info: tuple[tuple[str, int], ...]
     last_event: tuple[str, float] | None
     window_hours: float
+    connectivity: str = UNKNOWN_CONNECTIVITY
+    checked_at: float = 0.0
 
     @property
     def degraded(self) -> list[CheckResult]:
@@ -228,14 +233,47 @@ def _level_for(count: int, thresholds: tuple[tuple[int, int], ...]) -> int:
     return 5
 
 
+def format_connectivity(*, ready: bool, closed: bool, latency_s: float | None) -> str:
+    """Discord gateway status for the report. Never scored."""
+    if closed or not ready:
+        return "Discord disconnected"
+    if latency_s is None:
+        return "Discord connecting"
+    try:
+        latency_s = float(latency_s)
+    except (TypeError, ValueError):
+        return UNKNOWN_CONNECTIVITY
+    if latency_s != latency_s or latency_s in (float("inf"), float("-inf")) or latency_s < 0:
+        return "Discord connecting"
+    return f"Discord online · {round(latency_s * 1000)}ms"
+
+
+def live_discord_connectivity(client: Any) -> str:
+    """Read the gateway from a discord.py client. No guild, channel, or member data."""
+    if client is None:
+        return UNKNOWN_CONNECTIVITY
+    try:
+        return format_connectivity(
+            ready=bool(client.is_ready()),
+            closed=bool(client.is_closed()),
+            latency_s=getattr(client, "latency", None),
+        )
+    except Exception:
+        return UNKNOWN_CONNECTIVITY
+
+
 def score_health(
     events: Iterable[dict],
     security: dict[str, tuple[int, float]] | None = None,
     *,
     now: float | None = None,
     window_seconds: float | None = None,
+    connectivity: str | None = None,
 ) -> Health:
-    """Overall level is the worst check level. No degraded checks means DEFCON 5."""
+    """Overall level is the worst check level. No degraded checks means DEFCON 5.
+
+    `connectivity` is posted on the report and is not part of the level.
+    """
     current = time.time() if now is None else now
     window = health_window_seconds() if window_seconds is None else window_seconds
     recent = [e for e in events if current - float(e.get("at", 0)) <= window]
@@ -269,11 +307,20 @@ def score_health(
         if count and stamp and (latest is None or stamp > latest[1]):
             latest = (SECURITY_LABELS.get(category, category), stamp)
     level = min((r.level for r in results), default=5)
-    return Health(level, tuple(results), info, latest, window / 3600)
+    status = str(connectivity).strip() if connectivity else ""
+    return Health(
+        level, tuple(results), info, latest, window / 3600,
+        status or UNKNOWN_CONNECTIVITY, current,
+    )
 
 
 def _stamp(epoch: float) -> str:
     return f"<t:{int(epoch)}:R>" if epoch else ""
+
+
+def format_check_time(epoch: float) -> str:
+    """Pacific date and time of this check, exact to the second, timezone visible."""
+    return datetime.fromtimestamp(float(epoch), REPORT_ZONE).strftime(CHECK_TIME_FORMAT)
 
 
 def _seclude_embed(title: str, description: str, footer: str) -> discord.Embed:
@@ -287,7 +334,7 @@ def _seclude_embed(title: str, description: str, footer: str) -> discord.Embed:
 
 
 def build_opsec_report(health: Health, footer: str) -> discord.Embed:
-    """The standing report. DEFCON under the title, then overall health. No audit."""
+    """The standing report. DEFCON under the title, then overall health and connectivity."""
     degraded = health.degraded
     if degraded:
         overall = (
@@ -296,9 +343,11 @@ def build_opsec_report(health: Health, footer: str) -> discord.Embed:
         )
     else:
         overall = "Security and mechanical function: all checks healthy."
+    connectivity = (health.connectivity or "").strip() or UNKNOWN_CONNECTIVITY
     embed = _seclude_embed(
         REPORT_TITLE,
-        f"**DEFCON {health.level} · {DEFCON_NAMES[health.level]}**\n{overall}\n{SCOPE_LINE}",
+        f"**DEFCON {health.level} · {DEFCON_NAMES[health.level]}**\n"
+        f"{overall}\nConnectivity: {connectivity}",
         footer,
     )
     embed.add_field(
@@ -330,6 +379,11 @@ def build_opsec_report(health: Health, footer: str) -> discord.Embed:
     embed.add_field(
         name="Quick Fix",
         value="\n".join(c.fix for c in degraded[:2])[:1000] or "None needed.",
+        inline=False,
+    )
+    embed.add_field(
+        name=RECEIPT_FIELD,
+        value=format_check_time(health.checked_at or time.time()),
         inline=False,
     )
     return embed
@@ -513,7 +567,7 @@ class AuditBulletin:
 # ── twice-daily report heartbeat ─────────────────────────────────────────────
 # Noon and midnight Pacific. A restart inside the grace still posts that slot once.
 
-HEARTBEAT_ZONE = ZoneInfo("America/Los_Angeles")
+HEARTBEAT_ZONE = REPORT_ZONE
 HEARTBEAT_HOURS = (0, 12)
 HEARTBEAT_GRACE = timedelta(minutes=20)
 
