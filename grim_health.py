@@ -29,8 +29,9 @@ DEFCON_NAMES = {
 }
 
 DEFAULT_WINDOW_HOURS = 6.0
-HEALTHY_LINE = "All checks healthy. Security and mechanical function are normal."
-SCOPE_LINE = "Scored on security and mechanical events only. Connectivity is reported separately."
+REPORT_TITLE = "OPSEC REPORT"
+AUDIT_TITLE = "AUDIT"
+SCOPE_LINE = "Connectivity is not part of this score."
 
 SEARCH_FAILURES = frozenset({
     "failed", "timeout", "provider_error", "unavailable", "parse_error",
@@ -273,25 +274,30 @@ def _stamp(epoch: float) -> str:
     return f"<t:{int(epoch)}:R>" if epoch else ""
 
 
-def build_health_embed(
-    health: Health,
-    footer: str,
-    *,
-    recent: list[str] | None = None,
-) -> discord.Embed:
-    """The Seclude box: monochrome, compact, titled with the DEFCON level."""
+def _seclude_embed(title: str, description: str, footer: str) -> discord.Embed:
+    embed = discord.Embed(
+        title=title,
+        description=description[:4096],
+        color=discord.Color.from_rgb(18, 18, 18),
+    )
+    embed.set_footer(text=footer)
+    return embed
+
+
+def build_opsec_report(health: Health, footer: str) -> discord.Embed:
+    """The standing report. DEFCON under the title, then overall health. No audit."""
     degraded = health.degraded
     if degraded:
-        description = (
-            f"{len(degraded)} of {len(health.checks)} checks degraded. "
-            f"Worst: {degraded[0].label}.\n{SCOPE_LINE}"
+        overall = (
+            f"Security and mechanical function: {len(degraded)} of {len(health.checks)} "
+            f"checks degraded. Worst: {degraded[0].label}."
         )
     else:
-        description = f"{HEALTHY_LINE}\n{SCOPE_LINE}"
-    embed = discord.Embed(
-        title=f"Grim · Health · DEFCON {health.level} · {DEFCON_NAMES[health.level]}",
-        description=description,
-        color=discord.Color.from_rgb(18, 18, 18),
+        overall = "Security and mechanical function: all checks healthy."
+    embed = _seclude_embed(
+        REPORT_TITLE,
+        f"**DEFCON {health.level} · {DEFCON_NAMES[health.level]}**\n{overall}\n{SCOPE_LINE}",
+        footer,
     )
     embed.add_field(
         name="Healthy",
@@ -324,10 +330,182 @@ def build_health_embed(
         value="\n".join(c.fix for c in degraded[:2])[:1000] or "None needed.",
         inline=False,
     )
-    if recent:
-        embed.add_field(name="Recent", value="\n".join(recent)[:1000], inline=False)
-    embed.set_footer(text=footer)
     return embed
+
+
+# Auditor events worth an isolated audit post. Voice slips stay on the report only.
+AUDIT_EVENTS = {
+    "auditor_error": ("fail", 1, "auditor failed open"),
+    "recovery_failed": ("fail", 2, "stuck call, retry failed"),
+    "tool_loop": ("fail", 2, "tool loop blocked"),
+    "timeout": ("fail", 3, "stuck call cancelled"),
+    "reply_chain": ("fail", 3, "reply chain paused"),
+    "recovered": ("checkup", 3, "stuck call recovered"),
+    "intervention_suppressed": ("checkup", 4, "auditor hit its own cap"),
+    "repeat_subject": ("checkup", 4, "repeat subject answered directly"),
+    "security_checkup": ("checkup", 4, "degraded checks still open"),
+}
+AUDIT_FIXES = {
+    "auditor_error": "The auditor failed open. Grim still replies. Check `[Auditor]` in the VPS log.",
+    "recovery_failed": "A stuck call did not recover. Check `/status` and the xAI provider.",
+    "tool_loop": "The same search or check kept firing and was blocked.",
+    "timeout": "A call was cut for running too long, then recovered or dropped.",
+    "reply_chain": "One conversation called faster than a person would. It was paused.",
+    "recovered": "A stuck call recovered on the retry. Watch for a climb.",
+    "intervention_suppressed": "The auditor rate-capped itself. Something upstream may be stuck.",
+    "repeat_subject": "The same subject came back. The answer was made more direct. No action needed.",
+    "security_checkup": "Degraded checks are still open. The report above names them.",
+}
+AUDIT_DELAY_SECONDS = {1: 0.0, 2: 0.0, 3: 60.0, 4: 900.0}
+AUDIT_GAP_SECONDS = {1: 300.0, 2: 300.0, 3: 900.0, 4: 3600.0}
+
+
+def _clean_audit_entry(entry: Any) -> dict | None:
+    if not isinstance(entry, dict):
+        return None
+    event, kind = entry.get("event"), entry.get("kind")
+    if event not in AUDIT_EVENTS or not isinstance(kind, str):
+        return None
+    cleaned = {"event": event, "kind": kind[:40]}
+    try:
+        cleaned["at"] = float(entry.get("at", 0))
+        if entry.get("duration") is not None:
+            cleaned["duration"] = round(float(entry["duration"]), 2)
+        if entry.get("count") is not None:
+            cleaned["count"] = int(entry["count"])
+    except (TypeError, ValueError):
+        return None
+    return cleaned
+
+
+def build_audit_embed(entries: list[dict], footer: str) -> discord.Embed | None:
+    """The audit under a fresh report. Counts and kinds only. None when there is nothing to say."""
+    cleaned = [entry for entry in map(_clean_audit_entry, entries) if entry]
+    if not cleaned:
+        return None
+    grouped: dict[tuple[str, str], list[dict]] = {}
+    for entry in cleaned:
+        grouped.setdefault((entry["event"], entry["kind"]), []).append(entry)
+    worst = min(AUDIT_EVENTS[event][1] for event, _ in grouped)
+    kind_word = "Fail" if any(AUDIT_EVENTS[event][0] == "fail" for event, _ in grouped) else "Checkup"
+    lines = []
+    for (event, kind), items in sorted(grouped.items(), key=lambda item: -len(item[1])):
+        durations = [item["duration"] for item in items if "duration" in item]
+        detail = f" · avg {sum(durations) / len(durations):.1f}s" if durations else ""
+        lines.append(f"`x{len(items)}` {AUDIT_EVENTS[event][2]} · {kind}{detail}")
+    fixes = []
+    for event, _ in sorted(grouped, key=lambda key: (AUDIT_EVENTS[key[0]][1], -len(grouped[key]))):
+        fix = AUDIT_FIXES.get(event)
+        if fix and fix not in fixes:
+            fixes.append(fix)
+    embed = _seclude_embed(
+        AUDIT_TITLE,
+        f"**{kind_word} · DEFCON {worst} · {DEFCON_NAMES[worst]}**\n" + "\n".join(lines[:12]),
+        footer,
+    )
+    embed.add_field(name="Events", value=str(len(cleaned)), inline=True)
+    embed.add_field(name="Quick Fix", value="\n".join(fixes[:2])[:1000] or "None needed.", inline=False)
+    return embed
+
+
+class AuditBulletin:
+    """Batch fail and checkup events, then post them once as their own staff message.
+
+    The standing report is never edited here. Voice slips are ignored. DEFCON 1 and 2
+    post immediately (then at most every five minutes); lower levels wait and roll up.
+    """
+
+    def __init__(
+        self,
+        post: Callable[[list[dict]], Awaitable[bool]],
+        *,
+        delays: dict[int, float] | None = None,
+        gaps: dict[int, float] | None = None,
+        clock: Callable[[], float] = time.monotonic,
+        log: Callable[[str], None] = print,
+    ):
+        self._post = post
+        self._delays = dict(AUDIT_DELAY_SECONDS if delays is None else delays)
+        self._gaps = dict(AUDIT_GAP_SECONDS if gaps is None else gaps)
+        self._clock = clock
+        self._log = log
+        self._pending: list[dict] = []
+        self._task: asyncio.Task | None = None
+        self._due = 0.0
+        self._last_post: float | None = None
+        self._posted_signature = ""
+        self._queued_signature = ""
+
+    def add(self, entry: dict) -> None:
+        cleaned = _clean_audit_entry(entry)
+        if cleaned is None or len(self._pending) >= 500:
+            return
+        self._pending.append(cleaned)
+        self._schedule()
+
+    def consider_checkup(self, health: Health) -> None:
+        """Queue one checkup audit when the report is degraded and nothing has posted it yet."""
+        if health.level >= 5 or health.signature in (self._posted_signature, self._queued_signature):
+            return
+        if any(entry["event"] != "security_checkup" for entry in self._pending):
+            self._queued_signature = health.signature
+            return
+        self._queued_signature = health.signature
+        self.add({"at": time.time(), "event": "security_checkup", "kind": "window"})
+
+    def mark_posted(self, signature: str) -> None:
+        self._posted_signature = signature
+        self._queued_signature = signature
+
+    def pending(self) -> list[dict]:
+        return list(self._pending)
+
+    def _worst_level(self) -> int:
+        return min((AUDIT_EVENTS[entry["event"]][1] for entry in self._pending), default=4)
+
+    def _schedule(self) -> None:
+        level = self._worst_level()
+        delay = float(self._delays.get(level, 0))
+        if self._last_post is not None:
+            delay = max(delay, float(self._gaps.get(level, 0)) - (self._clock() - self._last_post))
+        delay = max(0.0, delay)
+        due = self._clock() + delay
+        if self._task is not None and not self._task.done() and due >= self._due - 0.01:
+            return
+        if self._task is not None and not self._task.done():
+            self._task.cancel()
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        self._due = due
+        self._task = loop.create_task(self._flush_later(delay))
+
+    async def _flush_later(self, delay: float) -> None:
+        try:
+            if delay:
+                await asyncio.sleep(delay)
+            await self.flush()
+        except asyncio.CancelledError:
+            pass
+        finally:
+            if self._task is asyncio.current_task():
+                self._task = None
+
+    async def flush(self) -> bool:
+        entries = self._pending
+        self._pending = []
+        if not entries:
+            return False
+        try:
+            posted = bool(await self._post(entries))
+        except Exception as error:
+            self._log(f"[OpSec] audit post failed: {type(error).__name__}")
+            posted = False
+        self._last_post = self._clock()
+        if not posted:
+            self._log(f"[OpSec] audit not delivered; {len(entries)} event(s) stay in the saved log")
+        return posted
 
 
 # ── the standing board ───────────────────────────────────────────────────────

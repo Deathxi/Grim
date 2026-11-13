@@ -496,9 +496,8 @@ class AdminCommandTests(unittest.IsolatedAsyncioTestCase):
             await main.grim_auditor.callback(interaction)
         kwargs = response.send_message.await_args.kwargs
         self.assertTrue(kwargs["ephemeral"])
-        self.assertIn("DEFCON", kwargs["embed"].title)
-        recent = [f for f in kwargs["embed"].fields if f.name == "Recent"][0]
-        self.assertIn("timeout (reply)", recent.value)
+        self.assertEqual(kwargs["embed"].title, "Auditor Log")
+        self.assertIn("timeout (reply)", kwargs["embed"].description)
 
 
 if __name__ == "__main__":

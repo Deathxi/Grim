@@ -42,8 +42,16 @@ from post_preview import (
     typed_mentions,
 )
 from zork.ui import handle_zork_message, install_zork, register_zork_view
-from grim_health import HealthBoard, build_health_embed, classify_security_rows, health_window_seconds, score_health
-from reply_auditor import AuditorConfig, ReplyAuditor, conversation_key
+from grim_health import (
+    AuditBulletin,
+    HealthBoard,
+    build_audit_embed,
+    build_opsec_report,
+    classify_security_rows,
+    health_window_seconds,
+    score_health,
+)
+from reply_auditor import AuditorConfig, ReplyAuditor, conversation_key, format_events
 from substance import SUBSTANCE_PROMPT, ensure_substance
 
 BOT_START_TIME = None
@@ -8761,7 +8769,7 @@ async def grim_updates(interaction: discord.Interaction):
             title="Grim Operations Log Disabled",
             description=(
                 "Grim will no longer post patch notes, offline after-reports, "
-                "the health board, or `/clear` deletion logs in this server."
+                "the OPSEC REPORT, or `/clear` deletion logs in this server."
             ),
             color=discord.Color.from_rgb(18, 18, 18)
         )
@@ -8775,7 +8783,7 @@ async def grim_updates(interaction: discord.Interaction):
         embed = discord.Embed(
             title="Grim Operations Log Enabled",
             description=(
-                f"Grim will post patch notes, offline after-reports, the health board, "
+                f"Grim will post patch notes, offline after-reports, the OPSEC REPORT, "
                 f"and `/clear` deletion logs in "
                 f"<#{interaction.channel_id}>."
             ),
@@ -9900,7 +9908,7 @@ async def deliver_health_board(health, messages: dict, repost: bool):
     """
     if not updates_channels:
         return None
-    embed = build_health_embed(health, xsi_footer())
+    embed = build_opsec_report(health, xsi_footer())
     delivered = {}
     for guild_id, data in list(updates_channels.items()):
         channel_id = str(data.get("channel_id", ""))
@@ -9936,17 +9944,52 @@ health_board = HealthBoard(
     load=_load_health_board,
     save=_save_health_board,
 )
+async def post_opsec_audit(entries: list) -> bool:
+    """Fresh OPSEC REPORT with the AUDIT under it. Its own message, never the standing board."""
+    if not updates_channels or not entries:
+        return False
+    health = await compute_health()
+    audit = build_audit_embed(entries, xsi_footer())
+    if audit is None:
+        return False
+    report = build_opsec_report(health, xsi_footer())
+    posted = False
+    for guild_id, data in list(updates_channels.items()):
+        channel_id = str(data.get("channel_id", ""))
+        try:
+            channel = await bot.fetch_channel(int(channel_id))
+            await channel.send(embeds=[report, audit])
+            posted = True
+        except Exception as e:
+            print(
+                f"[OpSec] Could not post the audit in channel {channel_id} "
+                f"in guild {guild_id}: {type(e).__name__}"
+            )
+    if posted:
+        audit_bulletin.mark_posted(health.signature)
+    return posted
+
+audit_bulletin = AuditBulletin(post_opsec_audit)
+
+def _auditor_noticed(entry: dict):
+    health_board.request_refresh()
+    audit_bulletin.add(entry)
+
 reply_auditor = ReplyAuditor(
     AuditorConfig.from_env(),
     load=_load_auditor_events,
     save=_save_auditor_events,
-    notify=lambda entry: health_board.request_refresh(),
+    notify=_auditor_noticed,
 )
 
 @tasks.loop(minutes=10)
 async def health_board_refresh():
-    """Keep the standing health board current as events age out of its window."""
+    """Keep the standing report current, and post a checkup audit while anything is degraded."""
     await health_board.refresh()
+    try:
+        audit_bulletin.consider_checkup(await compute_health())
+    except Exception as error:
+        print(f"[OpSec] checkup skipped: {type(error).__name__}")
 
 @health_board_refresh.before_loop
 async def before_health_board_refresh():
@@ -10140,16 +10183,38 @@ async def _audited_chime(message):
 
 _evaluate_and_chime = _audited_chime
 
-@bot.tree.command(name="grim_auditor", description="Current health board and saved auditor events (admin only)")
-async def grim_auditor(interaction: discord.Interaction):
-    if not await require_permission(interaction, "administrator", "auditor_view", administrator=True):
+# ── OpSec command family ─────────────────────────────────────────────────────
+# Admin-only and guild-only. /grim_opsec pulls the OPSEC REPORT with no audit.
+# Add the next OpSec command in this block and gate it with require_opsec.
+
+async def require_opsec(interaction: discord.Interaction, action: str) -> bool:
+    return await require_permission(interaction, "administrator", action, administrator=True)
+
+@bot.tree.command(name="grim_opsec", description="Pull the current OPSEC REPORT (admin only)")
+@discord.app_commands.guild_only()
+@discord.app_commands.default_permissions(administrator=True)
+async def grim_opsec(interaction: discord.Interaction):
+    if not await require_opsec(interaction, "opsec_report"):
         return
-    health = await compute_health()
-    recent = [
-        f"`{max(0, int(time.time() - e['at'])) // 60}m ago` {e['event']} ({e['kind']})"
-        for e in reversed(reply_auditor.saved_events(5))
-    ]
-    embed = build_health_embed(health, xsi_footer(), recent=recent)
+    await interaction.response.defer(ephemeral=True)
+    await health_board.refresh(force=True)
+    await interaction.followup.send(
+        embed=build_opsec_report(await compute_health(), xsi_footer()),
+        ephemeral=True,
+    )
+
+@bot.tree.command(name="grim_auditor", description="Saved auditor events (admin only)")
+@discord.app_commands.guild_only()
+@discord.app_commands.default_permissions(administrator=True)
+async def grim_auditor(interaction: discord.Interaction):
+    if not await require_opsec(interaction, "auditor_view"):
+        return
+    embed = discord.Embed(
+        title="Auditor Log",
+        description=format_events(reply_auditor.saved_events(20)),
+        color=discord.Color.from_rgb(18, 18, 18),
+    )
+    embed.set_footer(text=xsi_footer())
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 def run_bot():

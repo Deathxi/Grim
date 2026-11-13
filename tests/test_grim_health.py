@@ -13,8 +13,10 @@ import grim_health
 import main
 from grim_health import (
     CHECKS,
+    AuditBulletin,
     HealthBoard,
-    build_health_embed,
+    build_audit_embed,
+    build_opsec_report,
     classify_security_rows,
     score_health,
 )
@@ -124,9 +126,10 @@ class EmbedTests(unittest.TestCase):
         return {field.name: field.value for field in embed.fields}
 
     def test_healthy_board(self):
-        embed = build_health_embed(score(), "Powered by XSI • v")
-        self.assertEqual(embed.title, "Grim · Health · DEFCON 5 · FADE OUT")
-        self.assertIn("All checks healthy", embed.description)
+        embed = build_opsec_report(score(), "Powered by XSI • v")
+        self.assertEqual(embed.title, "OPSEC REPORT")
+        self.assertTrue(embed.description.startswith("**DEFCON 5 · FADE OUT**\n"))
+        self.assertIn("Security and mechanical function: all checks healthy.", embed.description)
         fields = self.fields(embed)
         self.assertEqual(
             list(fields),
@@ -140,10 +143,14 @@ class EmbedTests(unittest.TestCase):
 
     def test_degraded_board_has_overview_fields(self):
         health = score([ev("tool_loop", "live_search", ago=90)] * 3 + [ev("style", "dash")], {"denied": (5, NOW - 10)})
-        embed = build_health_embed(health, "f")
+        embed = build_opsec_report(health, "f")
         fields = self.fields(embed)
-        self.assertEqual(embed.title, "Grim · Health · DEFCON 3 · ROUND HOUSE")
-        self.assertIn("2 of 10 checks degraded. Worst: Loops.", embed.description)
+        self.assertEqual(embed.title, "OPSEC REPORT")
+        self.assertTrue(embed.description.startswith("**DEFCON 3 · ROUND HOUSE**\n"))
+        self.assertIn(
+            "Security and mechanical function: 2 of 10 checks degraded. Worst: Loops.",
+            embed.description,
+        )
         self.assertIn("`D3` Loops · `x3` <t:", fields["Degraded"])
         self.assertIn("`D4` Permission denials · `x5`", fields["Degraded"])
         self.assertNotIn("Loops", fields["Healthy"])
@@ -155,7 +162,7 @@ class EmbedTests(unittest.TestCase):
 
     def test_board_text_comes_only_from_fixed_labels_and_counts(self):
         secret = {"at": NOW, "event": "timeout", "kind": "reply", "user": "alice", "text": "hunter2"}
-        embed = build_health_embed(score([secret]), "f")
+        embed = build_opsec_report(score([secret]), "f")
         dumped = repr(embed.to_dict())
         for leaked in ("alice", "hunter2"):
             self.assertNotIn(leaked, dumped)
@@ -328,7 +335,8 @@ class MainWiringTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self.deliver(channel, {}), {"55": "900"})
         kwargs = channel.send.await_args.kwargs
         self.assertEqual(set(kwargs), {"embed"})
-        self.assertTrue(kwargs["embed"].title.startswith("Grim · Health · DEFCON"))
+        self.assertEqual(kwargs["embed"].title, "OPSEC REPORT")
+        self.assertNotIn("embeds", kwargs)
 
     async def test_later_delivery_edits_the_same_message(self):
         channel = self.channel()
@@ -409,6 +417,95 @@ class MainWiringTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(main.RelayImageError):
                 await main._read_relay_image(attachment, "say", 1000)
         record.assert_called_once_with(None, "image_strip", "failed")
+
+
+class AuditPostTests(unittest.IsolatedAsyncioTestCase):
+    def test_audit_embed_is_counts_only(self):
+        embed = build_audit_embed([
+            {"at": 1, "event": "recovery_failed", "kind": "reply", "duration": 45, "user": "alice", "text": "secret"},
+            {"at": 2, "event": "style", "kind": "dash"},
+        ], "f")
+        dumped = repr(embed.to_dict())
+        self.assertEqual(embed.title, "AUDIT")
+        self.assertIn("Fail · DEFCON 2", embed.description)
+        self.assertIn("`x1` stuck call, retry failed · reply", embed.description)
+        self.assertNotIn("style", dumped)
+        self.assertNotIn("alice", dumped)
+        self.assertNotIn("secret", dumped)
+        self.assertEqual(embed.footer.text, "f")
+
+    def test_voice_slips_do_not_make_an_audit(self):
+        self.assertIsNone(build_audit_embed([{"at": 1, "event": "style", "kind": "dash"}], "f"))
+
+    async def test_fails_batch_into_one_post(self):
+        posted = []
+
+        async def post(entries):
+            posted.append(entries)
+            return True
+
+        bulletin = AuditBulletin(post, delays={2: 0, 3: 0}, gaps={2: 300, 3: 300}, log=lambda line: None)
+        bulletin.add({"at": 1, "event": "tool_loop", "kind": "live_search"})
+        bulletin.add({"at": 2, "event": "timeout", "kind": "reply"})
+        bulletin.add({"at": 3, "event": "style", "kind": "dash"})
+        await asyncio.sleep(0.02)
+        self.assertEqual(len(posted), 1)
+        self.assertEqual([entry["event"] for entry in posted[0]], ["tool_loop", "timeout"])
+
+    async def test_staff_post_stacks_a_fresh_report_over_the_audit(self):
+        channel = SimpleNamespace(send=AsyncMock())
+        entries = [{"at": 1, "event": "recovery_failed", "kind": "fact_reply", "duration": 60}]
+        with patch.dict(main.updates_channels, {"1": {"channel_id": "55"}}, clear=True), patch.object(
+            main.bot, "fetch_channel", AsyncMock(return_value=channel)
+        ), patch.object(main, "compute_health", AsyncMock(return_value=score([ev("recovery_failed")]))):
+            self.assertTrue(await main.post_opsec_audit(entries))
+        kwargs = channel.send.await_args.kwargs
+        self.assertEqual([embed.title for embed in kwargs["embeds"]], ["OPSEC REPORT", "AUDIT"])
+        self.assertNotIn("embed", kwargs)
+        self.assertNotIn("view", kwargs)
+        self.assertEqual(main.audit_bulletin._posted_signature, score([ev("recovery_failed")]).signature)
+
+    async def test_audit_post_does_not_touch_the_standing_board(self):
+        channel = SimpleNamespace(send=AsyncMock(), get_partial_message=lambda message_id: None)
+        with patch.dict(main.updates_channels, {"1": {"channel_id": "55"}}, clear=True), patch.object(
+            main.bot, "fetch_channel", AsyncMock(return_value=channel)
+        ), patch.object(main, "compute_health", AsyncMock(return_value=score())):
+            await main.post_opsec_audit([{"at": 1, "event": "timeout", "kind": "reply"}])
+        channel.send.assert_awaited_once()
+
+    def test_checkup_queues_only_while_degraded_and_only_once_per_signature(self):
+        bulletin = AuditBulletin(AsyncMock(), log=lambda line: None)
+        bulletin.consider_checkup(score())
+        self.assertEqual(bulletin.pending(), [])
+        degraded = score([ev("timeout")] * 4)
+        bulletin.consider_checkup(degraded)
+        bulletin.consider_checkup(degraded)
+        self.assertEqual([entry["event"] for entry in bulletin.pending()], ["security_checkup"])
+
+    async def test_grim_opsec_pulls_the_report_without_an_audit(self):
+        followup = SimpleNamespace(send=AsyncMock())
+        interaction = SimpleNamespace(
+            response=SimpleNamespace(defer=AsyncMock()),
+            followup=followup,
+            guild_id=1,
+        )
+        with patch.object(main, "require_opsec", AsyncMock(return_value=True)), patch.object(
+            main.health_board, "refresh", AsyncMock(return_value=True)
+        ) as refresh, patch.object(main, "compute_health", AsyncMock(return_value=score())):
+            await main.grim_opsec.callback(interaction)
+        refresh.assert_awaited_once_with(force=True)
+        kwargs = followup.send.await_args.kwargs
+        self.assertTrue(kwargs["ephemeral"])
+        self.assertEqual(kwargs["embed"].title, "OPSEC REPORT")
+        self.assertNotIn("embeds", kwargs)
+        self.assertNotIn("AUDIT", repr(kwargs["embed"].to_dict()))
+
+    async def test_grim_opsec_is_admin_only(self):
+        interaction = SimpleNamespace(response=SimpleNamespace(defer=AsyncMock()), followup=SimpleNamespace(send=AsyncMock()))
+        with patch.object(main, "require_opsec", AsyncMock(return_value=False)):
+            await main.grim_opsec.callback(interaction)
+        interaction.response.defer.assert_not_awaited()
+        interaction.followup.send.assert_not_awaited()
 
 
 if __name__ == "__main__":
