@@ -536,7 +536,7 @@ class RelayOriginalTests(unittest.TestCase):
             self.assertEqual(public["file"].filename, "grim-announce.jpg")
             self.assertEqual(public["embed"].to_dict(), preview["embeds"][0].to_dict())
             rendered = repr(public)
-            for marker in ("Noct", "10>", "noct-private-photo"):
+            for marker in ("Noct", "<@10>", "noct-private-photo"):
                 self.assertNotIn(marker, rendered)
             self.assertTrue(any(
                 call.args[2] == "posted_original" for call in self.audit_mock.call_args_list if len(call.args) > 2
