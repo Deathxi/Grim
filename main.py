@@ -1078,8 +1078,8 @@ async def send_member_departure_notification(member):
 _COMMAND_RATE_LIMITS: dict[tuple[str, str, str], list[float]] = {}
 RATE_LIMIT_WINDOW_SECONDS = 60
 RATE_LIMIT_MAX_REQUESTS = 8
-AI_RESEARCH_USER_MAX_REQUESTS = 4
-AI_RESEARCH_GUILD_MAX_REQUESTS = 12
+AI_RESEARCH_USER_MAX_REQUESTS = 8
+AI_RESEARCH_GUILD_MAX_REQUESTS = 24
 AI_RESEARCH_CACHE_TTL_SECONDS = 300
 _AI_RESEARCH_CACHE: dict[str, tuple[float, dict]] = {}
 _AI_RESEARCH_SEMAPHORE = asyncio.Semaphore(3)
@@ -2093,15 +2093,61 @@ def get_grok_client():
 
 NO_CURRENT_SOURCES_SENTINEL = "NO_CURRENT_SOURCES"
 XAI_SEARCH_TOOLS = ({"type": "web_search"}, {"type": "x_search"})
+XAI_SEARCH_MODEL_DEFAULT = "grok-4.3"
+_RETRYABLE_SEARCH_HTTP = frozenset({400, 404, 422})
+_SEARCH_OK_STATUSES = frozenset({"", "completed", "complete", "success", "succeeded"})
+_HTTPS_URL = re.compile(r"https://[^\s)\]>'\"<>]+")
+
+def _append_https_source(sources: list[dict], url: object, title: object = None) -> None:
+    if not isinstance(url, str) or not url.startswith("https://"):
+        return
+    cleaned = url.split()[0].rstrip(".,;:!?")[:500]
+    if not cleaned.startswith("https://"):
+        return
+    sources.append({
+        "title": str(title or "Source")[:120],
+        "url": cleaned,
+    })
+
+def _research_item_used_search(item: dict) -> bool:
+    item_type = str(item.get("type") or "").casefold()
+    name = str(item.get("name") or item.get("tool") or "").casefold()
+    status = str(item.get("status") or "").casefold()
+    if status in {"failed", "error", "cancelled", "canceled", "incomplete"}:
+        return False
+    if "search" in item_type or item_type in {"web_search_call", "x_search_call"}:
+        return status in _SEARCH_OK_STATUSES
+    return "search" in name and status in _SEARCH_OK_STATUSES
+
+def _response_used_search(data: dict) -> bool:
+    output = data.get("output") or []
+    if any(
+        isinstance(item, dict) and _research_item_used_search(item)
+        for item in output
+    ):
+        return True
+    blobs = []
+    usage = data.get("server_side_tool_usage")
+    if isinstance(usage, dict):
+        blobs.extend(str(key) for key in usage)
+    nested = data.get("usage")
+    if isinstance(nested, dict):
+        inner = nested.get("server_side_tool_usage")
+        if isinstance(inner, dict):
+            blobs.extend(str(key) for key in inner)
+        details = nested.get("server_side_tool_usage_details")
+        if isinstance(details, dict):
+            blobs.extend(str(key) for key in details)
+    return "search" in " ".join(blobs).casefold()
 
 def _extract_grok_research_response(data: dict) -> dict | None:
     text_parts = []
     sources = []
-    completed_search = False
+    completed_search = _response_used_search(data)
     for item in data.get("output", []):
+        if not isinstance(item, dict):
+            continue
         item_type = str(item.get("type", ""))
-        if "search" in item_type and item.get("status") == "completed":
-            completed_search = True
         if item_type != "message":
             continue
         for content_block in item.get("content", []):
@@ -2111,6 +2157,8 @@ def _extract_grok_research_response(data: dict) -> dict | None:
             if text:
                 text_parts.append(text)
             for annotation in content_block.get("annotations", []):
+                if not isinstance(annotation, dict):
+                    continue
                 url = (
                     annotation.get("url")
                     or annotation.get("source", {}).get("url")
@@ -2120,18 +2168,27 @@ def _extract_grok_research_response(data: dict) -> dict | None:
                     or annotation.get("source", {}).get("title")
                     or "Source"
                 )
-                if isinstance(url, str) and url.startswith("https://"):
-                    sources.append({"title": str(title)[:120], "url": url[:500]})
+                _append_https_source(sources, url, title)
     for citation in data.get("citations", []):
-        if isinstance(citation, str) and citation.startswith("https://"):
-            sources.append({"title": "Source", "url": citation[:500]})
+        if isinstance(citation, str):
+            _append_https_source(sources, citation)
         elif isinstance(citation, dict):
-            url = citation.get("url")
-            if isinstance(url, str) and url.startswith("https://"):
-                sources.append({
-                    "title": str(citation.get("title") or "Source")[:120],
-                    "url": url[:500],
-                })
+            _append_https_source(
+                sources,
+                citation.get("url"),
+                citation.get("title") or "Source",
+            )
+    text = "\n".join(text_parts).strip()
+    if (
+        not text
+        or text == "NO_LIVE_RESEARCH_NEEDED"
+        or NO_CURRENT_SOURCES_SENTINEL in text
+        or not completed_search
+    ):
+        return None
+    if not sources:
+        for url in _HTTPS_URL.findall(text):
+            _append_https_source(sources, url)
     unique_sources = []
     seen_urls = set()
     for source in sources:
@@ -2139,14 +2196,7 @@ def _extract_grok_research_response(data: dict) -> dict | None:
             continue
         seen_urls.add(source["url"])
         unique_sources.append(source)
-    text = "\n".join(text_parts).strip()
-    if (
-        not text
-        or text == "NO_LIVE_RESEARCH_NEEDED"
-        or NO_CURRENT_SOURCES_SENTINEL in text
-        or not completed_search
-        or not unique_sources
-    ):
+    if not unique_sources:
         return None
     return {
         "text": text[:6000],
@@ -2162,7 +2212,7 @@ LIVE_RESEARCH_SIGNALS = (
     "price", "stock", "market", "poll", "polls", "polling", "election",
     "elections", "midterm", "midterms",
     "primary", "approval rating", "who won", "results", "release date",
-    "availability", "outage", "status", "news", "headlines", "trend",
+    "availability", "outage", "news", "headlines", "trend",
 )
 LIVE_RESEARCH_REQUESTS = (
     "search the web", "look it up", "look that up", "check online",
@@ -2234,6 +2284,62 @@ def _states_current_event(folded: str) -> bool:
     """A third-person claim that someone was removed, arrested, resigned..."""
     return bool(_LIVE_EVENT_CLAIM.search(folded)) and not _FIRST_PERSON.search(folded)
 
+_SELF_CAPABILITY_TERMS = (
+    "live search", "web search", "search capability", "search the web",
+    "web access", "research tool", "live source", "live sources",
+    "online search", "search online",
+)
+_SELF_CAPABILITY_VOCAB = frozenset({
+    "live", "search", "searches", "searching", "capability", "capabilities",
+    "web", "online", "access", "research", "tool", "tools", "source",
+    "sources", "check", "checks", "checking", "look", "looking", "lookup",
+    "things", "stuff", "up", "wired", "working", "work", "works",
+    "enabled", "available", "feature", "features", "function", "functions",
+    "able", "can", "could", "do", "does", "did", "have", "has", "got",
+    "any", "your", "you", "u", "ya", "grim", "bot", "let", "try",
+    "here", "but", "please", "just", "still", "now", "currently",
+    "today", "real", "time", "realtime", "fresh", "current", "me", "i",
+    "im", "my", "also", "even",
+})
+_SELF_CAPABILITY_ASK = re.compile(
+    r"(?<!\w)(?:do you|can you|are you|have you|you have|you got|"
+    r"does grim|can grim|is grim|have grim|"
+    r"your (?:live |web )?search|got any|"
+    r"is live search|is web search|does live search|does web search)"
+    r"(?!\w)"
+)
+LIVE_SEARCH_PROOF_QUERY = (
+    "What is one major world news headline from today? "
+    "Answer only from this search, with the date, in one or two sentences."
+)
+CAPABILITY_PROOF_PREFIX = "yeah, live search is on. just pulled this:"
+
+def _is_self_capability_question(current_text: str) -> bool:
+    """True when the member is asking whether Grim itself can live-search.
+
+    A request to search a real topic stays on the news path. Local knowledge
+    that search is wired is not a news claim; the live hit is the proof.
+    """
+    folded = _output_match_text(_conversation_text(current_text))
+    if not folded:
+        return False
+    asked_self = bool(_SELF_CAPABILITY_ASK.search(folded))
+    named_capability = (
+        _contains_research_phrase(folded, _SELF_CAPABILITY_TERMS)
+        or ("search" in folded.split() and "capability" in folded.split())
+    )
+    if not (asked_self and named_capability):
+        return False
+    leftover = [
+        token
+        for token in folded.split()
+        if token not in _OUTPUT_STOPWORDS
+        and token not in _CONVERSATION_SMALL_TALK
+        and token not in _SELF_CAPABILITY_VOCAB
+        and len(token) >= 2
+    ]
+    return not leftover
+
 def _needs_live_sources(
     current_text: str,
     recent_channel_text: str,
@@ -2242,8 +2348,11 @@ def _needs_live_sources(
 ) -> bool:
     """Factual or current asks must be checked against live sources first.
 
-    Casual talk, creative asks, and opinions stay on the plain chat path.
+    Casual talk, creative asks, opinions, and questions about Grim's own
+    search capability stay off the news-search path.
     """
+    if _is_self_capability_question(current_text):
+        return False
     if _should_use_live_research(current_text, recent_channel_text):
         return True
     folded = _output_match_text(_conversation_text(current_text))[:1000]
@@ -2293,6 +2402,25 @@ LIVE_SOURCE_FAILURE_LINES = {
         "and i won't guess. give it a minute."
     ),
 }
+LIVE_SOURCE_CAPABILITY_LINES = {
+    "empty": (
+        "yeah, live search is wired. searched just now to prove it and nothing "
+        "current came back. i won't fill the gap from memory. ask a news question "
+        "or try again in a bit."
+    ),
+    "error": (
+        "yeah, live search is wired. the check broke on my end just now, so i "
+        "can't show a live hit. not guessing. try again in a bit."
+    ),
+    "timeout": (
+        "yeah, live search is wired. the check timed out before anything came "
+        "back, so i can't show a live hit. not guessing. try again in a bit."
+    ),
+    "rate_limited": (
+        "yeah, live search is wired. search budget's spent for the moment, so i "
+        "can't show a live hit. give it a minute."
+    ),
+}
 
 def live_source_failure_text(status: str | None) -> str:
     status = str(status or "")
@@ -2301,6 +2429,26 @@ def live_source_failure_text(status: str | None) -> str:
     if status in LIVE_SOURCE_FAILURE_LINES:
         return LIVE_SOURCE_FAILURE_LINES[status]
     return LIVE_SOURCE_FAILURE_LINES["error"]
+
+def live_capability_reply_text(status: str | None) -> str:
+    status = str(status or "")
+    if status in ("empty", "unverified"):
+        return LIVE_SOURCE_CAPABILITY_LINES["empty"]
+    if status in LIVE_SOURCE_CAPABILITY_LINES:
+        return LIVE_SOURCE_CAPABILITY_LINES[status]
+    return LIVE_SOURCE_CAPABILITY_LINES["error"]
+
+def _live_research_succeeded(research: dict | None) -> bool:
+    research = research or {}
+    return (
+        research.get("status") == "success"
+        and bool(research.get("used_search"))
+        and bool(research.get("sources"))
+        and bool(str(research.get("text") or "").strip())
+    )
+
+def format_capability_proof_reply(text: str, sources: list[dict]) -> str:
+    return f"{CAPABILITY_PROOF_PREFIX}\n{format_sourced_reply(text, sources)}"
 
 def live_research_system_prompt(now_str: str, language_instruction: str) -> str:
     return (
@@ -2378,20 +2526,24 @@ async def grok_research_query(
     async def perform_research():
         async with _AI_RESEARCH_SEMAPHORE:
             timeout = aiohttp.ClientTimeout(total=18, connect=5)
-            async with aiohttp.ClientSession(timeout=timeout) as session:
+            headers = {
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            }
+
+            async def post_research(session, tools):
                 payload = {
-                    "model": os.environ.get("XAI_SEARCH_MODEL", "grok-4-1-fast"),
-                    "tools": [dict(tool) for tool in XAI_SEARCH_TOOLS],
+                    "model": os.environ.get(
+                        "XAI_SEARCH_MODEL",
+                        XAI_SEARCH_MODEL_DEFAULT,
+                    ),
+                    "tools": [dict(tool) for tool in tools],
                     "input": [
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": bounded_prompt},
                     ],
                     "max_output_tokens": max_tokens,
                     "temperature": temperature,
-                }
-                headers = {
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json",
                 }
                 async with session.post(
                     "https://api.x.ai/v1/responses",
@@ -2400,24 +2552,39 @@ async def grok_research_query(
                 ) as resp:
                     if resp.status != 200:
                         print(f"[Grok Search] Provider error {resp.status}")
-                        return {"status": "provider_error", "http_status": resp.status}
+                        return {
+                            "status": "provider_error",
+                            "http_status": resp.status,
+                        }
                     try:
                         data = await resp.json()
                     except Exception:
                         return {"status": "parse_error"}
                     result = _extract_grok_research_response(data)
-                    if result:
-                        result = {**result, "status": "success", "cached": False}
-                        if cache_key:
-                            _AI_RESEARCH_CACHE[cache_key] = (time.time(), result)
-                        if cache_key and len(_AI_RESEARCH_CACHE) > 100:
-                            oldest_key = min(
-                                _AI_RESEARCH_CACHE,
-                                key=lambda key: _AI_RESEARCH_CACHE[key][0],
-                            )
-                            _AI_RESEARCH_CACHE.pop(oldest_key, None)
-                        return result
-                    return {"status": "empty"}
+                    if not result:
+                        return {"status": "empty"}
+                    result = {**result, "status": "success", "cached": False}
+                    if cache_key:
+                        _AI_RESEARCH_CACHE[cache_key] = (time.time(), result)
+                    if cache_key and len(_AI_RESEARCH_CACHE) > 100:
+                        oldest_key = min(
+                            _AI_RESEARCH_CACHE,
+                            key=lambda key: _AI_RESEARCH_CACHE[key][0],
+                        )
+                        _AI_RESEARCH_CACHE.pop(oldest_key, None)
+                    return result
+
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                tools = [dict(tool) for tool in XAI_SEARCH_TOOLS]
+                result = await post_research(session, tools)
+                if (
+                    result.get("status") == "provider_error"
+                    and result.get("http_status") in _RETRYABLE_SEARCH_HTTP
+                    and len(tools) > 1
+                ):
+                    print("[Grok Search] Retrying with web_search only")
+                    result = await post_research(session, [{"type": "web_search"}])
+                return result
 
     try:
         return await asyncio.wait_for(perform_research(), timeout=20)
@@ -2440,6 +2607,66 @@ async def grok_search_query(
         temperature=temperature,
     )
     return result["text"] if result and result.get("status") == "success" else None
+
+async def _consult_live_sources(
+    message,
+    *,
+    guild_id: str,
+    actor_id: str,
+    research_scope: str,
+    research_prompt: str,
+    system_prompt: str,
+) -> dict:
+    research = _get_cached_research(research_scope, research_prompt)
+    if not research:
+        if not _research_rate_limit_allows(guild_id, actor_id):
+            research = {"status": "rate_limited"}
+        else:
+            record_security_event(
+                message,
+                "ai_web_research",
+                "attempted",
+                {"provider": "xai_web_search"},
+            )
+            try:
+                research = await grok_research_query(
+                    system_prompt,
+                    research_prompt,
+                    max_tokens=600,
+                    temperature=0.2,
+                    cache_scope=research_scope,
+                )
+            except Exception as error:
+                print(f"[Grim] Live search error: {type(error).__name__}")
+                research = {"status": "provider_error"}
+    research = research or {"status": "provider_error"}
+    status = str(research.get("status") or "provider_error")[:40]
+    if _live_research_succeeded(research):
+        _LIVE_RESEARCH_FAILURES.pop(research_scope, None)
+        record_security_event(
+            message,
+            "ai_web_research",
+            "success",
+            {
+                "provider": "xai_web_search",
+                "source_count": len(research["sources"]),
+                "cached": bool(research.get("cached")),
+            },
+        )
+        return research
+    _remember_live_failure(research_scope)
+    record_security_event(
+        message,
+        "ai_web_research",
+        status,
+        {"provider": "xai_web_search", "source_count": 0},
+    )
+    return {**research, "status": status}
+
+async def _sourced_live_reply(research: dict, user_text: str) -> str:
+    body = discord.utils.escape_mentions(research["text"].strip())
+    screened = await screen_conversational_reply(body, user_text=user_text)
+    return format_sourced_reply(screened or body, research["sources"])[:6000]
 
 _OUTPUT_STOPWORDS = frozenset({
     "a", "an", "the", "of", "in", "on", "at", "to", "for", "and", "or", "nor",
@@ -3949,65 +4176,47 @@ async def generate_contextual_reply(message: discord.Message) -> ContextualReply
     live_context_block = ""
     research_scope = f"{guild_id}:{channel_id}"
     recent_failure = _recent_live_failure(research_scope)
+    live_search_system = with_grim_voice(
+        live_research_system_prompt(now_str, language_instruction)
+    )
+    if current_text and _is_self_capability_question(current_text):
+        research = await _consult_live_sources(
+            message,
+            guild_id=guild_id,
+            actor_id=str(author.id),
+            research_scope=research_scope,
+            research_prompt=LIVE_SEARCH_PROOF_QUERY,
+            system_prompt=live_search_system,
+        )
+        if _live_research_succeeded(research):
+            body = discord.utils.escape_mentions(research["text"].strip())
+            screened = await screen_conversational_reply(
+                body, user_text=current_text
+            )
+            return ContextualReply(
+                text=format_capability_proof_reply(
+                    screened or body, research["sources"]
+                )[:6000]
+            )
+        return ContextualReply(text=live_capability_reply_text(research.get("status")))
     if current_text and _needs_live_sources(
         current_text,
         recent_channel_text,
         recent_failure=recent_failure,
     ):
-        research = _get_cached_research(research_scope, research_prompt)
-        if not research:
-            if not _research_rate_limit_allows(guild_id, str(author.id)):
-                research = {"status": "rate_limited"}
-            else:
-                record_security_event(
-                    message,
-                    "ai_web_research",
-                    "attempted",
-                    {"provider": "xai_web_search"},
-                )
-                try:
-                    research = await grok_research_query(
-                        with_grim_voice(
-                            live_research_system_prompt(now_str, language_instruction)
-                        ),
-                        research_prompt,
-                        max_tokens=600,
-                        temperature=0.2,
-                        cache_scope=research_scope,
-                    )
-                except Exception as e:
-                    print(f"[Grim] Live search error: {type(e).__name__}")
-                    research = {"status": "provider_error"}
-        status = str((research or {}).get("status") or "provider_error")[:40]
-        if (
-            status == "success"
-            and research.get("used_search")
-            and research.get("sources")
-        ):
-            _LIVE_RESEARCH_FAILURES.pop(research_scope, None)
-            record_security_event(
-                message,
-                "ai_web_research",
-                "success",
-                {
-                    "provider": "xai_web_search",
-                    "source_count": len(research["sources"]),
-                    "cached": bool(research.get("cached")),
-                },
-            )
-            body = discord.utils.escape_mentions(research["text"].strip())
-            screened = await screen_conversational_reply(body, user_text=current_text)
-            return ContextualReply(
-                text=format_sourced_reply(screened or body, research["sources"])[:6000]
-            )
-        _remember_live_failure(research_scope)
-        record_security_event(
+        research = await _consult_live_sources(
             message,
-            "ai_web_research",
-            status,
-            {"provider": "xai_web_search", "source_count": 0},
+            guild_id=guild_id,
+            actor_id=str(author.id),
+            research_scope=research_scope,
+            research_prompt=research_prompt,
+            system_prompt=live_search_system,
         )
-        return ContextualReply(text=live_source_failure_text(status))
+        if _live_research_succeeded(research):
+            return ContextualReply(
+                text=await _sourced_live_reply(research, current_text)
+            )
+        return ContextualReply(text=live_source_failure_text(research.get("status")))
     if recent_failure:
         live_context_block = (
             "\n\n<LIVE_RESEARCH_STATUS>"
