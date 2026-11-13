@@ -11,7 +11,9 @@ import discord
 import main
 import reply_auditor
 from reply_auditor import (
+    AUDITOR_STALL_SECONDS,
     BURST_LINE,
+    ERROR_LINE,
     STUCK_BACK_LINE,
     STUCK_FACT_LINE,
     STUCK_FAIL_LINE,
@@ -164,7 +166,7 @@ class TimeoutRecoveryTests(unittest.IsolatedAsyncioTestCase):
 
 class LoopDetectionTests(unittest.IsolatedAsyncioTestCase):
     async def test_same_tool_call_over_and_over_is_blocked(self):
-        auditor = make_auditor()
+        auditor = make_auditor(pace_chat=True)
         calls = []
 
         async def search(system_prompt, user_prompt):
@@ -193,7 +195,7 @@ class LoopDetectionTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all(auditor.allow_tool_call("live_search", "x") for _ in range(10)))
 
     async def test_reply_chain_is_paused_with_one_notice(self):
-        auditor = make_auditor(burst_limit=3)
+        auditor = make_auditor(burst_limit=3, pace_chat=True)
         work = AsyncMock(return_value="ok")
         results = [await auditor.guarded_reply("reply", "g:c:u", work) for _ in range(5)]
         self.assertEqual([r.value for r in results[:3]], ["ok"] * 3)
@@ -214,7 +216,7 @@ class RepeatSubjectTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("reply_loop", auditor.counts())
 
     async def test_repeat_subject_pivots_to_a_more_direct_answer(self):
-        auditor = make_auditor()
+        auditor = make_auditor(review_replies=True)
         pivot = AsyncMock(return_value="100k. that's the number, as of this hour.")
         first = await auditor.review_reply("g:c:u", "btc is at 100k right now.", pivot=pivot)
         second = await auditor.review_reply("g:c:u", "btc is at 100k right now!", pivot=pivot)
@@ -225,7 +227,7 @@ class RepeatSubjectTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_failed_or_identical_pivot_keeps_the_draft(self):
         clock = FakeClock()
-        auditor = make_auditor(clock, pivot_cooldown_seconds=10)
+        auditor = make_auditor(clock, pivot_cooldown_seconds=10, review_replies=True)
         await auditor.review_reply("g:c:u", "same answer here")
         failing = await auditor.review_reply(
             "g:c:u", "same answer here", pivot=AsyncMock(side_effect=RuntimeError("x"))
@@ -238,7 +240,7 @@ class RepeatSubjectTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(echo.text, "same answer here")
 
     async def test_pivot_is_rate_limited(self):
-        auditor = make_auditor()
+        auditor = make_auditor(review_replies=True)
         pivot = AsyncMock(return_value="direct and upfront now")
         await auditor.review_reply("g:c:u", "one answer", pivot=pivot)
         for _ in range(4):
@@ -247,6 +249,26 @@ class RepeatSubjectTests(unittest.IsolatedAsyncioTestCase):
 
 
 class NormalReplyTests(unittest.IsolatedAsyncioTestCase):
+    def test_default_timeouts_are_ten_minutes(self):
+        config = AuditorConfig()
+        self.assertEqual(config.timeout_for("reply"), AUDITOR_STALL_SECONDS)
+        self.assertEqual(config.timeout_for("live_search"), AUDITOR_STALL_SECONDS)
+        self.assertEqual(AUDITOR_STALL_SECONDS, 600.0)
+        self.assertFalse(config.pace_chat)
+        self.assertFalse(config.review_replies)
+
+    async def test_normal_latency_chat_does_not_fire_on_the_default_config(self):
+        auditor = ReplyAuditor(AuditorConfig(), log=lambda line: None)
+        result = await auditor.guarded_reply(
+            "reply", "g:c:u", AsyncMock(return_value="still here. the void's quiet.")
+        )
+        review = await auditor.review_reply("g:c:u", "Ah, the void \u2014 patient.")
+        self.assertEqual(result.value, "still here. the void's quiet.")
+        self.assertIsNone(result.recovery)
+        self.assertEqual(review.text, "Ah, the void \u2014 patient.")
+        self.assertIsNone(review.event)
+        self.assertEqual(auditor.recent_events(), [])
+
     async def test_normal_work_passes_through_untouched(self):
         logs = []
         auditor = make_auditor(logs=logs)
@@ -284,10 +306,14 @@ class NormalReplyTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(result, reply)
         self.assertEqual(sent, "just a reply")
 
-    async def test_work_errors_surface_unchanged(self):
+    async def test_work_errors_get_a_plain_line(self):
         auditor = make_auditor()
-        with self.assertRaises(ValueError):
-            await auditor.guarded_reply("reply", "g:c:u", AsyncMock(side_effect=ValueError("x")))
+        result = await auditor.guarded_reply(
+            "reply", "g:c:u", AsyncMock(side_effect=ValueError("x"))
+        )
+        self.assertEqual(result.recovery, ERROR_LINE)
+        self.assertEqual(result.event, "error")
+        self.assertEqual(auditor.counts().get("error"), 1)
 
     async def test_disabled_auditor_only_runs_the_work(self):
         auditor = ReplyAuditor(AuditorConfig(enabled=False), log=lambda line: None)
@@ -299,7 +325,7 @@ class NormalReplyTests(unittest.IsolatedAsyncioTestCase):
 
 class StyleTests(unittest.IsolatedAsyncioTestCase):
     async def test_dash_and_opener_are_nudged_not_blocked(self):
-        auditor = make_auditor()
+        auditor = make_auditor(review_replies=True)
         review = await auditor.review_reply("g:c:u", "Ah, the void \u2014 patient as ever.")
         self.assertEqual(review.text, "the void, patient as ever.")
         self.assertEqual(review.event, "style")
@@ -310,14 +336,14 @@ class StyleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(reply_auditor.nudge_style(text), (text, ()))
 
     async def test_stock_line_across_conversations_is_flagged(self):
-        auditor = make_auditor()
+        auditor = make_auditor(review_replies=True)
         line = "the void remembers everything you forgot. anyway."
         flags = [(await auditor.review_reply(f"g:c:{user}", line)).flags for user in range(4)]
         self.assertNotIn("stock_line", flags[2])
         self.assertIn("stock_line", flags[3])
 
     async def test_question_streak_is_flagged(self):
-        auditor = make_auditor()
+        auditor = make_auditor(review_replies=True)
         flags = [
             (await auditor.review_reply("g:c:u", text)).flags
             for text in ("you good?", "what happened then?", "and after that, who called?")
@@ -341,7 +367,7 @@ class AuditorFailureTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.event, "timeout")
 
     async def test_review_errors_return_the_original_text(self):
-        auditor = make_auditor()
+        auditor = make_auditor(review_replies=True)
         with patch.object(reply_auditor, "_normalize", side_effect=RuntimeError("boom")):
             review = await auditor.review_reply("g:c:u", "original \u2014 text")
         self.assertEqual(review.text, "original \u2014 text")
@@ -392,8 +418,10 @@ class AuditorFailureTests(unittest.IsolatedAsyncioTestCase):
             {"GRIM_AUDITOR_TIMEOUT_REPLY": "nope", "GRIM_AUDITOR_TOOL_REPEATS": "-4"},
         ):
             config = AuditorConfig.from_env()
-        self.assertEqual(config.timeout_for("reply"), 45.0)
+        self.assertEqual(config.timeout_for("reply"), AUDITOR_STALL_SECONDS)
         self.assertEqual(config.tool_repeat_limit, 4)
+        self.assertFalse(config.pace_chat)
+        self.assertFalse(config.review_replies)
 
     def test_env_overrides_apply(self):
         with patch.dict(

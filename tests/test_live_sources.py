@@ -63,7 +63,7 @@ class FakeResponse:
 
 class FakeSession:
     def __init__(self, response, calls):
-        self._response = response
+        self._responses = response if isinstance(response, list) else [response]
         self._calls = calls
 
     async def __aenter__(self):
@@ -74,7 +74,9 @@ class FakeSession:
 
     def post(self, url, headers=None, json=None):
         self._calls.append((url, json))
-        return self._response
+        if self._responses:
+            return self._responses.pop(0)
+        return FakeResponse(500, {})
 
 
 class LiveSourcesTests(unittest.TestCase):
@@ -124,14 +126,16 @@ class LiveSourcesTests(unittest.TestCase):
             self.assertNotIn(claim, folded)
         self.assertTrue("memory" in folded or "won't guess" in folded)
 
-    def test_factual_and_current_asks_require_live_sources(self):
+    def test_facts_information_and_method_require_live_sources(self):
         for text in (
             "what's jensen huang's position?",
             "who is the ceo of nvidia",
             "the board removed him",
             "is this true",
             "latest news on the election",
-            "why is the sky blue?",
+            "how do I update nvidia drivers",
+            "how to check election results",
+            "walk me through the process of filing that form",
         ):
             self.assertTrue(main._needs_live_sources(text, ""), text)
 
@@ -140,18 +144,51 @@ class LiveSourcesTests(unittest.TestCase):
             "tell me a joke",
             "lol",
             "how are you",
+            "how is it going pal",
+            "huh bruh",
             "damn accurate",
             "write me a poem about the void?",
             "i got fired and i feel awful",
             "they fired me",
             "what do you think of my build?",
+            "why is the sky blue?",
+            "what's the vibe",
+            "> exactly they’ve got their priorities jacked up\nhuh bruh",
         ):
             self.assertFalse(main._needs_live_sources(text, ""), text)
+            self.assertFalse(
+                main._needs_live_sources(text, "", recent_failure=True),
+                text,
+            )
 
-    def test_followup_after_failed_search_searches_again(self):
-        self.assertTrue(main._needs_live_sources("nvidia though", "", recent_failure=True))
+    def test_capability_question_is_not_a_news_search(self):
+        for text in (
+            "let me try here but do you have any live search capability?",
+            "do you have live search",
+            "can you search the web",
+            "is live search working",
+        ):
+            self.assertTrue(main._is_self_capability_question(text), text)
+            self.assertFalse(main._needs_live_sources(text, ""), text)
+            self.assertFalse(
+                main._needs_live_sources(text, "", recent_failure=True),
+                text,
+            )
+        for text in (
+            "what's jensen huang's position?",
+            "can you search the web for nvidia's ceo",
+            "latest news on the election",
+        ):
+            self.assertFalse(main._is_self_capability_question(text), text)
+            self.assertTrue(main._needs_live_sources(text, ""), text)
+
+    def test_fail_memory_does_not_force_search_or_block_chat(self):
+        self.assertFalse(main._needs_live_sources("nvidia though", "", recent_failure=True))
         self.assertFalse(main._needs_live_sources("nvidia though", "", recent_failure=False))
         self.assertFalse(main._needs_live_sources("lol ok", "", recent_failure=True))
+        self.assertFalse(
+            main._needs_live_sources("how is it going pal", "", recent_failure=True)
+        )
 
     def test_no_current_sources_sentinel_is_not_an_answer(self):
         self.assertIsNone(main._extract_grok_research_response({
@@ -168,7 +205,7 @@ class LiveSourcesTests(unittest.TestCase):
             ],
         }))
 
-    def test_research_request_uses_web_and_x_search_and_reports_empty(self):
+    def test_research_request_defaults_to_web_only_fast_payload(self):
         calls = []
         empty = {"output": [{"type": "web_search_call", "status": "completed"}]}
         session = FakeSession(FakeResponse(200, empty), calls)
@@ -178,8 +215,40 @@ class LiveSourcesTests(unittest.TestCase):
         self.assertEqual(result, {"status": "empty"})
         url, payload = calls[0]
         self.assertEqual(url, "https://api.x.ai/v1/responses")
+        self.assertEqual(payload["model"], main.XAI_SEARCH_MODEL_DEFAULT)
+        self.assertEqual(payload["reasoning"], {"effort": "none"})
+        self.assertEqual(payload["max_output_tokens"], main.LIVE_SEARCH_MAX_TOKENS)
+        self.assertEqual(main.LIVE_SEARCH_HTTP_TIMEOUT, 8)
+        self.assertEqual(main.LIVE_SEARCH_WAIT_TIMEOUT, 10)
         self.assertEqual(
             [tool["type"] for tool in payload["tools"]],
+            ["web_search"],
+        )
+        self.assertEqual(len(calls), 1)
+
+    def test_x_search_only_when_the_ask_needs_x(self):
+        self.assertFalse(main._needs_x_search("who is nvidia's ceo"))
+        self.assertTrue(main._needs_x_search("what did they tweet about nvidia"))
+        self.assertEqual(main._search_tools_for("who is nvidia's ceo"), main.XAI_WEB_SEARCH_TOOLS)
+        self.assertEqual(
+            main._search_tools_for("what did they tweet about nvidia"),
+            main.XAI_SEARCH_TOOLS,
+        )
+        calls = []
+        empty = {"output": [{"type": "web_search_call", "status": "completed"}]}
+        session = FakeSession(FakeResponse(200, empty), calls)
+        with patch.dict(main.os.environ, {"XAI_API_KEY": "test-key"}), \
+                patch.object(main.aiohttp, "ClientSession", return_value=session):
+            result = asyncio.run(
+                main.grok_research_query(
+                    "sys",
+                    "what did they tweet about nvidia",
+                    tools=main.XAI_SEARCH_TOOLS,
+                )
+            )
+        self.assertEqual(result, {"status": "empty"})
+        self.assertEqual(
+            [tool["type"] for tool in calls[0][1]["tools"]],
             ["web_search", "x_search"],
         )
 
@@ -251,7 +320,7 @@ class LiveSourcesTests(unittest.TestCase):
         for reply in replies:
             self.assert_plain_failure(reply, "empty")
 
-    def test_casual_followup_after_failure_carries_the_failure_forward(self):
+    def test_casual_followup_after_failure_is_not_a_news_miss(self):
         research = AsyncMock(return_value={"status": "empty"})
         replies, model = self.converse(
             ["what's jensen huang's position?", "lol ok"],
@@ -260,9 +329,9 @@ class LiveSourcesTests(unittest.TestCase):
         )
         self.assertEqual(research.await_count, 1)
         self.assertEqual(replies[1].text, "the void keeps its secrets.")
+        self.assertNotIn("where it stands", replies[1].text)
         prompt = model.await_args.args[2]
-        self.assertIn("<LIVE_RESEARCH_STATUS>", prompt)
-        self.assertIn("never describe anything as stable", prompt)
+        self.assertNotIn("<LIVE_RESEARCH_STATUS>", prompt)
 
     def test_success_clears_failure_memory(self):
         research = AsyncMock(side_effect=[{"status": "empty"}, SUCCESS])
@@ -280,6 +349,198 @@ class LiveSourcesTests(unittest.TestCase):
         (reply,), model = self.converse(["tell me a joke"], research, model_reply="death walks into a bar.")
         research.assert_not_awaited()
         self.assertEqual(reply.text, "death walks into a bar.")
+
+    def test_greeting_and_quote_do_not_take_the_news_miss_path(self):
+        research = AsyncMock(return_value={"status": "empty"})
+        main._remember_live_failure("50:9")
+        (hello,), model = self.converse(
+            ["how is it going pal"],
+            research,
+            model_reply="still here. the void's quiet.",
+        )
+        research.assert_not_awaited()
+        model.assert_awaited()
+        self.assertEqual(hello.text, "still here. the void's quiet.")
+        self.assertNotIn("where it stands", hello.text)
+        self.assertNotEqual(hello.text, main.LIVE_SOURCE_FAILURE_LINES["empty"])
+        self.assertNotIn("<LIVE_RESEARCH_STATUS>", model.await_args.args[2])
+
+        main._remember_live_failure("50:9")
+        quoted = (
+            "> exactly they've got their priorities jacked up\n"
+            "huh bruh"
+        )
+        (quote_reply,), model = self.converse(
+            [quoted],
+            research,
+            model_reply="yeah. priorities are a mess.",
+        )
+        research.assert_not_awaited()
+        self.assertEqual(quote_reply.text, "yeah. priorities are a mess.")
+        self.assertNotIn("where it stands", quote_reply.text)
+
+    def test_capability_question_uses_a_successful_search(self):
+        research = AsyncMock(return_value=SUCCESS)
+        ping = "let me try here but do you have any live search capability?"
+        (reply,), model = self.converse([ping], research)
+        self.assertEqual(research.await_count, 1)
+        model.assert_not_awaited()
+        self.assertNotEqual(reply.text, main.LIVE_SOURCE_FAILURE_LINES["empty"])
+        self.assertNotIn("where it stands", reply.text)
+        self.assertTrue(reply.text.startswith(main.CAPABILITY_PROOF_PREFIX))
+        self.assertIn(SUCCESS["text"], reply.text)
+        self.assertIn(
+            "-# sources: [reuters.com](<https://www.reuters.com/tech/a>)",
+            reply.text,
+        )
+        self.assertEqual(research.await_args.args[1], main.LIVE_SEARCH_PROOF_QUERY)
+        self.assertNotIn("capability", research.await_args.args[1].casefold())
+        self.assertEqual(
+            tuple(research.await_args.kwargs.get("tools") or ()),
+            main.XAI_WEB_SEARCH_TOOLS,
+        )
+
+    def test_capability_empty_or_fail_stays_honest_not_a_news_miss(self):
+        ping = "do you have any live search capability?"
+        research = AsyncMock(return_value={"status": "empty"})
+        (reply,), model = self.converse([ping], research)
+        model.assert_not_awaited()
+        self.assertEqual(reply.text, main.LIVE_SOURCE_CAPABILITY_LINES["empty"])
+        self.assertNotEqual(reply.text, main.LIVE_SOURCE_FAILURE_LINES["empty"])
+        folded = reply.text.casefold()
+        self.assertIn("wired", folded)
+        self.assertTrue("memory" in folded or "won't guess" in folded)
+        for claim in TRAINING_CLAIMS:
+            self.assertNotIn(claim, folded)
+
+        main._LIVE_RESEARCH_FAILURES.clear()
+        (reply,), model = self.converse(
+            [ping], AsyncMock(return_value={"status": "provider_error"})
+        )
+        model.assert_not_awaited()
+        self.assertEqual(reply.text, main.LIVE_SOURCE_CAPABILITY_LINES["error"])
+        self.assertNotIn("where it stands", reply.text)
+
+    def test_capability_question_ignores_channel_failure_memory(self):
+        research = AsyncMock(return_value=SUCCESS)
+        main._remember_live_failure("50:9")
+        (reply,), model = self.converse(
+            ["let me try here but do you have any live search capability?"],
+            research,
+        )
+        model.assert_not_awaited()
+        self.assertTrue(reply.text.startswith(main.CAPABILITY_PROOF_PREFIX))
+        self.assertIn("sources:", reply.text)
+        self.assertNotIn("where it stands", reply.text)
+
+    def test_web_only_search_does_not_retry_a_second_round_trip(self):
+        calls = []
+        session = FakeSession([FakeResponse(400, {}), FakeResponse(200, {})], calls)
+        with patch.dict(main.os.environ, {"XAI_API_KEY": "test-key"}), \
+                patch.object(main.aiohttp, "ClientSession", return_value=session):
+            result = asyncio.run(main.grok_research_query("sys", "who runs nvidia"))
+        self.assertEqual(result["status"], "provider_error")
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(
+            [tool["type"] for tool in calls[0][1]["tools"]],
+            ["web_search"],
+        )
+
+    def test_research_retries_web_search_only_after_x_tool_rejected(self):
+        calls = []
+        success_body = {
+            "output": [
+                {"type": "web_search_call", "status": "completed"},
+                {
+                    "type": "message",
+                    "content": [{
+                        "type": "output_text",
+                        "text": SUCCESS["text"],
+                        "annotations": [{
+                            "url": "https://www.reuters.com/tech/a",
+                            "title": "Reuters",
+                        }],
+                    }],
+                },
+            ],
+        }
+        session = FakeSession(
+            [FakeResponse(400, {}), FakeResponse(200, success_body)],
+            calls,
+        )
+        with patch.dict(main.os.environ, {"XAI_API_KEY": "test-key"}), \
+                patch.object(main.aiohttp, "ClientSession", return_value=session):
+            result = asyncio.run(
+                main.grok_research_query(
+                    "sys",
+                    "what did they tweet about nvidia",
+                    tools=main.XAI_SEARCH_TOOLS,
+                )
+            )
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["text"], SUCCESS["text"])
+        self.assertEqual(
+            [tool["type"] for tool in calls[0][1]["tools"]],
+            ["web_search", "x_search"],
+        )
+        self.assertEqual(
+            [tool["type"] for tool in calls[1][1]["tools"]],
+            ["web_search"],
+        )
+
+    def test_fact_search_uses_a_short_web_only_prompt(self):
+        research = AsyncMock(return_value=SUCCESS)
+        (reply,), model = self.converse(["what's jensen huang's position?"], research)
+        model.assert_not_awaited()
+        self.assertTrue(reply.text.startswith(SUCCESS["text"]))
+        self.assertEqual(
+            tuple(research.await_args.kwargs.get("tools") or ()),
+            main.XAI_WEB_SEARCH_TOOLS,
+        )
+        self.assertEqual(
+            research.await_args.args[1],
+            "what's jensen huang's position?",
+        )
+        self.assertLessEqual(len(research.await_args.args[1]), 1200)
+
+    def test_leftover_topic_after_failure_does_not_block_chat(self):
+        research = AsyncMock(return_value={"status": "empty"})
+        replies, model = self.converse(
+            ["what's jensen huang's position?", "nvidia though"],
+            research,
+            model_reply="yeah nvidia's a whole saga.",
+        )
+        self.assertEqual(research.await_count, 1)
+        self.assert_plain_failure(replies[0], "empty")
+        self.assertEqual(replies[1].text, "yeah nvidia's a whole saga.")
+        self.assertNotIn("<LIVE_RESEARCH_STATUS>", model.await_args.args[2])
+
+    def test_research_response_accepts_custom_tool_call_and_markdown_urls(self):
+        result = main._extract_grok_research_response({
+            "output": [
+                {
+                    "type": "custom_tool_call",
+                    "name": "x_keyword_search",
+                    "status": "completed",
+                },
+                {
+                    "type": "message",
+                    "content": [{
+                        "type": "output_text",
+                        "text": (
+                            "as of nov 13, reuters reports a ceasefire. "
+                            "https://www.reuters.com/world/a"
+                        ),
+                    }],
+                },
+            ],
+        })
+        self.assertIsNotNone(result)
+        self.assertTrue(result["used_search"])
+        self.assertEqual(
+            result["sources"][0]["url"],
+            "https://www.reuters.com/world/a",
+        )
 
 
 if __name__ == "__main__":
