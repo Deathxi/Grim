@@ -3215,6 +3215,151 @@ def mention_failure_text(user_text: str | None, failure: str | None = None) -> s
         return None
     return MENTION_FAILURE_LINES.get(failure)
 
+_MENTION_MARK = re.compile(r"<@!?\d+>")
+_GRIM_NAME_TOKEN = re.compile(
+    r"^@?(?:gri+m+(?:y+|bo|(?:bro+)+)?)$",
+    re.IGNORECASE,
+)
+_GRIM_NICK_FOLLOW = re.compile(
+    r"^(?:(?:bro+)+|dude|man|boi+|homie|bestie|pal|fam|bruh)$",
+    re.IGNORECASE,
+)
+_NAME_CALL_GREETINGS = frozenset({
+    "hey", "heya", "heyo", "hi", "hello", "hiya", "yo", "yoo", "sup",
+    "howdy", "oi", "oy", "hola", "hai",
+})
+_NAME_CALL_SECOND_PERSON = frozenset({
+    "you", "u", "ya", "your", "youre", "yours", "yourself",
+})
+_NAME_CALL_TAKE = frozenset({
+    "think", "thoughts", "thought", "take", "opinion", "feel", "feeling",
+    "agree", "disagree", "view", "views",
+})
+_NAME_CALL_THIRD_PERSON_VERBS = frozenset({
+    "is", "was", "are", "were", "said", "says", "did", "does", "has", "had",
+    "will", "would", "can", "could", "went", "got", "made", "posted",
+    "replied", "broke", "crashed", "died", "came", "left", "joined",
+    "told", "asked", "called", "mentioned",
+})
+_NAME_CALL_PREP_BEFORE = frozenset({
+    "to", "about", "with", "from", "like", "than", "unlike", "for", "of",
+    "at", "on", "vs", "versus", "without", "plus", "minus", "except",
+    "besides", "including",
+})
+_NAME_CALL_OBJECT_BEFORE = frozenset({
+    "credit", "blame", "thank", "thanks", "mention", "mentioned",
+    "include", "called", "named", "see", "saw", "seen", "hear", "heard",
+})
+_NAME_CALL_QUESTION_CONTINUERS = frozenset({
+    "this", "that", "it", "there", "he", "she", "we", "they", "i", "you",
+    "u", "ya",
+})
+
+
+def _name_call_source(text: str | None, *, mentioned: bool) -> str:
+    raw = _strip_quote_lines(str(text or ""))
+    raw = _MENTION_MARK.sub(" grim " if mentioned else " ", raw)
+    return re.sub(r"(?<!\w)@grim\b", " grim ", raw, flags=re.IGNORECASE)
+
+
+def _is_grim_name_token(token: str) -> bool:
+    return bool(_GRIM_NAME_TOKEN.match(token))
+
+
+def _name_call_spans(tokens: list[str]) -> list[tuple[int, int]]:
+    """Start/end indexes of each Grim name or nickname span."""
+    spans: list[tuple[int, int]] = []
+    idx = 0
+    while idx < len(tokens):
+        if _is_grim_name_token(tokens[idx]):
+            end = idx + 1
+            if end < len(tokens) and _GRIM_NICK_FOLLOW.match(tokens[end]):
+                end += 1
+            spans.append((idx, end))
+            idx = end
+            continue
+        idx += 1
+    return spans
+
+
+def _tokens_without_name_calls(
+    tokens: list[str], spans: list[tuple[int, int]]
+) -> list[str]:
+    skip = {pos for start, end in spans for pos in range(start, end)}
+    return [token for idx, token in enumerate(tokens) if idx not in skip]
+
+
+def _name_call_is_vocative(tokens: list[str], start: int, end: int) -> bool:
+    before = tokens[start - 1] if start else None
+    after = tokens[end] if end < len(tokens) else None
+    if before in _NAME_CALL_PREP_BEFORE or before in _NAME_CALL_OBJECT_BEFORE:
+        return False
+    if after in _NAME_CALL_THIRD_PERSON_VERBS:
+        nxt = tokens[end + 1] if end + 1 < len(tokens) else None
+        return nxt in _NAME_CALL_QUESTION_CONTINUERS or after in _NAME_CALL_SECOND_PERSON
+    if start == 0 or before in _NAME_CALL_GREETINGS:
+        return True
+    if end == len(tokens):
+        return True
+    if before in _NAME_CALL_SECOND_PERSON or after in _NAME_CALL_SECOND_PERSON:
+        return True
+    window = tokens[max(0, start - 3):min(len(tokens), end + 3)]
+    return any(token in _NAME_CALL_SECOND_PERSON for token in window)
+
+
+def _asks_grim_for_take(tokens: list[str], spans: list[tuple[int, int]]) -> bool:
+    joined = " ".join(tokens)
+    if "what about you" in joined or "how about you" in joined or "and you" in joined:
+        return True
+    for start, end in spans:
+        nearby = tokens[max(0, start - 3):min(len(tokens), end + 4)]
+        if any(token in _NAME_CALL_TAKE for token in nearby):
+            return True
+        if "ask" in tokens[max(0, start - 3):start]:
+            return True
+    return False
+
+
+def grim_turn_needs_reply(text: str | None, *, mentioned: bool = False) -> bool:
+    """True when this turn names Grim and has an entrance.
+
+    A Discord @mention or a plain-text name-call both count as naming him.
+    Reply on a question, a ping for his take, or a direct address. Skip empty
+    pings and third-person drive-bys with no ask.
+    """
+    source = _name_call_source(text, mentioned=mentioned)
+    tokens = _output_match_text(source).split()
+    if mentioned and not any(_is_grim_name_token(token) for token in tokens):
+        tokens = ["grim", *tokens]
+    spans = _name_call_spans(tokens)
+    if not spans:
+        return False
+    leftover = _tokens_without_name_calls(tokens, spans)
+    greeting = any(token in _NAME_CALL_GREETINGS for token in leftover) or any(
+        start and tokens[start - 1] in _NAME_CALL_GREETINGS for start, _ in spans
+    )
+    content = [token for token in leftover if token not in _NAME_CALL_GREETINGS]
+    has_question = "?" in str(text or "")
+    take = _asks_grim_for_take(tokens, spans)
+    vocative = any(
+        _name_call_is_vocative(tokens, start, end) for start, end in spans
+    )
+    if not content and not has_question and not take:
+        return bool(greeting)
+    if take or vocative:
+        return True
+    return False
+
+
+def grim_should_reply_to_message(message) -> bool:
+    """on_message gate: name-call or @mention with an entrance, not prefix cmds."""
+    content = getattr(message, "content", "") or ""
+    if content.lstrip().startswith("!"):
+        return False
+    user = getattr(bot, "user", None)
+    mentioned = user is not None and user in getattr(message, "mentions", [])
+    return grim_turn_needs_reply(content, mentioned=mentioned)
+
 async def generate_haiku():
     client = get_grok_client()
     if not client:
@@ -9798,7 +9943,7 @@ async def on_message(message):
             await message.channel.send(file=quote_file)
 
     is_prefix_command = message.content.lstrip().startswith("!")
-    if bot.user in message.mentions and not is_prefix_command:
+    if not is_prefix_command and grim_should_reply_to_message(message):
         # Reset counter — Grim is already responding, no need to also proactively chime
         _channel_msg_counter[str(message.channel.id)] = 0
         _channel_last_grim_post[str(message.channel.id)] = time.time()
@@ -9814,7 +9959,7 @@ async def on_message(message):
             else:
                 print("[Grim] Conversational mention produced no reply")
     elif not is_prefix_command:
-        # Not @mentioned — let Grim decide if it wants to drop in
+        # No name-call or @mention with an entrance — maybe a periodic chime
         await maybe_chime_in(message)
 
     await bot.process_commands(message)
