@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, PropertyMock, patch
 
 import main
+from grim_health import classify_security_rows, score_health
 
 
 class FakeChannel:
@@ -91,6 +92,16 @@ VITAMIN_RISK = (
     "can't risk outdated targets on vitamins and minerals."
 )
 RETRY_LINES = ("Recall", "try again", "search again")
+NEWS_ASK = (
+    "Tell me about the news from Jansen Huang. Like, what's going on? "
+    "I don't really know. I am not informed"
+)
+GOING_ON_ASK = "what's going on with Jensen Huang"
+THEOLOGY_RIDDLE = (
+    "If God is all-knowing and all-powerful, can he create a stone "
+    "so heavy that he cannot lift it?"
+)
+POLITICAL = "they're all crooked anyway, the whole system's a joke"
 
 
 class FakeResponse:
@@ -324,8 +335,11 @@ class LiveSourcesTests(unittest.TestCase):
         self.assertEqual(payload["model"], main.XAI_SEARCH_MODEL_DEFAULT)
         self.assertEqual(payload["reasoning"], {"effort": "none"})
         self.assertEqual(payload["max_output_tokens"], main.LIVE_SEARCH_MAX_TOKENS)
-        self.assertEqual(main.LIVE_SEARCH_HTTP_TIMEOUT, 12)
-        self.assertEqual(main.LIVE_SEARCH_WAIT_TIMEOUT, 15)
+        self.assertEqual(payload["tool_choice"], main.LIVE_SEARCH_TOOL_CHOICE)
+        self.assertEqual(main.LIVE_SEARCH_HTTP_TIMEOUT, 45)
+        self.assertEqual(main.LIVE_SEARCH_WAIT_TIMEOUT, 50)
+        self.assertEqual(main.LIVE_SEARCH_CONNECT_TIMEOUT, 10)
+        self.assertEqual(main.LIVE_SEARCH_MAX_TOKENS, 600)
         self.assertEqual(
             [tool["type"] for tool in payload["tools"]],
             ["web_search"],
@@ -396,20 +410,32 @@ class LiveSourcesTests(unittest.TestCase):
         self.assertNotIn("<LIVE_RESEARCH_STATUS>", prompt)
 
     def test_search_error_timeout_and_exception_say_so_plainly(self):
-        for outcome, key in (
-            ({"status": "provider_error", "http_status": 500}, "error"),
-            ({"status": "parse_error"}, "error"),
-            ({"status": "timeout"}, "timeout"),
+        for outcome in (
+            {"status": "provider_error", "http_status": 500},
+            {"status": "parse_error"},
+            {"status": "timeout"},
         ):
             main._LIVE_RESEARCH_FAILURES.clear()
-            (reply,), model = self.converse(["who is nvidia's ceo?"], AsyncMock(return_value=outcome))
-            model.assert_not_awaited()
-            self.assert_plain_failure(reply, key)
+            research = AsyncMock(return_value=outcome)
+            (reply,), model = self.converse(
+                ["who is nvidia's ceo?"],
+                research,
+                model_reply=MISS_WRAP,
+            )
+            self.assertEqual(research.await_count, 2)
+            model.assert_awaited()
+            self.assert_zero_info_miss(reply, MISS_WRAP)
+            self.assertNotIn("try again in a bit", reply.text)
+            self.assertNotIn("live search timed out", reply.text.casefold())
         main._LIVE_RESEARCH_FAILURES.clear()
         crash = AsyncMock(side_effect=RuntimeError("boom"))
-        (reply,), model = self.converse(["who is nvidia's ceo?"], crash)
-        model.assert_not_awaited()
-        self.assert_plain_failure(reply, "error")
+        (reply,), model = self.converse(
+            ["who is nvidia's ceo?"], crash, model_reply=MISS_WRAP
+        )
+        self.assertEqual(crash.await_count, 2)
+        model.assert_awaited()
+        self.assert_zero_info_miss(reply, MISS_WRAP)
+        self.assertNotIn("try again in a bit", reply.text)
 
     def test_rate_limited_search_does_not_guess(self):
         research = AsyncMock(return_value=SUCCESS)
@@ -493,16 +519,22 @@ class LiveSourcesTests(unittest.TestCase):
         self.assertFalse(main._is_live_search_retry("what's the weather tomorrow"))
 
     def test_timeout_then_recall_retries_the_last_fact_search(self):
-        research = AsyncMock(side_effect=[{"status": "timeout"}, SUCCESS])
+        research = AsyncMock(side_effect=[
+            {"status": "timeout"},
+            {"status": "timeout"},
+            SUCCESS,
+        ])
         replies, model = self.converse(
             [VITAMIN_ASK, "Recall"],
             research,
             model_reply=VITAMIN_RISK,
         )
-        self.assertEqual(research.await_count, 2)
+        self.assertEqual(research.await_count, 3)
         self.assertEqual(research.await_args_list[0].args[1], VITAMIN_ASK)
         self.assertEqual(research.await_args_list[1].args[1], VITAMIN_ASK)
-        self.assertEqual(replies[0].text, main.LIVE_SOURCE_FAILURE_LINES["timeout"])
+        self.assertEqual(research.await_args_list[2].args[1], VITAMIN_ASK)
+        self.assert_zero_info_miss(replies[0], main.LIVE_SEARCH_MISS_WRAP_FALLBACK)
+        self.assertNotIn("try again in a bit", replies[0].text)
         self.assertTrue(replies[1].text.startswith(SUCCESS["text"]))
         self.assertIn("-# sources:", replies[1].text)
         self.assertIn("reuters.com", replies[1].text)
@@ -514,22 +546,26 @@ class LiveSourcesTests(unittest.TestCase):
         self.assertNotIn(VITAMIN_RISK, replies[1].text)
         self.assertNotIn("can't risk", replies[1].text.casefold())
         self.assertNotIn("outdated targets", replies[1].text.casefold())
-        model.assert_not_awaited()
+        model.assert_awaited()
 
     def test_try_again_and_search_again_retry_the_last_fact_search(self):
         for line in ("try again", "search again"):
             main._LIVE_RESEARCH_FAILURES.clear()
             main._PENDING_LIVE_ASKS.clear()
-            research = AsyncMock(side_effect=[{"status": "timeout"}, SUCCESS])
+            research = AsyncMock(side_effect=[
+                {"status": "timeout"},
+                {"status": "timeout"},
+                SUCCESS,
+            ])
             replies, model = self.converse(
                 [VITAMIN_ASK, line],
                 research,
                 model_reply=VITAMIN_RISK,
             )
-            self.assertEqual(research.await_count, 2, line)
-            self.assertEqual(research.await_args_list[1].args[1], VITAMIN_ASK, line)
+            self.assertEqual(research.await_count, 3, line)
+            self.assertEqual(research.await_args_list[2].args[1], VITAMIN_ASK, line)
             self.assertIn("-# sources:", replies[1].text, line)
-            model.assert_not_awaited()
+            model.assert_awaited()
 
     def test_failed_recall_uses_zero_info_not_vitamin_risk_or_timeout_copy(self):
         research = AsyncMock(return_value={"status": "timeout"})
@@ -538,9 +574,9 @@ class LiveSourcesTests(unittest.TestCase):
             research,
             model_reply=VITAMIN_RISK,
         )
-        self.assertEqual(research.await_count, 2)
-        self.assertEqual(research.await_args_list[1].args[1], VITAMIN_ASK)
-        self.assertEqual(replies[0].text, main.LIVE_SOURCE_FAILURE_LINES["timeout"])
+        self.assertEqual(research.await_count, 4)
+        self.assertEqual(research.await_args_list[2].args[1], VITAMIN_ASK)
+        self.assert_zero_info_miss(replies[0], main.LIVE_SEARCH_MISS_WRAP_FALLBACK)
         self.assert_zero_info_miss(replies[1], main.LIVE_SEARCH_MISS_WRAP_FALLBACK)
         self.assertNotEqual(replies[1].text, main.LIVE_SOURCE_FAILURE_LINES["timeout"])
         self.assertNotIn("try again in a bit", replies[1].text)
@@ -553,13 +589,17 @@ class LiveSourcesTests(unittest.TestCase):
         model.assert_awaited()
 
     def test_failed_recall_empty_search_uses_zero_info_plus_take(self):
-        research = AsyncMock(side_effect=[{"status": "timeout"}, {"status": "empty"}])
+        research = AsyncMock(side_effect=[
+            {"status": "timeout"},
+            {"status": "timeout"},
+            {"status": "empty"},
+        ])
         replies, model = self.converse(
             [VITAMIN_ASK, "Recall"],
             research,
             model_reply=MISS_WRAP,
         )
-        self.assertEqual(research.await_count, 2)
+        self.assertEqual(research.await_count, 3)
         self.assert_zero_info_miss(replies[1], MISS_WRAP)
         self.assertNotEqual(replies[1].text, main.LIVE_SOURCE_FAILURE_LINES["timeout"])
         self.assertNotIn(VITAMIN_RISK, replies[1].text)
@@ -583,7 +623,11 @@ class LiveSourcesTests(unittest.TestCase):
         opener = mention(VITAMIN_ASK)
         opener.mentions = [grim_user]
         follow = hold_follow("Recall")
-        research = AsyncMock(side_effect=[{"status": "timeout"}, SUCCESS])
+        research = AsyncMock(side_effect=[
+            {"status": "timeout"},
+            {"status": "timeout"},
+            SUCCESS,
+        ])
         model = AsyncMock(return_value=VITAMIN_RISK)
         main._conversation_media_kind[("9", "10")] = "gif"
 
@@ -618,15 +662,15 @@ class LiveSourcesTests(unittest.TestCase):
                 return first, second
 
         first, second = asyncio.run(run())
-        self.assertEqual(research.await_count, 2)
-        self.assertEqual(research.await_args_list[1].args[1], VITAMIN_ASK)
-        self.assertEqual(first.text, main.LIVE_SOURCE_FAILURE_LINES["timeout"])
+        self.assertEqual(research.await_count, 3)
+        self.assertEqual(research.await_args_list[2].args[1], VITAMIN_ASK)
+        self.assert_zero_info_miss(first, main.LIVE_SEARCH_MISS_WRAP_FALLBACK)
         self.assertTrue(second.text.startswith(SUCCESS["text"]))
         self.assertIn("-# sources:", second.text)
         self.assertIsNone(second.media)
         self.assertIsNone(second.media_url)
         self.assertNotIn(("9", "10"), main._conversation_media_kind)
-        model.assert_not_awaited()
+        model.assert_awaited()
 
     def test_memory_risk_wrap_is_replaced_on_the_zero_info_line(self):
         self.assertEqual(
@@ -748,16 +792,26 @@ class LiveSourcesTests(unittest.TestCase):
         self.assertIn("sources:", reply.text)
         self.assertNotIn("where it stands", reply.text)
 
-    def test_web_only_search_does_not_retry_a_second_round_trip(self):
+    def test_web_only_search_retries_once_without_tool_choice(self):
         calls = []
-        session = FakeSession([FakeResponse(400, {}), FakeResponse(200, {})], calls)
+        empty = {"output": [{"type": "web_search_call", "status": "completed"}]}
+        session = FakeSession(
+            [FakeResponse(400, {}), FakeResponse(200, empty)],
+            calls,
+        )
         with patch.dict(main.os.environ, {"XAI_API_KEY": "test-key"}), \
                 patch.object(main.aiohttp, "ClientSession", return_value=session):
             result = asyncio.run(main.grok_research_query("sys", "who runs nvidia"))
-        self.assertEqual(result["status"], "provider_error")
-        self.assertEqual(len(calls), 1)
+        self.assertEqual(result, {"status": "empty"})
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0][1]["tool_choice"], main.LIVE_SEARCH_TOOL_CHOICE)
+        self.assertNotIn("tool_choice", calls[1][1])
         self.assertEqual(
             [tool["type"] for tool in calls[0][1]["tools"]],
+            ["web_search"],
+        )
+        self.assertEqual(
+            [tool["type"] for tool in calls[1][1]["tools"]],
             ["web_search"],
         )
 
@@ -780,7 +834,7 @@ class LiveSourcesTests(unittest.TestCase):
             ],
         }
         session = FakeSession(
-            [FakeResponse(400, {}), FakeResponse(200, success_body)],
+            [FakeResponse(400, {}), FakeResponse(400, {}), FakeResponse(200, success_body)],
             calls,
         )
         with patch.dict(main.os.environ, {"XAI_API_KEY": "test-key"}), \
@@ -794,12 +848,19 @@ class LiveSourcesTests(unittest.TestCase):
             )
         self.assertEqual(result["status"], "success")
         self.assertEqual(result["text"], SUCCESS["text"])
+        self.assertEqual(len(calls), 3)
         self.assertEqual(
             [tool["type"] for tool in calls[0][1]["tools"]],
             ["web_search", "x_search"],
         )
+        self.assertEqual(calls[0][1]["tool_choice"], main.LIVE_SEARCH_TOOL_CHOICE)
         self.assertEqual(
             [tool["type"] for tool in calls[1][1]["tools"]],
+            ["web_search", "x_search"],
+        )
+        self.assertNotIn("tool_choice", calls[1][1])
+        self.assertEqual(
+            [tool["type"] for tool in calls[2][1]["tools"]],
             ["web_search"],
         )
 
@@ -1243,7 +1304,7 @@ class LiveSourcesTests(unittest.TestCase):
             research,
             model_reply=[MISS_WRAP, "already here.", "up.", "here.", "he asked.", "that one."],
         )
-        self.assertEqual(research.await_count, 1)
+        self.assertEqual(research.await_count, 2)
         self.assert_zero_info_miss(replies[0], MISS_WRAP)
         self.assertFalse(main._recent_live_failure("50:9"))
         self.assertNotIn("50:9", main._WEATHER_LIVE_FAILURES)
@@ -1260,13 +1321,17 @@ class LiveSourcesTests(unittest.TestCase):
             self.assertNotIn("casual wrap", prompt)
 
     def test_weather_fail_memory_cleared_after_non_weather_turn(self):
-        research = AsyncMock(side_effect=[{"status": "timeout"}, SUCCESS])
+        research = AsyncMock(side_effect=[
+            {"status": "timeout"},
+            {"status": "timeout"},
+            SUCCESS,
+        ])
         replies, model = self.converse(
             ["what's the weather tomorrow", "Grim guess who it is"],
             research,
             model_reply=[MISS_WRAP, "already here."],
         )
-        self.assertEqual(research.await_count, 1)
+        self.assertEqual(research.await_count, 2)
         self.assertEqual(replies[1].text, "already here.")
         self.assertNotIn("50:9", main._WEATHER_LIVE_FAILURES)
         self.assertFalse(main._recent_live_failure("50:9"))
@@ -1274,7 +1339,7 @@ class LiveSourcesTests(unittest.TestCase):
             ["what's jensen huang's position?"],
             research,
         )
-        self.assertEqual(research.await_count, 2)
+        self.assertEqual(research.await_count, 3)
         self.assertTrue(nvidia[0].text.startswith(SUCCESS["text"]))
 
     def test_deploy_update_does_not_skip_later_name_call_handling(self):
@@ -1307,6 +1372,128 @@ class LiveSourcesTests(unittest.TestCase):
             main._recent_live_failure("50:99"),
             "a /grim_updates miss must not be cleared by a name-call in another channel",
         )
+
+    def test_news_ask_and_going_on_with_topic_live_search(self):
+        for text in (NEWS_ASK, GOING_ON_ASK, "news from Jansen Huang"):
+            self.assertTrue(main._needs_live_sources(text, ""), text)
+            self.assertFalse(main._is_theology_or_riddle(
+                main._output_match_text(text)
+            ), text)
+
+    def test_theology_and_political_followups_are_not_live_search(self):
+        for text in (THEOLOGY_RIDDLE, POLITICAL, "lol ok", "how is it going pal"):
+            self.assertFalse(main._needs_live_sources(text, ""), text)
+            self.assertFalse(
+                main._needs_live_sources(text, "", recent_failure=True),
+                text,
+            )
+
+    def test_news_timeout_quiet_retries_then_zero_info_plus_take(self):
+        research = AsyncMock(return_value={"status": "timeout"})
+        (reply,), model = self.converse(
+            [NEWS_ASK],
+            research,
+            model_reply=MISS_WRAP,
+        )
+        self.assertEqual(research.await_count, 2)
+        self.assertEqual(research.await_args_list[0].args[1], NEWS_ASK)
+        self.assertEqual(research.await_args_list[1].args[1], NEWS_ASK)
+        model.assert_awaited()
+        self.assert_zero_info_miss(reply, MISS_WRAP)
+        self.assertNotIn("try again in a bit", reply.text)
+        self.assertNotIn("live search timed out", reply.text.casefold())
+        self.assertNotIn("-# sources:", reply.text)
+
+    def test_news_timeout_quiet_retry_hit_posts_sourced_answer(self):
+        research = AsyncMock(side_effect=[{"status": "timeout"}, SUCCESS])
+        (reply,), model = self.converse([NEWS_ASK], research)
+        self.assertEqual(research.await_count, 2)
+        model.assert_not_awaited()
+        self.assertTrue(reply.text.startswith(SUCCESS["text"]))
+        self.assertIn("-# sources:", reply.text)
+        self.assertTrue(main._reply_has_source_links(reply.text))
+        self.assertEqual(
+            main._source_unfurl_kwargs(reply.text),
+            {"suppress_embeds": True},
+        )
+        self.assertNotIn("try again in a bit", reply.text)
+        self.assertFalse(main._recent_live_failure("50:9"))
+
+    def test_theology_followup_after_news_miss_is_chat_not_timeout_copy(self):
+        research = AsyncMock(return_value={"status": "timeout"})
+        replies, model = self.converse(
+            [NEWS_ASK, THEOLOGY_RIDDLE, POLITICAL],
+            research,
+            model_reply=[MISS_WRAP, "that's the old stone riddle.", "yeah. it's a mess."],
+        )
+        self.assertEqual(research.await_count, 2)
+        self.assert_zero_info_miss(replies[0], MISS_WRAP)
+        self.assertEqual(replies[1].text, "that's the old stone riddle.")
+        self.assertEqual(replies[2].text, "yeah. it's a mess.")
+        for reply in replies[1:]:
+            self.assertNotIn(main.LIVE_SEARCH_ZERO_INFO, reply.text)
+            self.assertNotIn("try again in a bit", reply.text)
+            self.assertNotIn("live search timed out", reply.text.casefold())
+            self.assertNotIn("-# sources:", reply.text)
+        self.assertTrue(
+            main._recent_live_failure("50:9"),
+            "Recall latch stays so a later fact ask does not loop the miss line",
+        )
+
+    def test_opsec_live_search_latch_clears_after_later_success(self):
+        research = AsyncMock(side_effect=[
+            {"status": "timeout"},
+            {"status": "timeout"},
+            SUCCESS,
+        ])
+        replies, _ = self.converse(
+            [NEWS_ASK],
+            research,
+            model_reply=MISS_WRAP,
+        )
+        self.assert_zero_info_miss(replies[0], MISS_WRAP)
+        failed = classify_security_rows(main._health_security_rows(0))
+        self.assertEqual(failed.get("search_failed", (0, 0.0))[0], 1)
+        health = score_health([], failed)
+        self.assertEqual(health.level, 4)
+        self.assertEqual(health.degraded[0].key, "search")
+
+        hit, _ = self.converse(["check again"], research)
+        self.assertIn("-# sources:", hit[0].text)
+        self.assertEqual(research.await_args.args[1], NEWS_ASK)
+        after_hit = classify_security_rows(main._health_security_rows(0))
+        self.assertNotIn("search_failed", after_hit)
+        self.assertEqual(score_health([], after_hit).level, 5)
+
+    def test_opsec_live_search_latch_clears_after_non_search_turn(self):
+        research = AsyncMock(return_value={"status": "timeout"})
+        miss, _ = self.converse([NEWS_ASK], research, model_reply=MISS_WRAP)
+        self.assert_zero_info_miss(miss[0], MISS_WRAP)
+        self.assertEqual(
+            classify_security_rows(main._health_security_rows(0)).get(
+                "search_failed", (0, 0.0)
+            )[0],
+            1,
+        )
+        chat, _ = self.converse(
+            [THEOLOGY_RIDDLE],
+            research,
+            model_reply="that's the old stone riddle.",
+        )
+        self.assertEqual(chat[0].text, "that's the old stone riddle.")
+        research.assert_awaited()
+        self.assertEqual(research.await_count, 2)
+        recovered = classify_security_rows(main._health_security_rows(0))
+        self.assertNotIn("search_failed", recovered)
+        self.assertEqual(score_health([], recovered).level, 5)
+
+    def test_changelog_names_the_current_events_search_fix(self):
+        changelog = Path(__file__).resolve().parents[1].joinpath("CHANGELOG.md").read_text()
+        self.assertIn("45s HTTP / 50s wait", changelog)
+        self.assertIn("retries the same query once quietly", changelog)
+        self.assertIn("cannot hold OPSEC at DEFCON 4", changelog)
+        self.assertIn("`main.py`, `grim_health.py`", changelog)
+        self.assertNotIn("[REDACTED]", changelog.split("Live search for current-events")[1][:900])
 
     def test_research_response_accepts_custom_tool_call_and_markdown_urls(self):
         result = main._extract_grok_research_response({

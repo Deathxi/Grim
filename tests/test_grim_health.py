@@ -174,6 +174,36 @@ class ClassifyTests(unittest.TestCase):
             },
         )
 
+    def test_later_live_search_success_clears_leftover_search_failed(self):
+        rows = [
+            ("ai_web_research", "timeout", 1, 40.0),
+            ("ai_web_research", "success", 1, 50.0),
+        ]
+        self.assertNotIn("search_failed", classify_security_rows(rows))
+        health = score(security=classify_security_rows(rows))
+        self.assertEqual(health.level, 5)
+        self.assertEqual([c.key for c in health.degraded], [])
+
+    def test_later_non_search_recovery_clears_leftover_search_failed(self):
+        rows = [
+            ("ai_web_research", "timeout", 1, 40.0),
+            ("ai_web_research", "recovered", 1, 50.0),
+        ]
+        self.assertNotIn("search_failed", classify_security_rows(rows))
+        health = score(security=classify_security_rows(rows))
+        self.assertEqual(health.level, 5)
+
+    def test_newer_live_search_failure_keeps_defcon_4(self):
+        rows = [
+            ("ai_web_research", "success", 4, 30.0),
+            ("ai_web_research", "timeout", 1, 90.0),
+        ]
+        classified = classify_security_rows(rows)
+        self.assertEqual(classified["search_failed"], (1, 90.0))
+        health = score(security=classified)
+        self.assertEqual(health.level, 4)
+        self.assertEqual(health.degraded[0].key, "search")
+
 
 class EmbedTests(unittest.TestCase):
     def fields(self, embed):
