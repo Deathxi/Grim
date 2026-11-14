@@ -4,6 +4,8 @@ Discord Bot for Seclude & Affiliates
 
 Maintained with [Cursor Agent](https://cursor.com) as Death's development scribe.
 
+- `[REDACTED]`
+
 ## Terms of Service
 
 By inviting or interacting with **Grim** (the Discord bot for Seclude & Affiliates), you agree to these terms. Last updated: November 27, 2025.
