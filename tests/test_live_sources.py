@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import tempfile
 import unittest
 from pathlib import Path
@@ -124,6 +125,7 @@ class LiveSourcesTests(unittest.TestCase):
         main._COMMAND_RATE_LIMITS.clear()
         main._AI_RESEARCH_CACHE.clear()
         main._LIVE_RESEARCH_FAILURES.clear()
+        main._WEATHER_LIVE_FAILURES.clear()
         main._open_conversations.clear()
         main._conversation_ladders.clear()
         main._conversation_media_kind.clear()
@@ -133,6 +135,7 @@ class LiveSourcesTests(unittest.TestCase):
         main._COMMAND_RATE_LIMITS.clear()
         main._AI_RESEARCH_CACHE.clear()
         main._LIVE_RESEARCH_FAILURES.clear()
+        main._WEATHER_LIVE_FAILURES.clear()
         main._open_conversations.clear()
         main._conversation_ladders.clear()
         main._conversation_media_kind.clear()
@@ -1001,6 +1004,121 @@ class LiveSourcesTests(unittest.TestCase):
         )
         self.assertNotIn(TRAFFIC_AWOL, reply.text)
         self.assertIsNone(reply.failure)
+
+    def test_name_calls_are_not_weather_asks_even_with_forecast_in_channel(self):
+        weather_ctx = "Kōshin: whats the weather like tomorrow in the Bay Area?"
+        for text in (
+            "Grim guess who it is",
+            "hello Grim wake up",
+            "Grim, arise.",
+            "Why didn't you respond to @Kōshin",
+            "Grim, answer the question above.",
+        ):
+            with self.subTest(text=text):
+                self.assertFalse(main._is_weather_ask(text), text)
+                self.assertFalse(main._needs_live_sources(text, weather_ctx), text)
+                self.assertFalse(
+                    main._should_use_live_research(text, weather_ctx),
+                    text,
+                )
+                failure = main.mention_failure_text(text, "timeout")
+                self.assertNotIn("weather", (failure or "").casefold(), text)
+                self.assertNotEqual(
+                    failure,
+                    main.format_live_search_miss_reply(
+                        main.LIVE_SEARCH_MISS_WRAP_FALLBACK
+                    ),
+                    text,
+                )
+
+    def test_weather_miss_does_not_frame_later_name_calls(self):
+        main.save_message_to_db(
+            "50", "9", "w1", "Kōshin",
+            "whats the weather like tomorrow in the Bay Area?", 1.0, False,
+        )
+        main.save_message_to_db(
+            "50", "9", "w2", "Kōshin", "in the Bay Area", 2.0, False,
+        )
+        main.save_message_to_db(
+            "50", "9", "w3", "Kōshin", "you there", 3.0, False,
+        )
+        research = AsyncMock(return_value={"status": "timeout"})
+        later = (
+            "Grim guess who it is",
+            "hello Grim wake up",
+            "Grim, arise.",
+            "Why didn't you respond to @Kōshin",
+            "Grim, answer the question above.",
+        )
+        replies, model = self.converse(
+            ["what's the weather tomorrow", *later],
+            research,
+            model_reply=[MISS_WRAP, "already here.", "up.", "here.", "he asked.", "that one."],
+        )
+        self.assertEqual(research.await_count, 1)
+        self.assert_zero_info_miss(replies[0], MISS_WRAP)
+        self.assertFalse(main._recent_live_failure("50:9"))
+        self.assertNotIn("50:9", main._WEATHER_LIVE_FAILURES)
+        for reply, expected in zip(replies[1:], ("already here.", "up.", "here.", "he asked.", "that one.")):
+            with self.subTest(reply=reply.text):
+                self.assertEqual(reply.text, expected)
+                self.assertNotIn(main.LIVE_SEARCH_ZERO_INFO, reply.text or "")
+                self.assertNotIn(TRAFFIC_AWOL, reply.text or "")
+                self.assertNotIn("weather", (reply.text or "").casefold())
+                self.assertIsNone(reply.failure)
+        for call in model.await_args_list[1:]:
+            prompt = call.args[2]
+            self.assertIn(main.WEATHER_LEFTOVER_TURN_NOTE, prompt)
+            self.assertNotIn("casual wrap", prompt)
+
+    def test_weather_fail_memory_cleared_after_non_weather_turn(self):
+        research = AsyncMock(side_effect=[{"status": "timeout"}, SUCCESS])
+        replies, model = self.converse(
+            ["what's the weather tomorrow", "Grim guess who it is"],
+            research,
+            model_reply=[MISS_WRAP, "already here."],
+        )
+        self.assertEqual(research.await_count, 1)
+        self.assertEqual(replies[1].text, "already here.")
+        self.assertNotIn("50:9", main._WEATHER_LIVE_FAILURES)
+        self.assertFalse(main._recent_live_failure("50:9"))
+        nvidia, _ = self.converse(
+            ["what's jensen huang's position?"],
+            research,
+        )
+        self.assertEqual(research.await_count, 2)
+        self.assertTrue(nvidia[0].text.startswith(SUCCESS["text"]))
+
+    def test_deploy_update_does_not_skip_later_name_call_handling(self):
+        source = Path(main.__file__).read_text()
+        on_message = source[
+            source.index("async def on_message") : source.index("async def on_voice_state_update")
+        ]
+        self.assertIn("if message.author.bot:", on_message)
+        bot_return = on_message.index("if message.author.bot:")
+        gate = on_message.index("grim_chat_turn_action(message)")
+        self.assertLess(bot_return, gate)
+        self.assertIn("post_update_notification", source)
+        self.assertNotIn("_remember_live_failure", inspect.getsource(main.post_update_notification))
+
+        main._remember_live_failure("50:99")
+        main._remember_weather_live_failure("50:99")
+        research = AsyncMock(return_value={"status": "timeout"})
+        (reply,), model = self.converse(
+            ["Grim guess who it is"],
+            research,
+            model_reply="already here.",
+        )
+        research.assert_not_awaited()
+        model.assert_awaited()
+        self.assertEqual(reply.text, "already here.")
+        self.assertNotIn(main.LIVE_SEARCH_ZERO_INFO, reply.text)
+        self.assertNotIn("weather", reply.text.casefold())
+        self.assertTrue(main.grim_turn_needs_reply("Grim guess who it is"))
+        self.assertTrue(
+            main._recent_live_failure("50:99"),
+            "a /grim_updates miss must not be cleared by a name-call in another channel",
+        )
 
     def test_research_response_accepts_custom_tool_call_and_markdown_urls(self):
         result = main._extract_grok_research_response({
