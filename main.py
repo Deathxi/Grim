@@ -3360,6 +3360,190 @@ def grim_should_reply_to_message(message) -> bool:
     mentioned = user is not None and user in getattr(message, "mentions", [])
     return grim_turn_needs_reply(content, mentioned=mentioned)
 
+
+# After a name-call, stay with that original poster only in the Discord reply
+# chain (message.reference). Five minutes of OP silence ends it. Speaking to
+# someone else ends it immediately. Side talk does not keep him in.
+CONVERSATION_IDLE_SECONDS = 300
+_open_conversations: dict[tuple[str, str], float] = {}
+_conversation_ladders: dict[tuple[str, str], set[str]] = {}
+
+
+def _conversation_key(message) -> tuple[str, str] | None:
+    channel_id = getattr(getattr(message, "channel", None), "id", None)
+    author_id = getattr(getattr(message, "author", None), "id", None)
+    if channel_id is None or author_id is None:
+        return None
+    return (str(channel_id), str(author_id))
+
+
+def _conversation_now(now: float | None) -> float:
+    return time.time() if now is None else now
+
+
+def _prune_open_conversations(now: float) -> None:
+    expired = [
+        key
+        for key, last in _open_conversations.items()
+        if now - last > CONVERSATION_IDLE_SECONDS
+    ]
+    for key in expired:
+        _open_conversations.pop(key, None)
+        _conversation_ladders.pop(key, None)
+
+
+def grim_end_conversation(message) -> None:
+    key = _conversation_key(message)
+    if key is None:
+        return
+    _open_conversations.pop(key, None)
+    _conversation_ladders.pop(key, None)
+
+
+def grim_conversation_open(message, *, now: float | None = None) -> bool:
+    key = _conversation_key(message)
+    if key is None:
+        return False
+    current = _conversation_now(now)
+    _prune_open_conversations(current)
+    last = _open_conversations.get(key)
+    return last is not None and current - last <= CONVERSATION_IDLE_SECONDS
+
+
+def grim_register_ladder_ids(message, message_ids) -> None:
+    """Attach Discord message IDs to the OP's open reply ladder."""
+    key = _conversation_key(message)
+    if key is None or key not in _open_conversations:
+        return
+    ladder = _conversation_ladders.setdefault(key, set())
+    for mid in message_ids:
+        if mid is not None:
+            ladder.add(str(mid))
+
+
+def _touch_conversation(message, *, now: float | None = None) -> None:
+    key = _conversation_key(message)
+    if key is None:
+        return
+    current = _conversation_now(now)
+    _open_conversations[key] = current
+    mid = getattr(message, "id", None)
+    if mid is not None:
+        _conversation_ladders.setdefault(key, set()).add(str(mid))
+
+
+def _referenced_message_id(message) -> str | None:
+    reference = getattr(message, "reference", None)
+    if not reference:
+        return None
+    resolved = getattr(reference, "resolved", None)
+    rid = getattr(resolved, "id", None) if resolved is not None else None
+    if rid is not None:
+        return str(rid)
+    mid = getattr(reference, "message_id", None)
+    return str(mid) if mid is not None else None
+
+
+def _referenced_author_id(message):
+    reference = getattr(message, "reference", None)
+    resolved = getattr(reference, "resolved", None) if reference else None
+    if resolved is None:
+        return None
+    return getattr(getattr(resolved, "author", None), "id", None)
+
+
+def _other_member_name_tokens(message, *, bot_id, author_id) -> set[str]:
+    guild = getattr(message, "guild", None)
+    members = list(getattr(guild, "members", []) or [])
+    skip_ids = {bot_id, author_id}
+    tokens: set[str] = set()
+    for member in members:
+        uid = getattr(member, "id", None)
+        if uid in skip_ids:
+            continue
+        for raw in (
+            getattr(member, "display_name", None),
+            getattr(member, "global_name", None),
+            getattr(member, "name", None),
+        ):
+            if not raw:
+                continue
+            for part in _output_match_text(raw).split():
+                if (
+                    len(part) >= 3
+                    and part not in _NAME_CALL_GREETINGS
+                    and part not in _CONVERSATION_SMALL_TALK
+                    and not _is_grim_name_token(part)
+                ):
+                    tokens.add(part)
+    return tokens
+
+
+def grim_follow_up_addresses_someone_else(message) -> bool:
+    """True when the OP is speaking to another person, not Grim."""
+    bot_user = getattr(bot, "user", None)
+    bot_id = getattr(bot_user, "id", None) if bot_user is not None else None
+    author_id = getattr(getattr(message, "author", None), "id", None)
+    for user in getattr(message, "mentions", []) or []:
+        uid = getattr(user, "id", None)
+        if uid is not None and uid != bot_id and uid != author_id:
+            return True
+    ref_author = _referenced_author_id(message)
+    if (
+        ref_author is not None
+        and ref_author != bot_id
+        and ref_author != author_id
+    ):
+        return True
+    tokens = _output_match_text(
+        _strip_quote_lines(getattr(message, "content", "") or "")
+    ).split()
+    idx = 0
+    while idx < len(tokens) and tokens[idx] in _NAME_CALL_GREETINGS:
+        idx += 1
+    if idx >= len(tokens):
+        return False
+    names = _other_member_name_tokens(
+        message, bot_id=bot_id, author_id=author_id
+    )
+    return tokens[idx] in names
+
+
+def _follow_up_in_reply_ladder(message) -> bool:
+    key = _conversation_key(message)
+    if key is None:
+        return False
+    ref_id = _referenced_message_id(message)
+    if not ref_id:
+        return False
+    return ref_id in _conversation_ladders.get(key, set())
+
+
+def grim_chat_turn_action(message, *, now: float | None = None) -> bool:
+    """True when Grim should produce a contextual reply for this turn.
+
+    Naming Grim (@ or plain) with an entrance starts a reply-ladder
+    conversation. Later turns from that original poster keep getting replies
+    only in that Discord reply chain, without naming him again. Five minutes
+    of OP silence, or speaking to someone else, ends it.
+    """
+    content = getattr(message, "content", "") or ""
+    if content.lstrip().startswith("!"):
+        return False
+    current = _conversation_now(now)
+    if grim_should_reply_to_message(message):
+        _touch_conversation(message, now=current)
+        return True
+    if not grim_conversation_open(message, now=current):
+        return False
+    if grim_follow_up_addresses_someone_else(message):
+        grim_end_conversation(message)
+        return False
+    if _follow_up_in_reply_ladder(message):
+        _touch_conversation(message, now=current)
+        return True
+    return False
+
 async def generate_haiku():
     client = get_grok_client()
     if not client:
@@ -9889,6 +10073,11 @@ async def _send_mention_reply(message, reply: str) -> None:
                 sent.created_at.timestamp(), is_grim=True
             )
 
+    grim_register_ladder_ids(
+        message,
+        [getattr(sent, "id", None) for sent in sent_messages],
+    )
+
 
 @bot.event
 async def on_message(message):
@@ -9979,7 +10168,7 @@ async def on_message(message):
             await message.channel.send(file=quote_file)
 
     is_prefix_command = message.content.lstrip().startswith("!")
-    if not is_prefix_command and grim_should_reply_to_message(message):
+    if not is_prefix_command and grim_chat_turn_action(message):
         # Reset counter — Grim is already responding, no need to also proactively chime
         _channel_msg_counter[str(message.channel.id)] = 0
         _channel_last_grim_post[str(message.channel.id)] = time.time()
@@ -9991,11 +10180,12 @@ async def on_message(message):
         else:
             failure = mention_failure_text(message.content, result.failure)
             if failure:
-                await message.reply(failure, mention_author=False)
+                sent = await message.reply(failure, mention_author=False)
+                grim_register_ladder_ids(message, [getattr(sent, "id", None)])
             else:
                 print("[Grim] Conversational mention produced no reply")
     elif not is_prefix_command:
-        # No name-call or @mention with an entrance — maybe a periodic chime
+        # No name-call, @mention, or open reply-ladder follow-up — maybe a periodic chime
         await maybe_chime_in(message)
 
     await bot.process_commands(message)
