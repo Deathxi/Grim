@@ -699,6 +699,125 @@ class LiveSourcesTests(unittest.TestCase):
         self.assertNotIn("Live Search has zero info on this", replies[1].text)
         self.assertNotIn("<LIVE_RESEARCH_STATUS>", model.await_args.args[2])
 
+    def test_sourced_reply_keeps_blue_links_and_suppresses_unfurls(self):
+        sourced = main.format_sourced_reply(SUCCESS["text"], SUCCESS["sources"])
+        proof = main.format_capability_proof_reply(SUCCESS["text"], SUCCESS["sources"])
+        self.assertIn(
+            "-# sources: [reuters.com](<https://www.reuters.com/tech/a>)"
+            " · [x.com](<https://x.com/someone/status/1>)",
+            sourced,
+        )
+        self.assertIn("https://www.reuters.com/tech/a", sourced)
+        self.assertIn("https://x.com/someone/status/1", sourced)
+        self.assertTrue(main._reply_has_source_links(sourced))
+        self.assertTrue(main._reply_has_source_links(proof))
+        self.assertEqual(
+            main._source_unfurl_kwargs(sourced),
+            {"suppress_embeds": True},
+        )
+        self.assertEqual(
+            main._source_unfurl_kwargs(proof),
+            {"suppress_embeds": True},
+        )
+
+    def test_unsourced_replies_do_not_suppress_embeds(self):
+        for text in (
+            "yeah, holding steady.",
+            main.format_live_search_miss_reply(MISS_WRAP),
+            main.LIVE_SOURCE_CAPABILITY_LINES["empty"],
+            main.LIVE_SOURCE_FAILURE_LINES["timeout"],
+            "saw this https://example.com/post and it's wild",
+            main.format_sourced_reply("no citations this time.", []),
+        ):
+            self.assertFalse(main._reply_has_source_links(text), text)
+            self.assertEqual(main._source_unfurl_kwargs(text), {}, text)
+
+    def test_mention_send_suppresses_unfurls_only_on_sourced_replies(self):
+        sourced = main.format_sourced_reply(SUCCESS["text"], SUCCESS["sources"])
+        casual = "yeah, holding steady."
+        long_body = ("as of nov 12, still ceo. " * 80) + "done."
+        long_sourced = main.format_sourced_reply(long_body, SUCCESS["sources"])
+        self.assertGreater(len(long_sourced), main.DISCORD_CONVERSATION_CHUNK_LIMIT)
+
+        def send(text):
+            sent = SimpleNamespace(
+                id=1,
+                created_at=SimpleNamespace(timestamp=lambda: 0.0),
+            )
+            reply_fn = AsyncMock(return_value=sent)
+            channel_send = AsyncMock(return_value=sent)
+            message = SimpleNamespace(
+                content="<@999> what's jensen huang's position?",
+                channel=SimpleNamespace(id=9, send=channel_send),
+                guild=SimpleNamespace(id=50),
+                reply=reply_fn,
+            )
+            with patch.object(
+                main, "_maybe_build_gif_reaction", AsyncMock(return_value=None)
+            ), patch.object(main, "save_message_to_db"):
+                asyncio.run(main._send_mention_reply(message, text))
+            return reply_fn, channel_send
+
+        reply_fn, channel_send = send(sourced)
+        self.assertEqual(reply_fn.await_args.args, (sourced,))
+        self.assertEqual(reply_fn.await_args.kwargs["mention_author"], False)
+        self.assertTrue(reply_fn.await_args.kwargs["suppress_embeds"])
+        channel_send.assert_not_awaited()
+
+        reply_fn, channel_send = send(casual)
+        self.assertEqual(reply_fn.await_args.args, (casual,))
+        self.assertEqual(reply_fn.await_args.kwargs["mention_author"], False)
+        self.assertNotIn("suppress_embeds", reply_fn.await_args.kwargs)
+        channel_send.assert_not_awaited()
+
+        reply_fn, channel_send = send(long_sourced)
+        self.assertTrue(reply_fn.await_args.kwargs["suppress_embeds"])
+        self.assertTrue(channel_send.await_args.kwargs["suppress_embeds"])
+        self.assertIn("-# sources:", channel_send.await_args.args[0])
+
+        long_casual = ("yeah, holding steady. " * 100) + "done."
+        self.assertGreater(len(long_casual), main.DISCORD_CONVERSATION_CHUNK_LIMIT)
+        reply_fn, channel_send = send(long_casual)
+        self.assertNotIn("suppress_embeds", reply_fn.await_args.kwargs)
+        self.assertNotIn("suppress_embeds", channel_send.await_args.kwargs)
+
+    def test_gif_mention_send_still_suppresses_source_unfurls(self):
+        sourced = main.format_sourced_reply(SUCCESS["text"], SUCCESS["sources"])
+        gif_embed = object()
+        sent = SimpleNamespace(
+            id=1,
+            created_at=SimpleNamespace(timestamp=lambda: 0.0),
+        )
+        reply_fn = AsyncMock(return_value=sent)
+        message = SimpleNamespace(
+            content="<@999> what's jensen huang's position?",
+            channel=SimpleNamespace(id=9, send=AsyncMock(return_value=sent)),
+            guild=SimpleNamespace(id=50),
+            reply=reply_fn,
+        )
+        with patch.object(
+            main,
+            "_maybe_build_gif_reaction",
+            AsyncMock(return_value=(gif_embed, "with_text")),
+        ), patch.object(main, "save_message_to_db"):
+            asyncio.run(main._send_mention_reply(message, sourced))
+        self.assertIs(reply_fn.await_args.kwargs["embed"], gif_embed)
+        self.assertEqual(reply_fn.await_args.kwargs["content"], sourced)
+        self.assertTrue(reply_fn.await_args.kwargs["suppress_embeds"])
+        self.assertEqual(reply_fn.await_args.kwargs["mention_author"], False)
+
+        casual = "yeah, holding steady."
+        reply_fn = AsyncMock(return_value=sent)
+        message.reply = reply_fn
+        with patch.object(
+            main,
+            "_maybe_build_gif_reaction",
+            AsyncMock(return_value=(gif_embed, "with_text")),
+        ), patch.object(main, "save_message_to_db"):
+            asyncio.run(main._send_mention_reply(message, casual))
+        self.assertEqual(reply_fn.await_args.kwargs["content"], casual)
+        self.assertNotIn("suppress_embeds", reply_fn.await_args.kwargs)
+
     def test_research_response_accepts_custom_tool_call_and_markdown_urls(self):
         result = main._extract_grok_research_response({
             "output": [

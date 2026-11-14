@@ -2605,7 +2605,7 @@ def _source_label(source: dict) -> str:
     return host or "source"
 
 def format_sourced_reply(text: str, sources: list[dict]) -> str:
-    """Sourced answer plus a short source line. Links never unfurl."""
+    """Sourced answer plus a short source line. Links stay clickable and blue."""
     body = text.strip()
     labels = []
     seen_hosts = set()
@@ -2618,6 +2618,16 @@ def format_sourced_reply(text: str, sources: list[dict]) -> str:
     if not labels:
         return body
     return f"{body}\n-# sources: " + " · ".join(labels)
+
+def _reply_has_source_links(text: str | None) -> bool:
+    """Live-search answers append a small-print source line with markdown URLs."""
+    return "-# sources:" in str(text or "")
+
+def _source_unfurl_kwargs(text: str | None) -> dict:
+    """Suppress Discord's automatic URL embeds on sourced replies only."""
+    if _reply_has_source_links(text):
+        return {"suppress_embeds": True}
+    return {}
 
 def _research_cache_key(cache_scope: str, prompt: str) -> str:
     material = f"{cache_scope}\n{prompt.lower()}".encode("utf-8")
@@ -9477,6 +9487,79 @@ async def on_raw_bulk_message_delete(payload: discord.RawBulkMessageDeleteEvent)
         print(f"[DeleteReport] Handler failed ({type(error).__name__}).")
 
 
+async def _send_mention_reply(message, reply: str) -> None:
+    """Post an @Grim mention reply. Sourced live-search messages suppress URL unfurls."""
+    reply_chunks = _split_discord_content(reply)
+    unfurl = _source_unfurl_kwargs(reply)
+    try:
+        gif_reaction = await asyncio.wait_for(
+            _maybe_build_gif_reaction(
+                message.content, reply, str(message.channel.id)
+            ),
+            timeout=10,
+        )
+    except Exception as e:
+        print(f"[GIF] Enrichment skipped; sending text only: {e}")
+        gif_reaction = None
+    sent_messages = []
+    visible_chunks = reply_chunks
+    if gif_reaction:
+        gif_embed, gif_mode = gif_reaction
+        first_content = (
+            reply_chunks[0]
+            if gif_mode == "with_text" or len(reply_chunks) > 1
+            else None
+        )
+        try:
+            sent_messages.append(await _send_discord_with_retry(
+                message.reply,
+                content=first_content,
+                embed=gif_embed,
+                mention_author=False,
+                **unfurl,
+            ))
+            if first_content is None:
+                visible_chunks = []
+        except Exception as e:
+            print(f"[GIF] Embed send failed; sending text only: {e}")
+            sent_messages.append(
+                await _send_discord_with_retry(
+                    message.reply, reply_chunks[0], mention_author=False, **unfurl
+                )
+            )
+    else:
+        sent_messages.append(
+            await _send_discord_with_retry(
+                message.reply, reply_chunks[0], mention_author=False, **unfurl
+            )
+        )
+
+    if message.guild:
+        first_visible = visible_chunks[0] if visible_chunks else "[reaction GIF]"
+        first_sent = sent_messages[0]
+        save_message_to_db(
+            str(message.guild.id), str(message.channel.id),
+            str(first_sent.id), BOT_NAME, first_visible,
+            first_sent.created_at.timestamp(), is_grim=True
+        )
+
+    for chunk in reply_chunks[1:]:
+        try:
+            sent = await _send_discord_with_retry(
+                message.channel.send, chunk, **unfurl
+            )
+        except Exception as e:
+            print(f"[Grim] Continuation send failed after retry: {e}")
+            break
+        sent_messages.append(sent)
+        if message.guild:
+            save_message_to_db(
+                str(message.guild.id), str(message.channel.id),
+                str(sent.id), BOT_NAME, chunk,
+                sent.created_at.timestamp(), is_grim=True
+            )
+
+
 @bot.event
 async def on_message(message):
     remember_guild_message(message)
@@ -9574,72 +9657,7 @@ async def on_message(message):
             result = await audited_contextual_reply(message)
         reply = await audit_outgoing_reply(message, result.text)
         if reply:
-            reply_chunks = _split_discord_content(reply)
-            try:
-                gif_reaction = await asyncio.wait_for(
-                    _maybe_build_gif_reaction(
-                        message.content, reply, str(message.channel.id)
-                    ),
-                    timeout=10,
-                )
-            except Exception as e:
-                print(f"[GIF] Enrichment skipped; sending text only: {e}")
-                gif_reaction = None
-            sent_messages = []
-            visible_chunks = reply_chunks
-            if gif_reaction:
-                gif_embed, gif_mode = gif_reaction
-                first_content = (
-                    reply_chunks[0]
-                    if gif_mode == "with_text" or len(reply_chunks) > 1
-                    else None
-                )
-                try:
-                    sent_messages.append(await _send_discord_with_retry(
-                        message.reply,
-                        content=first_content,
-                        embed=gif_embed,
-                        mention_author=False,
-                    ))
-                    if first_content is None:
-                        visible_chunks = []
-                except Exception as e:
-                    print(f"[GIF] Embed send failed; sending text only: {e}")
-                    sent_messages.append(
-                        await _send_discord_with_retry(
-                            message.reply, reply_chunks[0], mention_author=False
-                        )
-                    )
-            else:
-                sent_messages.append(
-                    await _send_discord_with_retry(
-                        message.reply, reply_chunks[0], mention_author=False
-                    )
-                )
-
-            # Persist Grim's reply so it's part of future context
-            if message.guild:
-                first_visible = visible_chunks[0] if visible_chunks else "[reaction GIF]"
-                first_sent = sent_messages[0]
-                save_message_to_db(
-                    str(message.guild.id), str(message.channel.id),
-                    str(first_sent.id), BOT_NAME, first_visible,
-                    first_sent.created_at.timestamp(), is_grim=True
-                )
-
-            for chunk in reply_chunks[1:]:
-                try:
-                    sent = await _send_discord_with_retry(message.channel.send, chunk)
-                except Exception as e:
-                    print(f"[Grim] Continuation send failed after retry: {e}")
-                    break
-                sent_messages.append(sent)
-                if message.guild:
-                    save_message_to_db(
-                        str(message.guild.id), str(message.channel.id),
-                        str(sent.id), BOT_NAME, chunk,
-                        sent.created_at.timestamp(), is_grim=True
-                    )
+            await _send_mention_reply(message, reply)
         else:
             failure = mention_failure_text(message.content, result.failure)
             if failure:
