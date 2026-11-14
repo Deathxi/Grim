@@ -160,13 +160,65 @@ class ChatMediaTests(unittest.TestCase):
         self.assertEqual(pasta["kind"], "image")
         self.assertIsNone(main.parse_chat_media_request(ASCII_ASK))
         self.assertIsNone(main.parse_chat_media_request("how we doing boss man"))
+        of_gif = main.parse_chat_media_request("gif of cats")
+        self.assertEqual(of_gif["kind"], "gif")
+        self.assertIn("cats", of_gif["topic"])
+        of_pic = main.parse_chat_media_request("pic of miku")
+        self.assertEqual(of_pic["kind"], "image")
+        meme = main.parse_chat_media_request("meme of stunned")
+        self.assertEqual(meme["kind"], "image")
 
-    def test_follow_up_subject_uses_remembered_kind(self):
-        message = mention("miku")
-        main._conversation_media_kind[("9", "10")] = "image"
-        parsed = main.parse_chat_media_request("miku", message)
-        self.assertEqual(parsed["kind"], "image")
-        self.assertEqual(parsed["topic"], "miku")
+    def test_reactions_and_followups_are_not_media_asks(self):
+        message = mention("LMAO wtf")
+        main._conversation_media_kind[("9", "10")] = "gif"
+        for line in (
+            "LMAO wtf",
+            "huh",
+            "lmao",
+            "damn",
+            "wtf",
+            "yeah",
+            "ok",
+            "miku",
+            "that's wild",
+            "wait what",
+        ):
+            self.assertIsNone(
+                main.parse_chat_media_request(line, message),
+                msg=line,
+            )
+
+    def test_reaction_followups_do_not_attach_media(self):
+        main._conversation_media_kind[("9", "10")] = "gif"
+        for line in ("LMAO wtf", "huh"):
+            result, model, search = self.reply(line)
+            search.assert_not_awaited()
+            model.assert_awaited()
+            self.assertIsNone(result.media)
+            self.assertIsNone(result.media_url)
+            self.assertNotEqual(result.text, main.CHAT_MEDIA_HERE["gif"])
+
+    def test_explicit_asks_still_send_media(self):
+        gif_result, gif_model, gif_search = self.reply(
+            "show me a gif of cats",
+            downloaded=(b"GIF89a-clean", "grim.gif"),
+        )
+        gif_model.assert_not_awaited()
+        gif_search.assert_awaited()
+        self.assertEqual(gif_result.media, b"GIF89a-clean")
+        self.assertEqual(gif_result.media_filename, "grim.gif")
+        pic_result, pic_model, pic_search = self.reply(
+            "send a picture of miku",
+            downloaded=(b"PNG-miku", "grim.png"),
+            candidates=[{
+                "url": "https://media.example/miku.png",
+                "identities": ["test:miku"],
+            }],
+        )
+        pic_model.assert_not_awaited()
+        pic_search.assert_awaited()
+        self.assertEqual(pic_result.media, b"PNG-miku")
+        self.assertEqual(pic_result.media_filename, "grim.png")
 
     def test_gif_ask_sends_a_mocked_gif(self):
         payload = b"GIF89a-clean"
@@ -380,6 +432,14 @@ class ChatMediaTests(unittest.TestCase):
         self.assertIn("never substitutes ASCII", changelog)
         self.assertIn("tells him not to reply", changelog)
         self.assertNotIn("[REDACTED]", changelog.split("When someone asks Grim for a GIF")[1][:400])
+
+    def test_changelog_names_the_explicit_ask_gate(self):
+        changelog = Path(__file__).resolve().parents[1].joinpath("CHANGELOG.md").read_text()
+        self.assertIn("only fires on an explicit ask", changelog)
+        self.assertIn("`wtf`", changelog)
+        self.assertIn("`huh`", changelog)
+        self.assertIn("not a file", changelog)
+        self.assertNotIn("[REDACTED]", changelog.split("Chat GIF and picture sending")[1][:400])
 
 
 if __name__ == "__main__":
