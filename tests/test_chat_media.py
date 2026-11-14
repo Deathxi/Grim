@@ -1,0 +1,386 @@
+import asyncio
+import tempfile
+import unittest
+from io import BytesIO
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, PropertyMock, patch
+
+import discord
+
+import main
+from tests.test_image_clean import dirty_gif, dirty_png, metadata_left
+
+
+GIF_ASK = (
+    "Grim show me a gif of the current events going on in the world today "
+    "in this date."
+)
+PICTURE_ASK = "grim can you send pictures?"
+MIKU_PICTURE = "send a picture of miku"
+COPYPASTA_ASK = "send that copypasta as an image"
+ASCII_ASK = "send ascii art of miku"
+REFUSAL = "no way to show gifs here"
+TEXT_ONLY = "no, just text"
+
+
+class FakeChannel:
+    id = 9
+    name = "general"
+
+    def history(self, limit, before=None):
+        async def _empty():
+            if False:
+                yield None
+
+        return _empty()
+
+
+def mention(text, channel=None, author_id=10, name="Kōshin"):
+    return SimpleNamespace(
+        guild=SimpleNamespace(id=50, name="Seclude", member_count=3),
+        channel=channel or FakeChannel(),
+        author=SimpleNamespace(id=author_id, display_name=name),
+        content=f"<@999> {text}",
+        attachments=[],
+        embeds=[],
+        reference=None,
+        id=1,
+    )
+
+
+class FakeMediaResponse:
+    def __init__(self, status, data=b"", json_data=None):
+        self.status = status
+        self._data = data
+        self._json = json_data or {}
+        self.headers = {}
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def read(self):
+        return self._data
+
+    async def json(self):
+        return self._json
+
+
+class FakeGetSession:
+    def __init__(self, response):
+        self._response = response
+        self.urls = []
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    def get(self, url, headers=None, timeout=None, params=None):
+        self.urls.append(url)
+        return self._response
+
+
+class ChatMediaTests(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.original_db = main.CHAT_DB_FILE
+        main.CHAT_DB_FILE = str(Path(self.temp_dir.name) / "chat_history.db")
+        main.init_chat_db()
+        main._COMMAND_RATE_LIMITS.clear()
+        main._AI_RESEARCH_CACHE.clear()
+        main._LIVE_RESEARCH_FAILURES.clear()
+        main._open_conversations.clear()
+        main._conversation_ladders.clear()
+        main._conversation_media_kind.clear()
+
+    def tearDown(self):
+        main.CHAT_DB_FILE = self.original_db
+        main._COMMAND_RATE_LIMITS.clear()
+        main._AI_RESEARCH_CACHE.clear()
+        main._LIVE_RESEARCH_FAILURES.clear()
+        main._open_conversations.clear()
+        main._conversation_ladders.clear()
+        main._conversation_media_kind.clear()
+        self.temp_dir.cleanup()
+
+    def reply(self, text, research=None, candidates=None, downloaded=None):
+        model = AsyncMock(return_value="should not speak")
+        search = AsyncMock(
+            return_value=candidates
+            if candidates is not None
+            else [{
+                "url": "https://media.example/found.gif",
+                "identities": ["test:1"],
+            }]
+        )
+        if downloaded is None:
+            downloaded = (b"GIF89a-clean", "grim.gif")
+        download = AsyncMock(return_value=downloaded)
+        if research is None:
+            research = AsyncMock(return_value={"status": "empty"})
+
+        async def run():
+            with patch.dict(main.os.environ, {"XAI_API_KEY": "test-key"}), \
+                    patch.object(
+                        main.discord.Client,
+                        "user",
+                        new_callable=PropertyMock,
+                        return_value=SimpleNamespace(id=999),
+                    ), \
+                    patch.object(
+                        main.bot,
+                        "get_channel",
+                        return_value=SimpleNamespace(name="general"),
+                    ), \
+                    patch.object(main, "grok_research_query", research), \
+                    patch.object(main, "_complete_contextual_reply", model), \
+                    patch.object(main, "_search_chat_media_candidates", search), \
+                    patch.object(main, "_download_cleaned_chat_media", download):
+                return await main.generate_contextual_reply(mention(text))
+
+        result = asyncio.run(run())
+        return result, model, search
+
+    def test_parse_gif_current_events_and_pictures(self):
+        gif = main.parse_chat_media_request(GIF_ASK)
+        self.assertEqual(gif["kind"], "gif")
+        self.assertTrue(gif["current_events"])
+        pictures = main.parse_chat_media_request(PICTURE_ASK)
+        self.assertEqual(pictures["kind"], "image")
+        self.assertTrue(pictures["capability"])
+        miku = main.parse_chat_media_request(MIKU_PICTURE)
+        self.assertEqual(miku["kind"], "image")
+        self.assertIn("miku", miku["topic"])
+        pasta = main.parse_chat_media_request(COPYPASTA_ASK)
+        self.assertEqual(pasta["kind"], "image")
+        self.assertIsNone(main.parse_chat_media_request(ASCII_ASK))
+        self.assertIsNone(main.parse_chat_media_request("how we doing boss man"))
+
+    def test_follow_up_subject_uses_remembered_kind(self):
+        message = mention("miku")
+        main._conversation_media_kind[("9", "10")] = "image"
+        parsed = main.parse_chat_media_request("miku", message)
+        self.assertEqual(parsed["kind"], "image")
+        self.assertEqual(parsed["topic"], "miku")
+
+    def test_gif_ask_sends_a_mocked_gif(self):
+        payload = b"GIF89a-clean"
+        result, model, search = self.reply(
+            "show me a gif of cats",
+            downloaded=(payload, "grim.gif"),
+        )
+        model.assert_not_awaited()
+        search.assert_awaited()
+        self.assertEqual(result.media, payload)
+        self.assertEqual(result.media_filename, "grim.gif")
+        self.assertNotIn(REFUSAL, (result.text or "").casefold())
+        self.assertFalse(result.media_filename.startswith("koshin"))
+
+    def test_current_events_gif_does_not_use_the_old_refusal(self):
+        research = AsyncMock(return_value={
+            "status": "success",
+            "used_search": True,
+            "text": "as of nov 14, a ceasefire deal is the lead story.",
+            "sources": [{"title": "Reuters", "url": "https://www.reuters.com/world/a"}],
+        })
+        result, model, search = self.reply(GIF_ASK, research=research)
+        model.assert_not_awaited()
+        self.assertIsNotNone(result.media)
+        folded = (result.text or "").casefold()
+        self.assertNotIn(REFUSAL, folded)
+        self.assertNotIn("just text", folded)
+        self.assertNotIn("ascii", folded)
+        search.assert_awaited()
+        query = search.await_args.args[2]
+        self.assertTrue(query)
+        self.assertNotEqual(query, "current events going on in the world today")
+
+    def test_current_events_empty_search_uses_miss_line_not_refusal(self):
+        result, model, search = self.reply(
+            GIF_ASK,
+            research=AsyncMock(return_value={"status": "empty"}),
+            candidates=[],
+        )
+        model.assert_not_awaited()
+        search.assert_not_awaited()
+        self.assertIsNone(result.media)
+        self.assertIsNone(result.media_url)
+        first, sep, rest = (result.text or "").partition("\n")
+        self.assertEqual(first, main.LIVE_SEARCH_ZERO_INFO)
+        self.assertEqual(sep, "\n")
+        folded = (result.text or "").casefold()
+        self.assertNotIn(REFUSAL, folded)
+        self.assertNotIn("just text", folded)
+        self.assertNotIn("no way to show", folded)
+
+    def test_empty_provider_does_not_claim_gifs_cannot_be_shown(self):
+        result, model, search = self.reply(
+            "show me a gif of cats",
+            candidates=[],
+            downloaded=None,
+        )
+        self.assertIsNone(result.media)
+        folded = (result.text or "").casefold()
+        self.assertEqual(result.text, main.CHAT_MEDIA_MISS["gif"])
+        self.assertNotIn(REFUSAL, folded)
+        self.assertNotIn("no way to show gifs", folded)
+        self.assertNotIn("just text", folded)
+        model.assert_not_awaited()
+        search.assert_awaited()
+
+    def test_picture_capability_sends_an_image_not_text_only(self):
+        payload = b"PNG-clean"
+        result, model, search = self.reply(
+            PICTURE_ASK,
+            downloaded=(payload, "grim.png"),
+            candidates=[{
+                "url": "https://media.example/found.png",
+                "identities": ["test:img"],
+            }],
+        )
+        model.assert_not_awaited()
+        self.assertEqual(result.media, payload)
+        self.assertEqual(result.media_filename, "grim.png")
+        folded = (result.text or "").casefold()
+        self.assertNotIn(TEXT_ONLY, folded)
+        self.assertNotIn("just text", folded)
+        self.assertNotIn("text art", folded)
+        self.assertEqual(result.text, "yeah.")
+
+    def test_miku_picture_is_a_file_not_ascii(self):
+        payload = b"PNG-miku"
+        result, model, _search = self.reply(
+            MIKU_PICTURE,
+            downloaded=(payload, "grim.png"),
+            candidates=[{
+                "url": "https://media.example/miku.png",
+                "identities": ["test:miku"],
+            }],
+        )
+        model.assert_not_awaited()
+        self.assertEqual(result.media, payload)
+        self.assertNotIn("ascii", (result.text or "").casefold())
+        self.assertNotIn("@", result.text or "")
+        self.assertTrue((result.media_filename or "").endswith(".png"))
+
+    def test_copypasta_image_ask_is_not_ascii(self):
+        parsed = main.parse_chat_media_request(COPYPASTA_ASK)
+        self.assertEqual(parsed["kind"], "image")
+        result, model, _search = self.reply(
+            COPYPASTA_ASK,
+            downloaded=(b"PNG-meme", "grim.png"),
+            candidates=[{
+                "url": "https://media.example/meme.png",
+                "identities": ["test:meme"],
+            }],
+        )
+        model.assert_not_awaited()
+        self.assertEqual(result.media, b"PNG-meme")
+        self.assertNotIn("ascii", (result.text or "").casefold())
+
+    def test_download_strips_metadata_and_uses_neutral_filename(self):
+        dirty = dirty_gif()
+        session = FakeGetSession(FakeMediaResponse(200, dirty))
+
+        async def run():
+            return await main._download_cleaned_chat_media(
+                session, "https://media.example/secret.gif"
+            )
+
+        cleaned, filename = asyncio.run(run())
+        self.assertEqual(filename, "grim.gif")
+        self.assertFalse(metadata_left(cleaned))
+        self.assertNotIn(b"secret-comment", cleaned)
+        self.assertNotIn("koshin", filename.casefold())
+
+    def test_png_download_strips_and_stays_anonymous(self):
+        dirty = dirty_png()
+        session = FakeGetSession(FakeMediaResponse(200, dirty))
+        cleaned, filename = asyncio.run(
+            main._download_cleaned_chat_media(session, "https://media.example/x.png")
+        )
+        self.assertEqual(filename, "grim.png")
+        self.assertFalse(metadata_left(cleaned))
+
+    def test_send_attaches_the_gif_without_naming_the_invoker(self):
+        payload = dirty_gif()
+        cleaned, _ext = main.clean_image(payload)
+        sent = SimpleNamespace(
+            id=1,
+            created_at=SimpleNamespace(timestamp=lambda: 0.0),
+        )
+        reply_fn = AsyncMock(return_value=sent)
+        message = SimpleNamespace(
+            content="<@999> show me a gif of cats",
+            channel=SimpleNamespace(id=9, send=AsyncMock(return_value=sent)),
+            guild=SimpleNamespace(id=50),
+            author=SimpleNamespace(id=10, display_name="Kōshin"),
+            reply=reply_fn,
+        )
+        with patch.object(main, "save_message_to_db"):
+            asyncio.run(main._send_mention_reply(
+                message,
+                "here.",
+                media=cleaned,
+                media_filename="grim.gif",
+            ))
+        kwargs = reply_fn.await_args.kwargs
+        attached = kwargs["file"]
+        self.assertIsInstance(attached, discord.File)
+        self.assertEqual(attached.filename, "grim.gif")
+        self.assertEqual(kwargs["content"], "here.")
+        self.assertEqual(kwargs["mention_author"], False)
+        mentions = kwargs["allowed_mentions"]
+        self.assertFalse(mentions.everyone)
+        self.assertFalse(mentions.users)
+        self.assertNotIn("koshin", str(kwargs).casefold())
+        self.assertNotIn("Kōshin", attached.filename)
+
+    def test_fail_send_path_never_uses_the_old_refusal_string(self):
+        result, _model, _search = self.reply(
+            "show me a gif of cats",
+            candidates=[],
+            downloaded=None,
+        )
+        sent = SimpleNamespace(
+            id=1,
+            created_at=SimpleNamespace(timestamp=lambda: 0.0),
+        )
+        reply_fn = AsyncMock(return_value=sent)
+        message = SimpleNamespace(
+            content="<@999> show me a gif of cats",
+            channel=SimpleNamespace(id=9, send=AsyncMock(return_value=sent)),
+            guild=SimpleNamespace(id=50),
+            reply=reply_fn,
+        )
+        with patch.object(main, "_maybe_build_gif_reaction", AsyncMock(return_value=None)), \
+                patch.object(main, "save_message_to_db"):
+            asyncio.run(main._send_mention_reply(message, result.text))
+        posted = reply_fn.await_args.args[0]
+        folded = posted.casefold()
+        self.assertNotIn(REFUSAL, folded)
+        self.assertNotIn("no way to show gifs", folded)
+        self.assertEqual(posted, main.CHAT_MEDIA_MISS["gif"])
+
+    def test_prompt_forbids_text_only_and_ascii_standins(self):
+        source = Path(main.__file__).read_text()
+        self.assertIn("Never claim Discord cannot show GIFs or pictures", source)
+        self.assertIn("never say you are text-only", source)
+        self.assertIn("Never substitute ASCII", source)
+        self.assertNotIn(REFUSAL, source)
+
+    def test_changelog_names_the_media_and_hold_fixes(self):
+        changelog = Path(__file__).resolve().parents[1].joinpath("CHANGELOG.md").read_text()
+        self.assertIn("GIF, picture, meme image, or copypasta image", changelog)
+        self.assertIn("never substitutes ASCII", changelog)
+        self.assertIn("tells him not to reply", changelog)
+        self.assertNotIn("[REDACTED]", changelog.split("When someone asks Grim for a GIF")[1][:400])
+
+
+if __name__ == "__main__":
+    unittest.main()

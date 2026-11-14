@@ -7,6 +7,7 @@ All notable changes to this project are documented here, organized by month.
 ## November 2026
 
 ### Added
+- When someone asks Grim for a GIF, picture, meme image, or copypasta image in chat, he fetches a real file and posts it (metadata stripped on reupload, or a Discord-unfurlable image URL). Current-events asks go through live search for a real topic first. He never claims Discord is text-only, never says GIFs cannot be shown, and never substitutes ASCII unless they asked for text art.
 - After a name-call (`Grim` with or without @), Grim stays with that original poster in the same channel. Follow-ups get a reply even without naming him again and without a Discord reply-arrow; Discord reply-ladder messages still continue, and weather or fact questions still live-search. The conversation ends after 5 minutes of silence from the original poster, or as soon as they mention or address someone else. Other people's side talk does not keep him in.
 - Grim replies when someone names him with a real entrance or need: a question, a ping for his take, or a direct address. An @mention is not required. Empty pings and drive-by name-drops get no reply.
 - `/panopticon` — Founder-only toggle for the private deletion-report watch (including bulk delete and `/clear`). Defaults on. Run it to turn the watch off or back on. Only the Discord user ID in `FOUNDER_DISCORD_ID` / `GRIM_FOUNDER_ID` (VPS `.env`, never git) can use it. The switch persists under `~/.grim_data` so it survives restarts. When off, Grim does not DM those reports; `/clear` logs in the `/grim_updates` channel are unchanged.
@@ -20,6 +21,7 @@ All notable changes to this project are documented here, organized by month.
 - `/trivia subject` — a private, dismissible ten-question quiz. Grim writes the round through the existing xAI path, shows one four-choice question at a time, and scores the invoking member out of 10. A bad subject or a failed generation stops the round instead of posting a partial quiz.
 
 ### Fixed
+- Same-channel hold ends, and Grim stays quiet, when the original poster says they are talking or replying to someone else, or tells him not to reply.
 - After a name-call, in-channel follow-ups from the original poster keep the conversation even when they are not Discord replies. A lone "Grim" ping still counts as "you there" while the conversation is open.
 - `/grim_updates` deploy cards keep normal patch notes and real filenames on ordinary deploys. Filename hiding applies only when that deploy is explicitly labeled CLASSIFIED.
 - Live-search replies still show blue source links, but Discord no longer unfurls those URLs into a stack of rich embeds under the message. Casual Grim messages still unfurl as usual.

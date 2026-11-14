@@ -3368,6 +3368,7 @@ def grim_should_reply_to_message(message) -> bool:
 CONVERSATION_IDLE_SECONDS = 300
 _open_conversations: dict[tuple[str, str], float] = {}
 _conversation_ladders: dict[tuple[str, str], set[str]] = {}
+_conversation_media_kind: dict[tuple[str, str], str] = {}
 
 
 def _conversation_key(message) -> tuple[str, str] | None:
@@ -3391,6 +3392,7 @@ def _prune_open_conversations(now: float) -> None:
     for key in expired:
         _open_conversations.pop(key, None)
         _conversation_ladders.pop(key, None)
+        _conversation_media_kind.pop(key, None)
 
 
 def grim_end_conversation(message) -> None:
@@ -3399,6 +3401,7 @@ def grim_end_conversation(message) -> None:
         return
     _open_conversations.pop(key, None)
     _conversation_ladders.pop(key, None)
+    _conversation_media_kind.pop(key, None)
 
 
 def grim_conversation_open(message, *, now: float | None = None) -> bool:
@@ -3510,6 +3513,73 @@ def grim_follow_up_addresses_someone_else(message) -> bool:
     return tokens[idx] in names
 
 
+_STOP_REPLY_PHRASES = (
+    "no need to reply",
+    "no need to respond",
+    "don t reply",
+    "do not reply",
+    "don t respond",
+    "do not respond",
+    "stop replying",
+    "stop responding",
+    "you don t need to reply",
+    "you do not need to reply",
+    "you don t have to reply",
+    "you do not have to reply",
+    "wasn t talking to you",
+    "was not talking to you",
+    "not talking to you",
+    "this isn t for you",
+    "this is not for you",
+    "that isn t for you",
+    "that is not for you",
+    "don t answer",
+    "do not answer",
+    "no need to answer",
+)
+_TALKING_TO_SOMEONE_ELSE = re.compile(
+    r"(?:i|we)(?: was| am| were| m)?(?: just)? "
+    r"(?:replying|talking|speaking|responding) to "
+    r"(?!you\b|u\b|ya\b|me\b|us\b|grim\b)\w+"
+)
+_THIS_IS_FOR_SOMEONE_ELSE = re.compile(
+    r"(?:this|that) (?:was|is) for (?!you\b|u\b|ya\b|me\b|us\b|grim\b)\w+"
+)
+
+
+def _conversation_folded_text(message) -> str:
+    return _output_match_text(
+        _conversation_text(getattr(message, "content", "") or "")
+    )
+
+
+def grim_asks_not_to_reply(message) -> bool:
+    """True when the OP tells Grim to stay quiet / not reply."""
+    folded = _conversation_folded_text(message)
+    return any(
+        re.search(rf"(?<!\w){re.escape(phrase)}(?!\w)", folded)
+        for phrase in _STOP_REPLY_PHRASES
+    )
+
+
+def grim_says_talking_to_someone_else(message) -> bool:
+    """True when the OP says this turn was for another person."""
+    folded = _conversation_folded_text(message)
+    return bool(
+        _TALKING_TO_SOMEONE_ELSE.search(folded)
+        or _THIS_IS_FOR_SOMEONE_ELSE.search(folded)
+    )
+
+
+def grim_op_releases_conversation(message) -> bool:
+    """True when a follow-up should end the hold and stay quiet."""
+    return (
+        grim_follow_up_addresses_someone_else(message)
+        or grim_asks_not_to_reply(message)
+        or grim_says_talking_to_someone_else(message)
+    )
+
+
 def _follow_up_in_reply_ladder(message) -> bool:
     key = _conversation_key(message)
     if key is None:
@@ -3528,18 +3598,23 @@ def grim_chat_turn_action(message, *, now: float | None = None) -> bool:
     getting replies without naming him again and without a Discord
     reply-arrow. Discord reply-ladder messages still continue. A lone
     "Grim" ping counts as still here while the conversation is open. Five
-    minutes of OP silence, or speaking to someone else, ends it.
+    minutes of OP silence ends it. Speaking to someone else, saying this
+    was for another person, or telling him not to reply also ends it, and
+    he stays quiet.
     """
     content = getattr(message, "content", "") or ""
     if content.lstrip().startswith("!"):
         return False
     current = _conversation_now(now)
     if grim_should_reply_to_message(message):
+        if grim_asks_not_to_reply(message):
+            grim_end_conversation(message)
+            return False
         _touch_conversation(message, now=current)
         return True
     if not grim_conversation_open(message, now=current):
         return False
-    if grim_follow_up_addresses_someone_else(message):
+    if grim_op_releases_conversation(message):
         grim_end_conversation(message)
         return False
     _touch_conversation(message, now=current)
@@ -4335,7 +4410,551 @@ async def _search_reaction_gif(
     gif_url = await _search_giphy_gif(session, query)
     if gif_url:
         return gif_url, "GIPHY"
+    gif_url = await _search_tenor_gif(session, query)
+    if gif_url:
+        return gif_url, "TENOR"
     return None
+
+
+CHAT_MEDIA_MAX_BYTES = 8 * 1024 * 1024
+CHAT_MEDIA_TIMEOUT = 8
+CHAT_MEDIA_USER_AGENT = "GrimDiscordBot/2.0 (https://github.com/deathxi/grim)"
+CHAT_MEDIA_MISS = {
+    "gif": "couldn't pull a gif for that just now.",
+    "image": "couldn't pull a picture for that just now.",
+}
+CHAT_MEDIA_HERE = {
+    "gif": "here.",
+    "image": "yeah.",
+}
+CHAT_MEDIA_REFUSAL_MARKERS = (
+    "no way to show gif",
+    "no way to show gifs",
+    "can't show gif",
+    "cannot show gif",
+    "just text",
+    "text only",
+    "text-only",
+    "only text",
+    "text art's doable",
+    "text arts doable",
+    "can't send picture",
+    "cannot send picture",
+    "can't send image",
+    "can't send gif",
+    "cannot send gif",
+    "can't send photo",
+    "discord can't",
+    "bots can't send",
+)
+_CHAT_TEXT_ART_RE = re.compile(
+    r"(?<!\w)(?:ascii(?:\s+art)?|text\s+art|leet\s*art|kaomoji)(?!\w)"
+)
+_CHAT_GIF_RE = re.compile(r"(?<!\w)(?:gifs?|giphy|tenor)(?!\w)")
+_CHAT_IMAGE_RE = re.compile(
+    r"(?<!\w)(?:pictures?|pics?|photos?|images?|jpegs?|pngs?|webps?)(?!\w)"
+)
+_CHAT_MEME_RE = re.compile(
+    r"(?<!\w)(?:memes?|copypastas?|copy\s*pastas?|wojaks?|reaction\s+images?)(?!\w)"
+)
+_CHAT_CLIP_RE = re.compile(r"(?<!\w)clips?(?!\w)")
+_CHAT_SEND_RE = re.compile(
+    r"(?<!\w)(?:show|send|post|pull|gimme|give|drop|throw)(?!\w)"
+)
+_CHAT_CAN_YOU_RE = re.compile(
+    r"(?<!\w)(?:can you|could you|can u|could u|do you|are you able|you able to)(?!\w)"
+)
+_CHAT_CURRENT_EVENTS_RE = re.compile(
+    r"(?:current events?|world news|news today|today s news|todays news|"
+    r"in the world|going on in the world|headlines|this date)"
+)
+_CHAT_MEDIA_SCAFFOLD = frozenset({
+    "grim", "please", "pls", "plz", "can", "could", "would", "will", "you",
+    "u", "ya", "me", "my", "a", "an", "the", "of", "some", "any", "one",
+    "here", "there", "now", "just", "like", "for", "in", "on", "at", "to",
+    "from", "with", "and", "or", "show", "send", "post", "pull", "gimme",
+    "give", "drop", "throw", "find", "get", "make", "want", "need", "see",
+    "watch", "look", "have", "got", "do", "does", "did", "are", "able",
+    "real", "actual", "file", "files", "discord", "chat", "going", "world",
+    "today", "tonight", "date", "current", "events", "event", "news",
+    "headline", "headlines", "gif", "gifs", "giphy", "tenor", "picture",
+    "pictures", "pic", "pics", "photo", "photos", "image", "images",
+    "jpeg", "jpg", "png", "webp", "meme", "memes", "copypasta",
+    "copypastas", "copy", "pasta", "clip", "clips", "wojak", "wojaks",
+    "reaction", "form", "this", "that", "those", "these", "something",
+    "anything", "still",
+})
+
+
+def _remember_conversation_media(message, kind: str | None) -> None:
+    key = _conversation_key(message)
+    if key is None:
+        return
+    if kind:
+        _conversation_media_kind[key] = kind
+    else:
+        _conversation_media_kind.pop(key, None)
+
+
+def _looks_like_media_subject(text: str, folded: str) -> bool:
+    if "?" in str(text or ""):
+        return False
+    tokens = folded.split()
+    if not tokens or len(tokens) > 3:
+        return False
+    if all(
+        token in _CONVERSATION_SMALL_TALK or token in _NAME_CALL_GREETINGS
+        for token in tokens
+    ):
+        return False
+    if any(
+        re.search(rf"(?<!\w){re.escape(phrase)}(?!\w)", folded)
+        for phrase in _STOP_REPLY_PHRASES
+    ):
+        return False
+    return True
+
+
+def parse_chat_media_request(text: str | None, message=None) -> dict | None:
+    """Visual ask: GIF, picture, meme/copypasta image. Not ASCII unless asked."""
+    visible = _conversation_text(text)
+    folded = _output_match_text(visible)
+    if not folded:
+        return None
+    wants_gif = bool(_CHAT_GIF_RE.search(folded))
+    wants_image = bool(_CHAT_IMAGE_RE.search(folded))
+    wants_meme = bool(_CHAT_MEME_RE.search(folded))
+    wants_clip = bool(
+        _CHAT_CLIP_RE.search(folded) and _CHAT_SEND_RE.search(folded)
+    )
+    explicit_text_art = bool(_CHAT_TEXT_ART_RE.search(folded))
+    if explicit_text_art and not (wants_gif or wants_image or wants_meme):
+        return None
+    kind = None
+    if wants_gif or wants_clip:
+        kind = "gif"
+    elif wants_image or wants_meme:
+        kind = "image"
+    current_events = bool(_CHAT_CURRENT_EVENTS_RE.search(folded))
+    topic = " ".join(
+        token for token in folded.split() if token not in _CHAT_MEDIA_SCAFFOLD
+    )[:80]
+    if kind is None:
+        expected = None
+        key = _conversation_key(message) if message is not None else None
+        if key is not None:
+            expected = _conversation_media_kind.get(key)
+        if expected and _looks_like_media_subject(visible, folded):
+            kind = expected
+            topic = folded[:80]
+        else:
+            return None
+    capability = bool(
+        _CHAT_CAN_YOU_RE.search(folded) and not topic and not current_events
+    )
+    return {
+        "kind": kind,
+        "topic": topic,
+        "current_events": current_events,
+        "capability": capability,
+    }
+
+
+def _media_topic_from_research(text: str) -> str:
+    line = str(text or "").strip().split("\n")[0]
+    line = _HTTPS_URL.sub("", line)
+    words = [
+        token
+        for token in _output_match_text(line).split()
+        if token not in _OUTPUT_STOPWORDS and len(token) >= 2
+    ]
+    return " ".join(words[:6])
+
+
+def _short_chat_media_caption(text: str, *, fallback: str) -> str:
+    body = discord.utils.escape_mentions(str(text or "").strip())
+    body = _HTTPS_URL.sub("", body)
+    body = " ".join(body.split())
+    if ". " in body:
+        body = body.split(". ", 1)[0].strip()
+    if not body:
+        body = fallback
+    if len(body) > 180:
+        body = body[:177].rstrip() + "..."
+    folded = body.casefold()
+    if any(marker in folded for marker in CHAT_MEDIA_REFUSAL_MARKERS):
+        return fallback
+    return body
+
+
+def _chat_media_https_url(url) -> str | None:
+    if isinstance(url, str) and url.startswith("https://"):
+        return url
+    return None
+
+
+async def _search_tenor_gif_candidates(
+    session: aiohttp.ClientSession, query: str, limit: int = 5
+) -> list[dict[str, object]]:
+    api_key = os.environ.get("TENOR_API_KEY")
+    if not api_key:
+        return []
+    try:
+        async with session.get(
+            "https://tenor.googleapis.com/v2/search",
+            params={
+                "q": query,
+                "key": api_key,
+                "client_key": "grim",
+                "limit": limit,
+                "media_filter": "gif",
+                "contentfilter": "medium",
+            },
+            headers={"User-Agent": CHAT_MEDIA_USER_AGENT},
+        ) as response:
+            if response.status != 200:
+                return []
+            items = (await response.json()).get("results", [])
+        choices = []
+        seen_ids = set()
+        for item in items[:limit]:
+            formats = item.get("media_formats") or {}
+            url = _chat_media_https_url(
+                (formats.get("gif") or {}).get("url")
+                or (formats.get("mediumgif") or {}).get("url")
+            )
+            if not url:
+                continue
+            asset_id = str(item.get("id") or _gif_url_fingerprint(url))
+            provider_identity = f"tenor:{asset_id}"
+            if provider_identity in seen_ids:
+                continue
+            seen_ids.add(provider_identity)
+            choices.append({
+                "url": url,
+                "identities": [provider_identity, _gif_url_fingerprint(url)],
+            })
+        return choices
+    except Exception as e:
+        print(f"[GIF] TENOR search failed: {e}")
+        return []
+
+
+async def _search_tenor_gif(session: aiohttp.ClientSession, query: str) -> str | None:
+    choices = await _search_tenor_gif_candidates(session, query)
+    urls = [candidate["url"] for candidate in choices if candidate.get("url")]
+    return random.choice(urls) if urls else None
+
+
+async def _search_openverse_media_candidates(
+    session: aiohttp.ClientSession,
+    query: str,
+    *,
+    kind: str,
+    limit: int = 8,
+) -> list[dict[str, object]]:
+    params = {"q": query, "page_size": str(limit), "mature": "false"}
+    if kind == "gif":
+        params["extension"] = "gif"
+    try:
+        async with session.get(
+            "https://api.openverse.org/v1/images/",
+            params=params,
+            headers={"User-Agent": CHAT_MEDIA_USER_AGENT},
+        ) as response:
+            if response.status != 200:
+                return []
+            items = (await response.json()).get("results", [])
+        choices = []
+        seen_ids = set()
+        for item in items[:limit]:
+            url = _chat_media_https_url(item.get("url") or item.get("thumbnail"))
+            if not url:
+                continue
+            filetype = str(item.get("filetype") or "").lower()
+            if kind == "gif" and filetype and filetype != "gif":
+                continue
+            asset_id = str(item.get("id") or _gif_url_fingerprint(url))
+            provider_identity = f"openverse:{asset_id}"
+            if provider_identity in seen_ids:
+                continue
+            seen_ids.add(provider_identity)
+            choices.append({
+                "url": url,
+                "identities": [provider_identity, _gif_url_fingerprint(url)],
+            })
+        return choices
+    except Exception as e:
+        print(f"[Media] Openverse search failed: {e}")
+        return []
+
+
+async def _search_wikimedia_media_candidates(
+    session: aiohttp.ClientSession,
+    query: str,
+    *,
+    kind: str,
+    limit: int = 8,
+) -> list[dict[str, object]]:
+    search = f"{query} gif" if kind == "gif" else query
+    try:
+        async with session.get(
+            "https://commons.wikimedia.org/w/api.php",
+            params={
+                "action": "query",
+                "format": "json",
+                "generator": "search",
+                "gsrsearch": search,
+                "gsrnamespace": "6",
+                "gsrlimit": str(limit),
+                "prop": "imageinfo",
+                "iiprop": "url|mime|size",
+            },
+            headers={"User-Agent": CHAT_MEDIA_USER_AGENT},
+        ) as response:
+            if response.status != 200:
+                return []
+            pages = ((await response.json()).get("query") or {}).get("pages") or {}
+        choices = []
+        seen_ids = set()
+        for page in pages.values():
+            info = (page.get("imageinfo") or [{}])[0]
+            url = _chat_media_https_url(info.get("url"))
+            if not url:
+                continue
+            mime = str(info.get("mime") or "").lower()
+            if kind == "gif" and mime != "image/gif":
+                continue
+            if mime and not mime.startswith("image/"):
+                continue
+            size = int(info.get("size") or 0)
+            if size > CHAT_MEDIA_MAX_BYTES:
+                continue
+            asset_id = str(page.get("pageid") or _gif_url_fingerprint(url))
+            provider_identity = f"wikimedia:{asset_id}"
+            if provider_identity in seen_ids:
+                continue
+            seen_ids.add(provider_identity)
+            choices.append({
+                "url": url,
+                "identities": [provider_identity, _gif_url_fingerprint(url)],
+            })
+        return choices
+    except Exception as e:
+        print(f"[Media] Wikimedia search failed: {e}")
+        return []
+
+
+async def _search_imgflip_meme_candidates(
+    session: aiohttp.ClientSession, query: str, limit: int = 8
+) -> list[dict[str, object]]:
+    try:
+        async with session.get(
+            "https://api.imgflip.com/get_memes",
+            headers={"User-Agent": CHAT_MEDIA_USER_AGENT},
+        ) as response:
+            if response.status != 200:
+                return []
+            memes = ((await response.json()).get("data") or {}).get("memes") or []
+        needles = [
+            token
+            for token in _output_match_text(query).split()
+            if token not in _CHAT_MEDIA_SCAFFOLD and len(token) >= 3
+        ]
+        ranked = []
+        for item in memes:
+            url = _chat_media_https_url(item.get("url"))
+            if not url:
+                continue
+            name = _output_match_text(str(item.get("name") or ""))
+            score = sum(1 for token in needles if token in name) if needles else 1
+            if not needles:
+                score = 1
+            elif score == 0:
+                continue
+            ranked.append((score, url, str(item.get("id") or _gif_url_fingerprint(url))))
+        if not ranked and not needles:
+            ranked = [
+                (1, _chat_media_https_url(item.get("url")), str(item.get("id") or ""))
+                for item in memes[:limit]
+                if _chat_media_https_url(item.get("url"))
+            ]
+        ranked.sort(key=lambda row: row[0], reverse=True)
+        choices = []
+        seen_ids = set()
+        for _score, url, asset_id in ranked[:limit]:
+            if not url:
+                continue
+            provider_identity = f"imgflip:{asset_id or _gif_url_fingerprint(url)}"
+            if provider_identity in seen_ids:
+                continue
+            seen_ids.add(provider_identity)
+            choices.append({
+                "url": url,
+                "identities": [provider_identity, _gif_url_fingerprint(url)],
+            })
+        return choices
+    except Exception as e:
+        print(f"[Media] Imgflip search failed: {e}")
+        return []
+
+
+async def _search_openverse_gifs(
+    session: aiohttp.ClientSession, query: str, limit: int = 8
+) -> list[dict[str, object]]:
+    return await _search_openverse_media_candidates(
+        session, query, kind="gif", limit=limit
+    )
+
+
+async def _search_openverse_images(
+    session: aiohttp.ClientSession, query: str, limit: int = 8
+) -> list[dict[str, object]]:
+    return await _search_openverse_media_candidates(
+        session, query, kind="image", limit=limit
+    )
+
+
+async def _search_wikimedia_gifs(
+    session: aiohttp.ClientSession, query: str, limit: int = 8
+) -> list[dict[str, object]]:
+    return await _search_wikimedia_media_candidates(
+        session, query, kind="gif", limit=limit
+    )
+
+
+async def _search_wikimedia_images(
+    session: aiohttp.ClientSession, query: str, limit: int = 8
+) -> list[dict[str, object]]:
+    return await _search_wikimedia_media_candidates(
+        session, query, kind="image", limit=limit
+    )
+
+
+async def _search_chat_media_candidates(
+    session: aiohttp.ClientSession, kind: str, query: str
+) -> list[dict[str, object]]:
+    q = " ".join(str(query or "").split())[:80] or "ok"
+    if kind == "gif":
+        searches = (
+            _search_klipy_gif_candidates,
+            _search_giphy_gif_candidates,
+            _search_tenor_gif_candidates,
+            _search_openverse_gifs,
+            _search_wikimedia_gifs,
+        )
+    else:
+        searches = (
+            _search_openverse_images,
+            _search_wikimedia_images,
+            _search_imgflip_meme_candidates,
+            _search_giphy_gif_candidates,
+            _search_klipy_gif_candidates,
+            _search_tenor_gif_candidates,
+        )
+    for search in searches:
+        choices = await search(session, q, 8)
+        if choices:
+            return choices
+    return []
+
+
+async def _download_cleaned_chat_media(
+    session: aiohttp.ClientSession, url: str
+) -> tuple[bytes, str] | None:
+    if not url.startswith("https://"):
+        return None
+    try:
+        async with session.get(
+            url,
+            headers={"User-Agent": CHAT_MEDIA_USER_AGENT},
+            timeout=aiohttp.ClientTimeout(total=CHAT_MEDIA_TIMEOUT),
+        ) as response:
+            if response.status != 200:
+                return None
+            data = await response.read()
+    except Exception as error:
+        print(f"[Media] download failed: {error}")
+        return None
+    if not data or len(data) > CHAT_MEDIA_MAX_BYTES:
+        return None
+    try:
+        cleaned, ext = await asyncio.to_thread(clean_image, data)
+    except ImageCleanError as error:
+        print(f"[Media] metadata strip failed: {error}")
+        return None
+    return cleaned, f"grim{ext}"
+
+
+async def fulfill_chat_media_request(
+    message,
+    request: dict,
+    *,
+    guild_id: str,
+    actor_id: str,
+    research_scope: str,
+    live_search_system: str,
+    current_text: str,
+) -> "ContextualReply":
+    kind = request["kind"]
+    topic = str(request.get("topic") or "")
+    caption = CHAT_MEDIA_HERE[kind]
+    if request.get("current_events"):
+        research = await _consult_live_sources(
+            message,
+            guild_id=guild_id,
+            actor_id=actor_id,
+            research_scope=research_scope,
+            research_prompt=LIVE_SEARCH_PROOF_QUERY,
+            system_prompt=live_search_system,
+            tools=XAI_WEB_SEARCH_TOOLS,
+        )
+        if _live_research_succeeded(research):
+            topic = _media_topic_from_research(research["text"]) or topic or "world news"
+            caption = _short_chat_media_caption(
+                research["text"], fallback="today's wire."
+            )
+        elif _live_search_was_empty(research.get("status")):
+            return ContextualReply(
+                text=format_live_search_miss_reply(
+                    "can't pin a real headline to a file if the wire's empty."
+                )
+            )
+        else:
+            return ContextualReply(
+                text=live_source_failure_text(research.get("status"))
+            )
+    elif request.get("capability"):
+        topic = topic or ("ok" if kind == "gif" else "night sky")
+        caption = "yeah."
+    query = topic or ("ok" if kind == "gif" else "night sky")
+    media = filename = media_url = None
+    try:
+        async with aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=CHAT_MEDIA_TIMEOUT)
+        ) as session:
+            candidates = await _search_chat_media_candidates(session, kind, query)
+            for candidate in candidates:
+                url = _chat_media_https_url(candidate.get("url"))
+                if not url:
+                    continue
+                downloaded = await _download_cleaned_chat_media(session, url)
+                if downloaded:
+                    media, filename = downloaded
+                    break
+                if media_url is None:
+                    media_url = url
+    except Exception as error:
+        print(f"[Media] search failed: {error}")
+    if media or media_url:
+        _remember_conversation_media(message, kind)
+        return ContextualReply(
+            text=caption,
+            media=media,
+            media_filename=filename,
+            media_url=None if media else media_url,
+        )
+    return ContextualReply(text=CHAT_MEDIA_MISS[kind])
 
 async def _maybe_build_gif_reaction(
     message_text: str, reply: str, channel_id: str
@@ -4499,6 +5118,9 @@ async def _resolve_replied_message(message) -> tuple[discord.Message | None, boo
 class ContextualReply(NamedTuple):
     text: str | None = None
     failure: str | None = None
+    media: bytes | None = None
+    media_filename: str | None = None
+    media_url: str | None = None
 
 def grim_chime_system(server_name: str) -> str:
     """System line for a proactive chime. Same reply rule as an @mention."""
@@ -4511,20 +5133,20 @@ def grim_chime_system(server_name: str) -> str:
 async def generate_contextual_reply(message: discord.Message) -> ContextualReply:
     """Full contextual @Grim mention handler — pulls channel history, injects server context and memories."""
     api_key = os.environ.get("XAI_API_KEY")
-    if not api_key:
-        return ContextualReply()
-
     guild = message.guild
     channel = message.channel
     author = message.author
     mentioned_text = message.content.replace(
         f"<@{bot.user.id}>", ""
     ).replace(f"<@!{bot.user.id}>", "").strip()
+    media_ask = parse_chat_media_request(mentioned_text, message)
+    if not api_key and not media_ask:
+        return ContextualReply()
     conversational = not mention_asks_for_facts(mentioned_text)
     within_limit = _rate_limit_allows_actor(
         str(guild.id) if guild else "dm", str(author.id), "external_ai"
     )
-    if not within_limit and not conversational:
+    if not within_limit and not conversational and not media_ask:
         return ContextualReply(failure="rate_limit")
 
     guild_id = str(guild.id) if guild else "dm"
@@ -4697,6 +5319,17 @@ async def generate_contextual_reply(message: discord.Message) -> ContextualReply
     )
     live_miss_wrap = False
     recent_failure = _recent_live_failure(research_scope)
+    media_request = parse_chat_media_request(current_text, message)
+    if media_request:
+        return await fulfill_chat_media_request(
+            message,
+            media_request,
+            guild_id=guild_id,
+            actor_id=str(author.id),
+            research_scope=research_scope,
+            live_search_system=live_search_system,
+            current_text=current_text,
+        )
     if current_text and _is_self_capability_question(current_text):
         research = await _consult_live_sources(
             message,
@@ -4808,7 +5441,7 @@ KNOWLEDGE & RESEARCH:
 You always know today's date — it's injected into this prompt. Never guess at the date or assert a different one. Grim has a read-only live web research tool that is automatically consulted when a request needs fresh information. Verified live research answers are handled by an isolated responder and never inserted into this prompt. Never claim that Grim has no web access. Questions about facts, information, or method are routed to that research before this prompt runs, so never state current facts, a person's current role, or recent events from memory here. Lyrics, references, greetings, and creative play can come from what you know.
 
 WHAT YOU DON'T DO:
-Never open with greetings, "Ah", affirmations, or any kind of opener — just start talking. Don't end with a question every message, let replies breathe. No em dashes. No bullet points in replies, natural prose only. Don't announce being an AI unless directly and sincerely asked. Don't lean on the Grim Reaper framing — that's just your name, not your whole personality. Never reference your own bot functions, background tasks, monitoring duties, newsfeeds, or anything about "watching the server" — that's internal, not part of your personality. If someone asks a normal question, just answer it.
+Never open with greetings, "Ah", affirmations, or any kind of opener — just start talking. Don't end with a question every message, let replies breathe. No em dashes. No bullet points in replies, natural prose only. Don't announce being an AI unless directly and sincerely asked. Don't lean on the Grim Reaper framing — that's just your name, not your whole personality. Never reference your own bot functions, background tasks, monitoring duties, newsfeeds, or anything about "watching the server" — that's internal, not part of your personality. If someone asks a normal question, just answer it. Never claim Discord cannot show GIFs or pictures, and never say you are text-only. Never substitute ASCII, text art, or copypasta-as-text when they asked for a picture, GIF, meme image, or clip. ASCII only if they explicitly asked for ascii or text art. Visual asks are fulfilled before this prompt.
 
 RESPONSE LENGTH:
 Match what the moment calls for. Short message, short reply. Real conversation or a
@@ -10002,23 +10635,63 @@ async def on_raw_bulk_message_delete(payload: discord.RawBulkMessageDeleteEvent)
         print(f"[DeleteReport] Handler failed ({type(error).__name__}).")
 
 
-async def _send_mention_reply(message, reply: str) -> None:
+async def _send_mention_reply(
+    message,
+    reply: str | None,
+    *,
+    media: bytes | None = None,
+    media_filename: str | None = None,
+    media_url: str | None = None,
+) -> None:
     """Post an @Grim mention reply. Sourced live-search messages suppress URL unfurls."""
-    reply_chunks = _split_discord_content(reply)
-    unfurl = _source_unfurl_kwargs(reply)
-    try:
-        gif_reaction = await asyncio.wait_for(
-            _maybe_build_gif_reaction(
-                message.content, reply, str(message.channel.id)
-            ),
-            timeout=10,
-        )
-    except Exception as e:
-        print(f"[GIF] Enrichment skipped; sending text only: {e}")
-        gif_reaction = None
+    reply_chunks = _split_discord_content(reply or "")
+    unfurl = _source_unfurl_kwargs(reply or "")
+    requested_media = bool(media or media_url)
+    gif_reaction = None
+    if not requested_media:
+        try:
+            gif_reaction = await asyncio.wait_for(
+                _maybe_build_gif_reaction(
+                    message.content, reply or "", str(message.channel.id)
+                ),
+                timeout=10,
+            )
+        except Exception as e:
+            print(f"[GIF] Enrichment skipped; sending text only: {e}")
+            gif_reaction = None
     sent_messages = []
     visible_chunks = reply_chunks
-    if gif_reaction:
+    first_content = reply_chunks[0] if reply_chunks else None
+    send_kwargs = dict(mention_author=False, **unfurl)
+    if requested_media:
+        send_kwargs["allowed_mentions"] = discord.AllowedMentions.none()
+    if media:
+        filename = media_filename or "grim.bin"
+        try:
+            sent_messages.append(await _send_discord_with_retry(
+                message.reply,
+                content=first_content,
+                file=discord.File(BytesIO(media), filename=filename),
+                **send_kwargs,
+            ))
+        except Exception as e:
+            print(f"[Media] File send failed; trying URL: {e}")
+            media = None
+            if not media_url:
+                media_url = None
+    if not sent_messages and media_url:
+        embed = discord.Embed(color=discord.Color.from_rgb(18, 18, 18))
+        embed.set_image(url=media_url)
+        try:
+            sent_messages.append(await _send_discord_with_retry(
+                message.reply,
+                content=first_content,
+                embed=embed,
+                **send_kwargs,
+            ))
+        except Exception as e:
+            print(f"[Media] URL send failed; sending text only: {e}")
+    if not sent_messages and gif_reaction:
         gif_embed, gif_mode = gif_reaction
         first_content = (
             reply_chunks[0]
@@ -10037,12 +10710,15 @@ async def _send_mention_reply(message, reply: str) -> None:
                 visible_chunks = []
         except Exception as e:
             print(f"[GIF] Embed send failed; sending text only: {e}")
-            sent_messages.append(
-                await _send_discord_with_retry(
-                    message.reply, reply_chunks[0], mention_author=False, **unfurl
+            if reply_chunks:
+                sent_messages.append(
+                    await _send_discord_with_retry(
+                        message.reply, reply_chunks[0], mention_author=False, **unfurl
+                    )
                 )
-            )
-    else:
+    elif not sent_messages:
+        if not reply_chunks:
+            return
         sent_messages.append(
             await _send_discord_with_retry(
                 message.reply, reply_chunks[0], mention_author=False, **unfurl
@@ -10050,7 +10726,7 @@ async def _send_mention_reply(message, reply: str) -> None:
         )
 
     if message.guild:
-        first_visible = visible_chunks[0] if visible_chunks else "[reaction GIF]"
+        first_visible = visible_chunks[0] if visible_chunks else "[media]"
         first_sent = sent_messages[0]
         save_message_to_db(
             str(message.guild.id), str(message.channel.id),
@@ -10176,8 +10852,14 @@ async def on_message(message):
         async with message.channel.typing():
             result = await audited_contextual_reply(message)
         reply = await audit_outgoing_reply(message, result.text)
-        if reply:
-            await _send_mention_reply(message, reply)
+        if reply or result.media or result.media_url:
+            await _send_mention_reply(
+                message,
+                reply,
+                media=result.media,
+                media_filename=result.media_filename,
+                media_url=result.media_url,
+            )
         else:
             failure = mention_failure_text(message.content, result.failure)
             if failure:
