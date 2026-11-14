@@ -59,11 +59,13 @@ class ConversationPersistenceTests(unittest.TestCase):
         self.user_patch.start()
         main._open_conversations.clear()
         main._conversation_ladders.clear()
+        main._conversation_media_kind.clear()
 
     def tearDown(self):
         self.user_patch.stop()
         main._open_conversations.clear()
         main._conversation_ladders.clear()
+        main._conversation_media_kind.clear()
 
     def start_opener(self, *, now=T0, grim_reply_id=GRIM_REPLY_ID):
         opener = chat_message(OPENER, mid=OPENER_ID)
@@ -155,6 +157,43 @@ class ConversationPersistenceTests(unittest.TestCase):
         self.assertFalse(main.grim_chat_turn_action(ping, now=T0))
         self.start_opener()
         self.assertTrue(main.grim_chat_turn_action(ping, now=T0 + 4))
+
+    def test_saying_this_was_for_someone_else_ends_it_and_stays_quiet(self):
+        opener = self.start_opener()
+        aside = chat_message(
+            "I was replying to Cynibal no need to reply to me now",
+            mid=FOLLOW_ID,
+            reference=None,
+        )
+        self.assertTrue(main.grim_says_talking_to_someone_else(aside))
+        self.assertTrue(main.grim_asks_not_to_reply(aside))
+        self.assertTrue(main.grim_op_releases_conversation(aside))
+        self.assertFalse(main.grim_chat_turn_action(aside, now=T0 + 12))
+        self.assertFalse(main.grim_conversation_open(opener, now=T0 + 12))
+        later = chat_message("you there bruh", mid=3, reference=None)
+        self.assertFalse(main.grim_chat_turn_action(later, now=T0 + 13))
+
+    def test_telling_him_not_to_reply_ends_even_with_his_name(self):
+        self.start_opener()
+        aside = chat_message(
+            "grim no need to reply to me now",
+            mid=FOLLOW_ID,
+            reference=None,
+        )
+        self.assertTrue(main.grim_asks_not_to_reply(aside))
+        self.assertFalse(main.grim_chat_turn_action(aside, now=T0 + 12))
+        later = chat_message("how we doing boss man", mid=3, reference=None)
+        self.assertFalse(main.grim_chat_turn_action(later, now=T0 + 13))
+
+    def test_i_was_talking_to_another_member_ends_it(self):
+        self.start_opener()
+        aside = chat_message(
+            "i was talking to noct",
+            mid=FOLLOW_ID,
+            reference=None,
+        )
+        self.assertTrue(main.grim_says_talking_to_someone_else(aside))
+        self.assertFalse(main.grim_chat_turn_action(aside, now=T0 + 12))
 
     def test_addressing_someone_else_by_mention_ends_it(self):
         opener = self.start_opener()
