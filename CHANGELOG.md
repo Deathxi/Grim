@@ -21,6 +21,7 @@ All notable changes to this project are documented here, organized by month.
 - `/trivia subject` — a private, dismissible ten-question quiz. Grim writes the round through the existing xAI path, shows one four-choice question at a time, and scores the invoking member out of 10. A bad subject or a failed generation stops the round instead of posting a partial quiz.
 
 ### Fixed
+- Weather questions live-search for a sourced forecast, including conversation-hold follow-ups with no @ and no "Grim". A leftover GIF/picture kind does not steal that turn. If live search is empty or the HTTP/tool layer fails, Grim says exactly `Live Search has zero info on this`, then a newline, then his own take, once. Weather never uses the traffic timeout line (`Traffic went AWOL. Call it again.`).
 - Chat GIF and picture sending only fires on an explicit ask (`send a gif`, `show me a picture`, `gif of X`, `pic of X`, `meme of X`). Reactions, laughs, `wtf`, `huh`, `lmao`, `damn`, short acknowledgements, and conversation follow-ups that are not asking for an image get a normal reply, not a file. Metadata strip, anonymous `grim.gif` / `grim.png` filenames, and the no-ASCII / no-text-only rules are unchanged.
 - Same-channel hold ends, and Grim stays quiet, when the original poster says they are talking or replying to someone else, or tells him not to reply.
 - After a name-call, in-channel follow-ups from the original poster keep the conversation even when they are not Discord replies. A lone "Grim" ping still counts as "you there" while the conversation is open.

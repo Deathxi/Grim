@@ -2242,10 +2242,13 @@ def _extract_grok_research_response(data: dict) -> dict | None:
         "used_search": True,
     }
 
+_WEATHER_PHRASES = (
+    "weather", "forecast", "temperature",
+)
 LIVE_RESEARCH_SIGNALS = (
     "right now", "currently", "today", "tonight", "this week", "this month",
     "latest", "breaking", "recent", "newest", "just happened",
-    "weather", "forecast", "temperature", "live score", "live update",
+    *_WEATHER_PHRASES, "live score", "live update",
     "live polling", "score", "standings", "schedule",
     "price", "stock", "market", "poll", "polls", "polling", "election",
     "elections", "midterm", "midterms",
@@ -2278,6 +2281,11 @@ def _contains_research_phrase(text: str, phrases: tuple[str, ...]) -> bool:
         re.search(rf"(?<!\w){re.escape(phrase)}(?!\w)", text)
         for phrase in phrases
     )
+
+def _is_weather_ask(text: str | None) -> bool:
+    """True for a forecast/conditions ask, including nameless hold follow-ups."""
+    folded = _output_match_text(_conversation_text(text))
+    return _contains_research_phrase(folded, _WEATHER_PHRASES)
 
 def _should_use_live_research(current_text: str, recent_channel_text: str) -> bool:
     current = " ".join(str(current_text or "").lower().split())[:1000]
@@ -2460,17 +2468,20 @@ def _needs_live_sources(
 ) -> bool:
     """Live search only for facts, information, or method.
 
-    Causal health questions are facts. Internet/capability asks are bot state,
-    not news. Greetings, quotes, vibes, and personality stay on the chat path.
-    After one honest miss, later pings stay on chat demeanor unless the member
-    explicitly asks to search again.
+    Causal health questions are facts. Weather and forecasts are always live.
+    Internet/capability asks are bot state, not news. Greetings, quotes, vibes,
+    and personality stay on the chat path. After one honest miss, later pings
+    stay on chat demeanor unless the member explicitly asks to search again or
+    asks the weather.
     """
     own_text = _strip_quote_lines(current_text)
     if _is_self_capability_question(own_text):
         return False
     folded = _output_match_text(_conversation_text(own_text))[:1000]
-    if recent_failure and not _contains_research_phrase(
-        folded, LIVE_RESEARCH_REQUESTS
+    if (
+        recent_failure
+        and not _is_weather_ask(own_text)
+        and not _contains_research_phrase(folded, LIVE_RESEARCH_REQUESTS)
     ):
         return False
     if _is_casual_or_personality(own_text):
@@ -3208,8 +3219,14 @@ MENTION_FAILURE_LINES = {
 }
 
 def mention_failure_text(user_text: str | None, failure: str | None = None) -> str | None:
-    """Line for a real mention failure. Conversation never gets one."""
+    """Line for a real mention failure. Conversation never gets one.
+
+    Weather never uses the traffic/timeout copy. Live-search miss text is
+    produced by the reply path; this backstop still refuses the AWOL line.
+    """
     if not failure or user_denies_prior_failure(user_text):
+        return None
+    if _is_weather_ask(user_text):
         return None
     if not mention_asks_for_facts(user_text):
         return None
@@ -5361,6 +5378,7 @@ async def generate_contextual_reply(message: discord.Message) -> ContextualReply
     )
     live_miss_wrap = False
     recent_failure = _recent_live_failure(research_scope)
+    weather_ask = _is_weather_ask(current_text)
     media_request = parse_chat_media_request(current_text, message)
     if media_request:
         return await fulfill_chat_media_request(
@@ -5372,6 +5390,8 @@ async def generate_contextual_reply(message: discord.Message) -> ContextualReply
             live_search_system=live_search_system,
             current_text=current_text,
         )
+    if weather_ask:
+        _remember_conversation_media(message, None)
     if current_text and _is_self_capability_question(current_text):
         research = await _consult_live_sources(
             message,
@@ -5393,10 +5413,13 @@ async def generate_contextual_reply(message: discord.Message) -> ContextualReply
                 )[:6000]
             )
         return ContextualReply(text=live_capability_reply_text(research.get("status")))
-    if current_text and _needs_live_sources(
-        current_text,
-        recent_channel_text,
-        recent_failure=recent_failure,
+    if current_text and (
+        weather_ask
+        or _needs_live_sources(
+            current_text,
+            recent_channel_text,
+            recent_failure=recent_failure,
+        )
     ):
         research = await _consult_live_sources(
             message,
@@ -5411,7 +5434,7 @@ async def generate_contextual_reply(message: discord.Message) -> ContextualReply
             return ContextualReply(
                 text=await _sourced_live_reply(research, current_text)
             )
-        if _live_search_was_empty(research.get("status")):
+        if weather_ask or _live_search_was_empty(research.get("status")):
             live_miss_wrap = True
         else:
             return ContextualReply(text=live_source_failure_text(research.get("status")))
@@ -5539,7 +5562,7 @@ Finish a substantive answer instead of cutting it off for Discord's message limi
                         text=format_live_search_miss_reply(screened)
                     )
                 return ContextualReply(text=screened)
-            if live_miss_wrap:
+            if live_miss_wrap or weather_ask:
                 return ContextualReply(
                     text=format_live_search_miss_reply(
                         LIVE_SEARCH_MISS_WRAP_FALLBACK
@@ -5548,7 +5571,7 @@ Finish a substantive answer instead of cutting it off for Discord's message limi
             return ContextualReply(failure=None if conversational else "empty")
     except Exception as e:
         print(f"[Grim] Contextual reply error: {type(e).__name__}")
-        if live_miss_wrap:
+        if live_miss_wrap or weather_ask:
             return ContextualReply(
                 text=format_live_search_miss_reply(LIVE_SEARCH_MISS_WRAP_FALLBACK)
             )
@@ -11919,6 +11942,10 @@ async def audited_contextual_reply(message) -> ContextualReply:
     if guarded.recovery:
         return ContextualReply(text=guarded.recovery)
     if guarded.event == "timeout":
+        if _is_weather_ask(getattr(message, "content", "")):
+            return ContextualReply(
+                text=format_live_search_miss_reply(LIVE_SEARCH_MISS_WRAP_FALLBACK)
+            )
         return ContextualReply(failure="timeout")
     if guarded.value is None:
         return ContextualReply()

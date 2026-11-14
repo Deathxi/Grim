@@ -28,6 +28,23 @@ def mention(text, channel=None):
         attachments=[],
         embeds=[],
         reference=None,
+        id=1,
+        mentions=[],
+    )
+
+
+def hold_follow(text, channel=None, author_id=10, name="Kōshin"):
+    """Nameless same-channel follow-up after a name-call hold."""
+    return SimpleNamespace(
+        guild=SimpleNamespace(id=50, name="Seclude", member_count=3),
+        channel=channel or FakeChannel(),
+        author=SimpleNamespace(id=author_id, display_name=name),
+        content=text,
+        attachments=[],
+        embeds=[],
+        reference=None,
+        id=2,
+        mentions=[],
     )
 
 
@@ -42,6 +59,24 @@ SUCCESS = {
         {"title": "Post", "url": "https://x.com/someone/status/1"},
     ],
 }
+
+FORECAST = {
+    "status": "success",
+    "used_search": True,
+    "cached": False,
+    "text": "tomorrow in the bay area: mostly cloudy, highs around 64, light rain late.",
+    "sources": [
+        {"title": "NWS", "url": "https://forecast.weather.gov/MapClick.php?lat=37.77&lon=-122.42"},
+        {"title": "NWS zone", "url": "https://forecast.weather.gov/MapClick.php?zoneid=CAZ006"},
+    ],
+}
+
+TRAFFIC_AWOL = "Traffic went AWOL. Call it again."
+WEATHER_ASKS = (
+    "whats the weather like tomorrow in the Bay Area?",
+    "what's the weather tomorrow",
+    "weather in the Bay Area",
+)
 
 TRAINING_CLAIMS = ("stable", "no reports", "available info", "still ceo", "as far as i know")
 MISS_WRAP = "can't verify that from here, and i'm not going to invent it."
@@ -89,12 +124,18 @@ class LiveSourcesTests(unittest.TestCase):
         main._COMMAND_RATE_LIMITS.clear()
         main._AI_RESEARCH_CACHE.clear()
         main._LIVE_RESEARCH_FAILURES.clear()
+        main._open_conversations.clear()
+        main._conversation_ladders.clear()
+        main._conversation_media_kind.clear()
 
     def tearDown(self):
         main.CHAT_DB_FILE = self.original_db
         main._COMMAND_RATE_LIMITS.clear()
         main._AI_RESEARCH_CACHE.clear()
         main._LIVE_RESEARCH_FAILURES.clear()
+        main._open_conversations.clear()
+        main._conversation_ladders.clear()
+        main._conversation_media_kind.clear()
         self.temp_dir.cleanup()
 
     def converse(self, texts, research, model_reply="sure."):
@@ -159,6 +200,9 @@ class LiveSourcesTests(unittest.TestCase):
             "What causes apathy?",
             "do you think excessive smoking and staying up late at night can cause potential apathy?",
             "can smoking cause apathy",
+            "whats the weather like tomorrow in the Bay Area?",
+            "what's the weather tomorrow",
+            "weather in the Bay Area",
         ):
             self.assertTrue(main._needs_live_sources(text, ""), text)
 
@@ -231,6 +275,11 @@ class LiveSourcesTests(unittest.TestCase):
         self.assertTrue(
             main._needs_live_sources("check again", "", recent_failure=True)
         )
+        for text in WEATHER_ASKS:
+            self.assertTrue(
+                main._needs_live_sources(text, "", recent_failure=True),
+                text,
+            )
 
     def test_no_current_sources_sentinel_is_not_an_answer(self):
         self.assertIsNone(main._extract_grok_research_response({
@@ -817,6 +866,141 @@ class LiveSourcesTests(unittest.TestCase):
             asyncio.run(main._send_mention_reply(message, casual))
         self.assertEqual(reply_fn.await_args.kwargs["content"], casual)
         self.assertNotIn("suppress_embeds", reply_fn.await_args.kwargs)
+
+    def test_weather_ask_is_live_search_not_traffic(self):
+        for text in WEATHER_ASKS:
+            self.assertTrue(main._is_weather_ask(text), text)
+            self.assertTrue(main._needs_live_sources(text, ""), text)
+            self.assertIsNone(main.parse_chat_media_request(text), text)
+            self.assertIsNone(main.mention_failure_text(text, "timeout"), text)
+            self.assertIsNone(main.mention_failure_text(text, "empty"), text)
+            self.assertNotEqual(
+                main.mention_failure_text(text, "timeout"),
+                TRAFFIC_AWOL,
+            )
+
+    def test_weather_in_open_conversation_sends_mocked_forecast(self):
+        opener = mention("yo grim how we doing my fam")
+        follow = hold_follow("whats the weather like tomorrow in the Bay Area?")
+        research = AsyncMock(return_value=FORECAST)
+        model = AsyncMock(side_effect=AssertionError("weather should not use chat"))
+        main._conversation_media_kind[("9", "10")] = "gif"
+        main._remember_live_failure("50:9")
+
+        async def run():
+            with patch.object(
+                main.discord.Client,
+                "user",
+                new_callable=PropertyMock,
+                return_value=SimpleNamespace(id=999),
+            ):
+                self.assertTrue(main.grim_chat_turn_action(opener, now=1_700_000_000.0))
+            with patch.dict(main.os.environ, {"XAI_API_KEY": "test-key"}), \
+                    patch.object(
+                        main.discord.Client,
+                        "user",
+                        new_callable=PropertyMock,
+                        return_value=SimpleNamespace(id=999),
+                    ), \
+                    patch.object(
+                        main.bot,
+                        "get_channel",
+                        return_value=SimpleNamespace(name="general"),
+                    ), \
+                    patch.object(main, "grok_research_query", research), \
+                    patch.object(main, "_complete_contextual_reply", model):
+                self.assertTrue(
+                    main.grim_chat_turn_action(follow, now=1_700_000_010.0)
+                )
+                return await main.generate_contextual_reply(follow)
+
+        reply = asyncio.run(run())
+        research.assert_awaited()
+        model.assert_not_awaited()
+        self.assertTrue(reply.text.startswith(FORECAST["text"]))
+        self.assertIn("-# sources:", reply.text)
+        self.assertIn("forecast.weather.gov", reply.text)
+        self.assertNotIn(TRAFFIC_AWOL, reply.text or "")
+        self.assertIsNone(reply.failure)
+        self.assertNotIn(("9", "10"), main._conversation_media_kind)
+
+    def test_weather_follow_up_does_not_emit_traffic_awol(self):
+        research = AsyncMock(return_value={"status": "timeout"})
+        (reply,), model = self.converse(
+            ["what's the weather tomorrow"],
+            research,
+            model_reply=MISS_WRAP,
+        )
+        research.assert_awaited()
+        self.assert_zero_info_miss(reply, MISS_WRAP)
+        self.assertNotIn(TRAFFIC_AWOL, reply.text)
+        self.assertIsNone(reply.failure)
+        self.assertIsNone(
+            main.mention_failure_text("what's the weather tomorrow", reply.failure)
+        )
+
+    def test_weather_transport_failure_uses_live_search_miss_not_traffic(self):
+        opener = mention("grim you in?")
+        follow = hold_follow("what's the weather tomorrow")
+        research = AsyncMock(return_value={"status": "timeout"})
+        stalled = AsyncMock(side_effect=asyncio.TimeoutError)
+        main._conversation_media_kind[("9", "10")] = "gif"
+
+        async def run():
+            with patch.object(
+                main.discord.Client,
+                "user",
+                new_callable=PropertyMock,
+                return_value=SimpleNamespace(id=999),
+            ):
+                self.assertTrue(main.grim_chat_turn_action(opener, now=1_700_000_000.0))
+            with patch.dict(main.os.environ, {"XAI_API_KEY": "test-key"}), \
+                    patch.object(
+                        main.discord.Client,
+                        "user",
+                        new_callable=PropertyMock,
+                        return_value=SimpleNamespace(id=999),
+                    ), \
+                    patch.object(
+                        main.bot,
+                        "get_channel",
+                        return_value=SimpleNamespace(name="general"),
+                    ), \
+                    patch.object(main, "grok_research_query", research), \
+                    patch.object(main, "_complete_contextual_reply", stalled):
+                self.assertTrue(
+                    main.grim_chat_turn_action(follow, now=1_700_000_010.0)
+                )
+                return await main.generate_contextual_reply(follow)
+
+        reply = asyncio.run(run())
+        research.assert_awaited()
+        self.assertEqual(
+            reply.text,
+            main.format_live_search_miss_reply(main.LIVE_SEARCH_MISS_WRAP_FALLBACK),
+        )
+        self.assertEqual(reply.text.split("\n", 1)[0], main.LIVE_SEARCH_ZERO_INFO)
+        self.assertNotIn(TRAFFIC_AWOL, reply.text)
+        self.assertIsNone(reply.failure)
+        self.assertIsNone(main.mention_failure_text(follow.content, "timeout"))
+
+    def test_audited_weather_timeout_uses_live_search_miss(self):
+        follow = hold_follow("weather in the Bay Area")
+        guarded = SimpleNamespace(recovery=None, event="timeout", value=None)
+
+        async def run():
+            with patch.object(
+                main.reply_auditor, "guarded_reply", AsyncMock(return_value=guarded)
+            ):
+                return await main.audited_contextual_reply(follow)
+
+        reply = asyncio.run(run())
+        self.assertEqual(
+            reply.text,
+            main.format_live_search_miss_reply(main.LIVE_SEARCH_MISS_WRAP_FALLBACK),
+        )
+        self.assertNotIn(TRAFFIC_AWOL, reply.text)
+        self.assertIsNone(reply.failure)
 
     def test_research_response_accepts_custom_tool_call_and_markdown_urls(self):
         result = main._extract_grok_research_response({
