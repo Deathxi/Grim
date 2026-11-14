@@ -9263,7 +9263,7 @@ async def grim_updates(interaction: discord.Interaction):
 
 @bot.tree.command(
     name="panopticon",
-    description="Founder: toggle the deletion-report watch on or off",
+    description="CLASSIFIED",
 )
 async def panopticon(interaction: discord.Interaction):
     if not await require_founder(interaction, "panopticon"):
