@@ -2283,9 +2283,21 @@ def _contains_research_phrase(text: str, phrases: tuple[str, ...]) -> bool:
     )
 
 def _is_weather_ask(text: str | None) -> bool:
-    """True for a forecast/conditions ask, including nameless hold follow-ups."""
+    """True for a forecast/conditions ask, including nameless hold follow-ups.
+
+    Only this turn's text counts. Leftover weather in the channel, a prior
+    miss, or a deploy card about forecasts is not a weather ask.
+    """
     folded = _output_match_text(_conversation_text(text))
     return _contains_research_phrase(folded, _WEATHER_PHRASES)
+
+def _live_research_context_signals(current_text: str) -> tuple[str, ...]:
+    """Channel leftover forecast does not make an unrelated follow-up a search."""
+    if _is_weather_ask(current_text):
+        return LIVE_RESEARCH_SIGNALS
+    return tuple(
+        phrase for phrase in LIVE_RESEARCH_SIGNALS if phrase not in _WEATHER_PHRASES
+    )
 
 def _should_use_live_research(current_text: str, recent_channel_text: str) -> bool:
     current = " ".join(str(current_text or "").lower().split())[:1000]
@@ -2303,13 +2315,15 @@ def _should_use_live_research(current_text: str, recent_channel_text: str) -> bo
         return False
     context = " ".join(str(recent_channel_text or "").lower().split())[-1800:]
     if (
-        _contains_research_phrase(context, LIVE_RESEARCH_SIGNALS)
+        _contains_research_phrase(context, _live_research_context_signals(current_text))
         or _contains_research_phrase(context, LIVE_RESEARCH_REQUESTS)
         or "need to check" in context
         or "fresh numbers" in context
     ):
         return True
-    return _needs_live_sources(recent_channel_text, "")
+    if _is_weather_ask(current_text):
+        return _needs_live_sources(recent_channel_text, "")
+    return False
 
 _LIVE_CREATIVE_OR_OPINION = (
     "joke", "jokes", "poem", "haiku", "story", "roast", "rap", "riddle", "pun",
@@ -2343,6 +2357,13 @@ _LIVE_EVENT_CLAIM = re.compile(
 _FIRST_PERSON = re.compile(r"(?<!\w)(?:i|im|i m|me|my|we|our|us)(?!\w)")
 LIVE_FAILURE_MEMORY_SECONDS = 1800
 _LIVE_RESEARCH_FAILURES: dict[str, float] = {}
+_WEATHER_LIVE_FAILURES: set[str] = set()
+WEATHER_LEFTOVER_TURN_NOTE = (
+    "This turn is not a weather or forecast question. "
+    "Do not say live weather data was missing, that a forecast search failed, "
+    "or that you couldn't pull weather. Leftover weather live-search misses "
+    "from this channel do not apply."
+)
 
 def _has_concrete_topic(text: str) -> bool:
     return bool(_noncasual_tokens(text))
@@ -2535,6 +2556,19 @@ def _remember_live_failure(scope: str) -> None:
     if len(_LIVE_RESEARCH_FAILURES) > 200:
         oldest = min(_LIVE_RESEARCH_FAILURES, key=_LIVE_RESEARCH_FAILURES.get)
         _LIVE_RESEARCH_FAILURES.pop(oldest, None)
+
+def _remember_weather_live_failure(scope: str) -> None:
+    """Weather misses stay on weather asks; they do not mute later name-calls."""
+    _WEATHER_LIVE_FAILURES.add(scope)
+    if len(_WEATHER_LIVE_FAILURES) > 200:
+        _WEATHER_LIVE_FAILURES.pop()
+
+def _clear_weather_live_failure(scope: str) -> bool:
+    """Drop leftover weather miss for this channel. True if one was pending."""
+    if scope in _WEATHER_LIVE_FAILURES:
+        _WEATHER_LIVE_FAILURES.discard(scope)
+        return True
+    return False
 
 def _recent_live_failure(scope: str) -> bool:
     failed_at = _LIVE_RESEARCH_FAILURES.get(scope)
@@ -2810,6 +2844,7 @@ async def _consult_live_sources(
     research_prompt: str,
     system_prompt: str,
     tools: tuple | list | None = None,
+    remember_failure: bool = True,
 ) -> dict:
     research = _get_cached_research(research_scope, research_prompt)
     if not research:
@@ -2838,6 +2873,7 @@ async def _consult_live_sources(
     status = str(research.get("status") or "provider_error")[:40]
     if _live_research_succeeded(research):
         _LIVE_RESEARCH_FAILURES.pop(research_scope, None)
+        _WEATHER_LIVE_FAILURES.discard(research_scope)
         record_security_event(
             message,
             "ai_web_research",
@@ -2849,7 +2885,10 @@ async def _consult_live_sources(
             },
         )
         return research
-    _remember_live_failure(research_scope)
+    if remember_failure:
+        _remember_live_failure(research_scope)
+    else:
+        _remember_weather_live_failure(research_scope)
     record_security_event(
         message,
         "ai_web_research",
@@ -5379,6 +5418,11 @@ async def generate_contextual_reply(message: discord.Message) -> ContextualReply
     live_miss_wrap = False
     recent_failure = _recent_live_failure(research_scope)
     weather_ask = _is_weather_ask(current_text)
+    weather_leftover_note = ""
+    if not weather_ask:
+        weather_leftover = _clear_weather_live_failure(research_scope)
+        if weather_leftover or _is_weather_ask(recent_channel_text):
+            weather_leftover_note = f"\n\n{WEATHER_LEFTOVER_TURN_NOTE}\n"
     media_request = parse_chat_media_request(current_text, message)
     if media_request:
         return await fulfill_chat_media_request(
@@ -5429,6 +5473,7 @@ async def generate_contextual_reply(message: discord.Message) -> ContextualReply
             research_prompt=research_prompt,
             system_prompt=live_search_system,
             tools=_search_tools_for(current_text),
+            remember_failure=not weather_ask,
         )
         if _live_research_succeeded(research):
             return ContextualReply(
@@ -5516,7 +5561,7 @@ point, example, or insight. Never pad, repeat yourself, or add filler just to be
 Finish a substantive answer instead of cutting it off for Discord's message limit.
 
 {SUBSTANCE_PROMPT}
-{live_context_block}{miss_wrap_note}"""
+{live_context_block}{miss_wrap_note}{weather_leftover_note}"""
 
     try:
         async with aiohttp.ClientSession(

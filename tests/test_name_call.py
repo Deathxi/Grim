@@ -29,6 +29,30 @@ class NameCallReplyTests(unittest.TestCase):
     def tearDown(self):
         self.user_patch.stop()
 
+    def test_incident_name_calls_need_a_reply(self):
+        name_calls = (
+            "Grim guess who it is",
+            "hello Grim wake up",
+            "Grim, arise.",
+            "Grim, answer the question above.",
+        )
+        for text in name_calls:
+            with self.subTest(text=text):
+                self.assertTrue(main.grim_turn_needs_reply(text), text)
+                self.assertTrue(
+                    main.grim_should_reply_to_message(chat_message(text)),
+                    text,
+                )
+                self.assertFalse(main._is_weather_ask(text), text)
+                self.assertFalse(main._needs_live_sources(text, ""), text)
+                self.assertFalse(
+                    main._needs_live_sources(
+                        text,
+                        "Kōshin: what's the weather tomorrow in the Bay Area?",
+                    ),
+                    text,
+                )
+
     def test_direct_question_to_grim_without_mention_replies(self):
         questions = (
             "I think the patch is solid. what about you grim?",
