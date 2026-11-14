@@ -6193,6 +6193,59 @@ def _format_patch_notes(notes: list[str], max_notes: int = 8) -> str:
         formatted.append(f"• {clean_note}")
     return "\n".join(formatted)
 
+# Labels kept off public /grim_updates deploy cards. Cards still post.
+_DEPLOY_CARD_REDACT_LABEL = "[REDACTED]"
+_DEPLOY_CARD_REDACT_BASENAMES = frozenset({
+    "delete_report.py",
+    "test_delete_report.py",
+})
+_DEPLOY_CARD_REDACT_COMMANDS = ("panopticon", "nightfall")
+
+
+def _deploy_card_path_is_classified(filename) -> bool:
+    name = str(filename).replace("\\", "/")
+    base = name.rsplit("/", 1)[-1]
+    if base in _DEPLOY_CARD_REDACT_BASENAMES:
+        return True
+    lowered = name.lower()
+    return any(command in lowered for command in _DEPLOY_CARD_REDACT_COMMANDS)
+
+
+def _deploy_card_file_names(filenames, limit=10):
+    """File labels for deploy cards. Classified modules render as [REDACTED]."""
+    visible = []
+    redacted = False
+    for filename in filenames:
+        name = str(filename).replace("\\", "/")
+        if _deploy_card_path_is_classified(name):
+            redacted = True
+            continue
+        visible.append(name)
+    if redacted:
+        return visible[: max(limit - 1, 0)] + [_DEPLOY_CARD_REDACT_LABEL]
+    return visible[:limit]
+
+
+def _deploy_card_note_is_classified(note: str) -> bool:
+    lowered = note.lower()
+    if any(base.removesuffix(".py") in lowered for base in _DEPLOY_CARD_REDACT_BASENAMES):
+        return True
+    return any(command in lowered for command in _DEPLOY_CARD_REDACT_COMMANDS)
+
+
+def _deploy_card_patch_notes(notes: list[str]) -> list[str]:
+    """Keep ordinary changelog bullets; classified ones become [REDACTED]."""
+    cleaned = []
+    saw_redacted = False
+    for note in notes:
+        if _deploy_card_note_is_classified(note):
+            saw_redacted = True
+            continue
+        cleaned.append(note)
+    if saw_redacted:
+        cleaned.append(_DEPLOY_CARD_REDACT_LABEL)
+    return cleaned
+
 async def post_update_notification():
     """Post an update embed to all registered channels when the version has changed.
     Fully GitHub-independent — uses persistent disk to track last announced version."""
@@ -6247,9 +6300,11 @@ async def post_update_notification():
         except Exception as e:
             print(f"[Updates] Could not fetch GitHub commit data: {e}")
 
-    # Build embed — always clean and minimal
+    # Build embed — always clean and minimal. Cards still post; classified names do not.
+    public_notes = _deploy_card_patch_notes(patch_notes)
     if new_commits:
-        file_list = "\n".join(f"`{fname}`" for fname in list(changed_files.keys())[:10]) if changed_files else ""
+        file_names = _deploy_card_file_names(changed_files)
+        file_list = "\n".join(f"`{fname}`" for fname in file_names) if file_names else ""
         description = f"**{len(new_commits)} commit(s) deployed**"
         if file_list:
             description += f"\n\n{file_list}"
@@ -6260,10 +6315,10 @@ async def post_update_notification():
         description=description,
         color=discord.Color.from_rgb(18, 18, 18)
     )
-    if patch_notes:
+    if public_notes:
         embed.add_field(
             name="Patch Notes",
-            value=_format_patch_notes(patch_notes),
+            value=_format_patch_notes(public_notes),
             inline=False,
         )
     embed.add_field(name="Repository", value=f"[{repo}](https://github.com/{repo})", inline=True)
