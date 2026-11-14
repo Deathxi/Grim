@@ -4291,6 +4291,9 @@ _GIF_CASUAL_SIGNALS = {
 def _gif_reaction_is_allowed(message_text: str, reply: str, channel_id: str) -> bool:
     if not os.environ.get("KLIPY_API_KEY") and not os.environ.get("GIPHY_API_KEY"):
         return False
+    folded = _output_match_text(_conversation_text(message_text))
+    if _chat_media_correction_followup(folded):
+        return False
     if time.time() - _gif_reaction_last_posted.get(channel_id, 0) < GIF_REACTION_COOLDOWN_SECONDS:
         return False
     combined = f"{message_text} {reply}".lower()
@@ -4565,6 +4568,12 @@ _CHAT_MEDIA_REACTIONS = frozenset({
     "bet", "word", "sheesh", "fire", "holy", "shit", "fuck", "fucking",
     "lmaowtf",
 })
+_CHAT_MEDIA_CORRECTION_RE = re.compile(
+    r"(?:^|(?<!\bof)\s)(?:no|nope|nah)\s+"
+    r"(?:how|not|i\s+meant|that|the\s+other|wrong)\b|"
+    r"(?<!\w)(?:that is not it|thats not it|that not it|"
+    r"not that|not it|wrong one|not what i)\b"
+)
 
 
 def _remember_conversation_media(message, kind: str | None) -> None:
@@ -4588,6 +4597,21 @@ def _chat_media_reaction_line(folded: str) -> bool:
         | _NAME_CALL_GREETINGS
     )
     return all(token in allow for token in tokens)
+
+
+def _chat_media_correction_followup(folded: str) -> bool:
+    """True for 'no not that' / 'that's not it' corrections, not a new file ask."""
+    if not folded:
+        return False
+    match = None
+    for found in _CHAT_MEDIA_CORRECTION_RE.finditer(folded):
+        match = found
+    if match is None:
+        return False
+    rest = folded[match.end():].strip()
+    if rest and _explicit_chat_media_ask(rest):
+        return False
+    return True
 
 
 def _explicit_chat_media_ask(folded: str) -> bool:
@@ -4620,12 +4644,17 @@ def _explicit_chat_media_ask(folded: str) -> bool:
 def parse_chat_media_request(text: str | None, message=None) -> dict | None:
     """Visual ask: GIF, picture, meme/copypasta image. Not ASCII unless asked.
 
-    Conversation hold does not turn reactions or follow-ups into files.
-    A prior GIF/picture in the thread is not enough; this turn has to ask.
+    Conversation hold does not turn reactions, corrections, or follow-ups
+    into files. A prior GIF/picture in the thread is not enough; this turn
+    has to ask. Leftover `_conversation_media_kind` is never a send.
     """
     visible = _conversation_text(text)
     folded = _output_match_text(visible)
-    if not folded or not _explicit_chat_media_ask(folded):
+    if not folded:
+        return None
+    if _chat_media_correction_followup(folded):
+        return None
+    if not _explicit_chat_media_ask(folded):
         return None
     wants_gif = bool(_CHAT_GIF_RE.search(folded))
     wants_image = bool(_CHAT_IMAGE_RE.search(folded))
@@ -5434,8 +5463,7 @@ async def generate_contextual_reply(message: discord.Message) -> ContextualReply
             live_search_system=live_search_system,
             current_text=current_text,
         )
-    if weather_ask:
-        _remember_conversation_media(message, None)
+    _remember_conversation_media(message, None)
     if current_text and _is_self_capability_question(current_text):
         research = await _consult_live_sources(
             message,
@@ -5551,7 +5579,7 @@ KNOWLEDGE & RESEARCH:
 You always know today's date — it's injected into this prompt. Never guess at the date or assert a different one. Grim has a read-only live web research tool that is automatically consulted when a request needs fresh information. Verified live research answers are handled by an isolated responder and never inserted into this prompt. Never claim that Grim has no web access. Questions about facts, information, or method are routed to that research before this prompt runs, so never state current facts, a person's current role, or recent events from memory here. Lyrics, references, greetings, and creative play can come from what you know.
 
 WHAT YOU DON'T DO:
-Never open with greetings, "Ah", affirmations, or any kind of opener — just start talking. Don't end with a question every message, let replies breathe. No em dashes. No bullet points in replies, natural prose only. Don't announce being an AI unless directly and sincerely asked. Don't lean on the Grim Reaper framing — that's just your name, not your whole personality. Never reference your own bot functions, background tasks, monitoring duties, newsfeeds, or anything about "watching the server" — that's internal, not part of your personality. If someone asks a normal question, just answer it. Never claim Discord cannot show GIFs or pictures, and never say you are text-only. Never substitute ASCII, text art, or copypasta-as-text when they asked for a picture, GIF, meme image, or clip. ASCII only if they explicitly asked for ascii or text art. Visual asks are fulfilled before this prompt.
+Never open with greetings, "Ah", affirmations, or any kind of opener — just start talking. Don't end with a question every message, let replies breathe. No em dashes. No bullet points in replies, natural prose only. Don't announce being an AI unless directly and sincerely asked. Don't lean on the Grim Reaper framing — that's just your name, not your whole personality. Never reference your own bot functions, background tasks, monitoring duties, newsfeeds, or anything about "watching the server" — that's internal, not part of your personality. If someone asks a normal question, just answer it. Never claim Discord cannot show GIFs or pictures, and never say you are text-only. Never substitute ASCII, text art, or copypasta-as-text when they asked for a picture, GIF, meme image, or clip. ASCII only if they explicitly asked for ascii or text art. Visual asks are fulfilled before this prompt. If they correct a GIF or picture you just sent without asking for another file, reply in text — do not send or pretend to send another image.
 
 RESPONSE LENGTH:
 Match what the moment calls for. Short message, short reply. Real conversation or a
