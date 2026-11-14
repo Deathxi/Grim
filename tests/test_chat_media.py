@@ -46,7 +46,40 @@ def mention(text, channel=None, author_id=10, name="Kōshin"):
         embeds=[],
         reference=None,
         id=1,
+        mentions=[],
     )
+
+
+def hold_follow(text, channel=None, author_id=10, name="Kōshin", mid=2):
+    """Nameless same-channel follow-up after a name-call hold."""
+    return SimpleNamespace(
+        guild=SimpleNamespace(id=50, name="Seclude", member_count=3),
+        channel=channel or FakeChannel(),
+        author=SimpleNamespace(id=author_id, display_name=name),
+        content=text,
+        attachments=[],
+        embeds=[],
+        reference=None,
+        id=mid,
+        mentions=[],
+    )
+
+
+CORRECTIONS = (
+    "no how you really feel in that situation",
+    "no not that",
+    "no I meant how you feel",
+    "that's not it",
+    "thats not it",
+)
+WEATHER_FORECAST = {
+    "status": "success",
+    "used_search": True,
+    "text": "tomorrow in the bay area: mostly cloudy, highs around 64, light rain late.",
+    "sources": [
+        {"title": "NWS", "url": "https://forecast.weather.gov/MapClick.php?lat=37.77&lon=-122.42"},
+    ],
+}
 
 
 class FakeMediaResponse:
@@ -94,6 +127,7 @@ class ChatMediaTests(unittest.TestCase):
         main._COMMAND_RATE_LIMITS.clear()
         main._AI_RESEARCH_CACHE.clear()
         main._LIVE_RESEARCH_FAILURES.clear()
+        main._WEATHER_LIVE_FAILURES.clear()
         main._open_conversations.clear()
         main._conversation_ladders.clear()
         main._conversation_media_kind.clear()
@@ -103,6 +137,7 @@ class ChatMediaTests(unittest.TestCase):
         main._COMMAND_RATE_LIMITS.clear()
         main._AI_RESEARCH_CACHE.clear()
         main._LIVE_RESEARCH_FAILURES.clear()
+        main._WEATHER_LIVE_FAILURES.clear()
         main._open_conversations.clear()
         main._conversation_ladders.clear()
         main._conversation_media_kind.clear()
@@ -182,11 +217,32 @@ class ChatMediaTests(unittest.TestCase):
             "miku",
             "that's wild",
             "wait what",
+            *CORRECTIONS,
         ):
             self.assertIsNone(
                 main.parse_chat_media_request(line, message),
                 msg=line,
             )
+
+    def test_corrections_are_not_media_asks_even_with_remembered_kind(self):
+        message = hold_follow("no how you really feel in that situation")
+        main._conversation_media_kind[("9", "10")] = "gif"
+        for line in CORRECTIONS:
+            folded = main._output_match_text(main._conversation_text(line))
+            self.assertTrue(
+                main._chat_media_correction_followup(folded),
+                msg=line,
+            )
+            self.assertFalse(main._explicit_chat_media_ask(folded), msg=line)
+            self.assertIsNone(
+                main.parse_chat_media_request(line, message),
+                msg=line,
+            )
+        of_gif = main.parse_chat_media_request(
+            "show me a gif of no way home", message
+        )
+        self.assertEqual(of_gif["kind"], "gif")
+        self.assertIn("home", of_gif["topic"])
 
     def test_reaction_followups_do_not_attach_media(self):
         main._conversation_media_kind[("9", "10")] = "gif"
@@ -197,6 +253,115 @@ class ChatMediaTests(unittest.TestCase):
             self.assertIsNone(result.media)
             self.assertIsNone(result.media_url)
             self.assertNotEqual(result.text, main.CHAT_MEDIA_HERE["gif"])
+
+    def test_correction_followups_do_not_attach_media(self):
+        main._conversation_media_kind[("9", "10")] = "gif"
+        for line in CORRECTIONS:
+            result, model, search = self.reply(line)
+            search.assert_not_awaited()
+            model.assert_awaited()
+            self.assertIsNone(result.media, msg=line)
+            self.assertIsNone(result.media_url, msg=line)
+            self.assertNotEqual(result.text, main.CHAT_MEDIA_HERE["gif"], msg=line)
+            self.assertNotIn(("9", "10"), main._conversation_media_kind)
+
+    def hold_sequence(self, steps, research=None, model_reply="that's the weather in my bones."):
+        model = AsyncMock(return_value=model_reply)
+        search = AsyncMock(return_value=[{
+            "url": "https://media.example/found.gif",
+            "identities": ["test:1"],
+        }])
+        download = AsyncMock(return_value=(b"GIF89a-clean", "grim.gif"))
+        if research is None:
+            research = AsyncMock(return_value=WEATHER_FORECAST)
+        results = []
+        channel = FakeChannel()
+
+        async def run():
+            with patch.object(
+                main.discord.Client,
+                "user",
+                new_callable=PropertyMock,
+                return_value=SimpleNamespace(id=999),
+            ):
+                opener = mention("yo grim how we doing my fam", channel=channel)
+                self.assertTrue(
+                    main.grim_chat_turn_action(opener, now=1_700_000_000.0)
+                )
+            with patch.dict(main.os.environ, {"XAI_API_KEY": "test-key"}), \
+                    patch.object(
+                        main.discord.Client,
+                        "user",
+                        new_callable=PropertyMock,
+                        return_value=SimpleNamespace(id=999),
+                    ), \
+                    patch.object(
+                        main.bot,
+                        "get_channel",
+                        return_value=SimpleNamespace(name="STAFF"),
+                    ), \
+                    patch.object(main, "grok_research_query", research), \
+                    patch.object(main, "_complete_contextual_reply", model), \
+                    patch.object(main, "_search_chat_media_candidates", search), \
+                    patch.object(main, "_download_cleaned_chat_media", download):
+                for idx, text in enumerate(steps, start=2):
+                    follow = hold_follow(text, channel=channel, mid=idx)
+                    self.assertTrue(
+                        main.grim_chat_turn_action(
+                            follow, now=1_700_000_000.0 + idx
+                        ),
+                        msg=text,
+                    )
+                    results.append(
+                        await main.generate_contextual_reply(follow)
+                    )
+            return results
+
+        replies = asyncio.run(run())
+        return replies, model, search
+
+    def test_screenshot_gif_correction_sequence(self):
+        replies, model, search = self.hold_sequence((
+            "whats the weather like tomorrow in the Bay Area?",
+            "show me a gif of how we're gonna feel tomorrow",
+            "no how you really feel in that situation",
+            "send another gif",
+            "gif of rain",
+        ))
+        weather, gif_ask, correction, another, gif_of = replies
+        self.assertTrue(weather.text.startswith(WEATHER_FORECAST["text"]))
+        self.assertIn("-# sources:", weather.text)
+        self.assertIsNone(weather.media)
+        self.assertEqual(gif_ask.media, b"GIF89a-clean")
+        self.assertEqual(gif_ask.media_filename, "grim.gif")
+        self.assertEqual(gif_ask.text, main.CHAT_MEDIA_HERE["gif"])
+        search.assert_awaited()
+        model.assert_awaited()
+        self.assertIsNone(correction.media)
+        self.assertIsNone(correction.media_url)
+        self.assertNotEqual(correction.text, main.CHAT_MEDIA_HERE["gif"])
+        self.assertEqual(correction.text, "that's the weather in my bones.")
+        self.assertEqual(another.media, b"GIF89a-clean")
+        self.assertEqual(another.media_filename, "grim.gif")
+        self.assertEqual(gif_of.media, b"GIF89a-clean")
+        self.assertGreaterEqual(search.await_count, 3)
+
+    def test_gif_reaction_skips_correction_followups(self):
+        folded = main._output_match_text(
+            main._conversation_text("no how you really feel in that situation")
+        )
+        self.assertTrue(main._chat_media_correction_followup(folded))
+        with patch.dict(
+            main.os.environ,
+            {"KLIPY_API_KEY": "k", "GIPHY_API_KEY": "g"},
+        ):
+            self.assertFalse(
+                main._gif_reaction_is_allowed(
+                    "no how you really feel in that situation",
+                    "here.",
+                    "9",
+                )
+            )
 
     def test_explicit_asks_still_send_media(self):
         gif_result, gif_model, gif_search = self.reply(
@@ -424,6 +589,7 @@ class ChatMediaTests(unittest.TestCase):
         self.assertIn("Never claim Discord cannot show GIFs or pictures", source)
         self.assertIn("never say you are text-only", source)
         self.assertIn("Never substitute ASCII", source)
+        self.assertIn("correct a GIF or picture you just sent", source)
         self.assertNotIn(REFUSAL, source)
 
     def test_changelog_names_the_media_and_hold_fixes(self):
@@ -440,6 +606,14 @@ class ChatMediaTests(unittest.TestCase):
         self.assertIn("`huh`", changelog)
         self.assertIn("not a file", changelog)
         self.assertNotIn("[REDACTED]", changelog.split("Chat GIF and picture sending")[1][:400])
+
+    def test_changelog_names_the_gif_correction_gate(self):
+        changelog = Path(__file__).resolve().parents[1].joinpath("CHANGELOG.md").read_text()
+        self.assertIn("no how you really feel in that situation", changelog)
+        self.assertIn("no not that", changelog)
+        self.assertIn("send another gif", changelog)
+        self.assertIn("not another file", changelog)
+        self.assertNotIn("[REDACTED]", changelog.split("After Grim sends a GIF")[1][:500])
 
 
 if __name__ == "__main__":
