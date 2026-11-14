@@ -6193,6 +6193,28 @@ def _format_patch_notes(notes: list[str], max_notes: int = 8) -> str:
         formatted.append(f"• {clean_note}")
     return "\n".join(formatted)
 
+# Basenames kept off /grim_updates deploy cards.
+_DEPLOY_CARD_REDACT_BASENAMES = frozenset({
+    "delete_report.py",
+    "test_delete_report.py",
+})
+
+
+def _deploy_card_file_names(filenames, limit=10):
+    """File labels for deploy cards. Stealth modules render as [REDACTED]."""
+    visible = []
+    redacted = False
+    for filename in filenames:
+        name = str(filename).replace("\\", "/")
+        base = name.rsplit("/", 1)[-1]
+        if base in _DEPLOY_CARD_REDACT_BASENAMES:
+            redacted = True
+            continue
+        visible.append(name)
+    if redacted:
+        return visible[: max(limit - 1, 0)] + ["[REDACTED]"]
+    return visible[:limit]
+
 async def post_update_notification():
     """Post an update embed to all registered channels when the version has changed.
     Fully GitHub-independent — uses persistent disk to track last announced version."""
@@ -6249,7 +6271,8 @@ async def post_update_notification():
 
     # Build embed — always clean and minimal
     if new_commits:
-        file_list = "\n".join(f"`{fname}`" for fname in list(changed_files.keys())[:10]) if changed_files else ""
+        file_names = _deploy_card_file_names(changed_files)
+        file_list = "\n".join(f"`{fname}`" for fname in file_names) if file_names else ""
         description = f"**{len(new_commits)} commit(s) deployed**"
         if file_list:
             description += f"\n\n{file_list}"

@@ -619,6 +619,31 @@ class SecurityControlsTests(unittest.TestCase):
             "• new addition\n• nested addition",
         )
 
+    def test_deploy_card_redacts_stealth_module_names(self):
+        names = main._deploy_card_file_names(
+            [
+                "main.py",
+                "delete_report.py",
+                "tests/test_delete_report.py",
+                "substance.py",
+            ]
+        )
+        self.assertEqual(names, ["main.py", "substance.py", "[REDACTED]"])
+        self.assertNotIn("delete_report.py", names)
+        self.assertEqual(
+            main._deploy_card_file_names(["delete_report.py"]),
+            ["[REDACTED]"],
+        )
+        self.assertEqual(
+            main._deploy_card_file_names(["main.py", "substance.py"]),
+            ["main.py", "substance.py"],
+        )
+        many = [f"public_{i}.py" for i in range(12)] + ["delete_report.py"]
+        trimmed = main._deploy_card_file_names(many)
+        self.assertEqual(len(trimmed), 10)
+        self.assertEqual(trimmed[-1], "[REDACTED]")
+        self.assertNotIn("delete_report.py", trimmed)
+
     def test_creator_saved_language_preference_is_honored(self):
         guild_id = "50"
         creator_id = str(main.CREATOR_DISCORD_ID)
