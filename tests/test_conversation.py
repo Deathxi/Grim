@@ -91,6 +91,7 @@ class ConversationPersistenceTests(unittest.TestCase):
         )
         self.assertFalse(main.grim_turn_needs_reply(FOLLOW_UP))
         self.assertFalse(main.grim_should_reply_to_message(follow))
+        self.assertTrue(main._follow_up_in_reply_ladder(follow))
         self.assertTrue(main.grim_chat_turn_action(follow, now=T0 + 10))
         self.assertTrue(main._needs_live_sources(FOLLOW_UP, ""))
 
@@ -103,11 +104,23 @@ class ConversationPersistenceTests(unittest.TestCase):
         )
         self.assertTrue(main.grim_chat_turn_action(follow, now=T0 + 8))
 
-    def test_same_channel_message_without_a_discord_reply_does_not_continue(self):
+    def test_same_channel_follow_up_without_a_discord_reply_still_replies(self):
         opener = self.start_opener()
-        bare = chat_message(FOLLOW_UP, mid=FOLLOW_ID, reference=None)
-        self.assertFalse(main.grim_chat_turn_action(bare, now=T0 + 10))
-        self.assertTrue(main.grim_conversation_open(opener, now=T0 + 10))
+        lines = (
+            "how we doing boss man",
+            "bro",
+            "can you help please?",
+            "Grim",
+            "you there bruh",
+            FOLLOW_UP,
+        )
+        for idx, text in enumerate(lines, start=FOLLOW_ID):
+            with self.subTest(text=text):
+                bare = chat_message(text, mid=idx, reference=None)
+                self.assertFalse(main.grim_should_reply_to_message(bare))
+                self.assertTrue(main.grim_chat_turn_action(bare, now=T0 + idx))
+        self.assertTrue(main.grim_conversation_open(opener, now=T0 + FOLLOW_ID))
+        self.assertTrue(main._needs_live_sources(FOLLOW_UP, ""))
 
     def test_timeout_ends_the_conversation(self):
         self.start_opener()
@@ -129,6 +142,19 @@ class ConversationPersistenceTests(unittest.TestCase):
                 follow, now=T0 + main.CONVERSATION_IDLE_SECONDS + 1
             )
         )
+        bare = chat_message("you there bruh", mid=3, reference=None)
+        self.assertFalse(
+            main.grim_chat_turn_action(
+                bare, now=T0 + main.CONVERSATION_IDLE_SECONDS + 1
+            )
+        )
+
+    def test_lone_grim_ping_continues_only_while_the_conversation_is_open(self):
+        ping = chat_message("Grim", mid=FOLLOW_ID, reference=None)
+        self.assertFalse(main.grim_should_reply_to_message(ping))
+        self.assertFalse(main.grim_chat_turn_action(ping, now=T0))
+        self.start_opener()
+        self.assertTrue(main.grim_chat_turn_action(ping, now=T0 + 4))
 
     def test_addressing_someone_else_by_mention_ends_it(self):
         opener = self.start_opener()
@@ -136,7 +162,7 @@ class ConversationPersistenceTests(unittest.TestCase):
             "hey check this",
             mid=FOLLOW_ID,
             mentions=[OTHER],
-            reference=reply_to(GRIM_REPLY_ID),
+            reference=None,
         )
         self.assertTrue(main.grim_follow_up_addresses_someone_else(aside))
         self.assertFalse(main.grim_chat_turn_action(aside, now=T0 + 12))
@@ -144,7 +170,7 @@ class ConversationPersistenceTests(unittest.TestCase):
         later = chat_message(
             FOLLOW_UP,
             mid=3,
-            reference=reply_to(GRIM_REPLY_ID),
+            reference=None,
         )
         self.assertFalse(main.grim_chat_turn_action(later, now=T0 + 13))
 
@@ -153,7 +179,7 @@ class ConversationPersistenceTests(unittest.TestCase):
         aside = chat_message(
             "hey noct you seeing this?",
             mid=FOLLOW_ID,
-            reference=reply_to(GRIM_REPLY_ID),
+            reference=None,
         )
         self.assertTrue(main.grim_follow_up_addresses_someone_else(aside))
         self.assertFalse(main.grim_chat_turn_action(aside, now=T0 + 12))
@@ -175,7 +201,7 @@ class ConversationPersistenceTests(unittest.TestCase):
             "yeah that weather sucks",
             author=OTHER,
             mid=7,
-            reference=reply_to(GRIM_REPLY_ID),
+            reference=None,
         )
         self.assertFalse(main.grim_should_reply_to_message(side))
         self.assertFalse(main.grim_chat_turn_action(side, now=T0 + 200))
@@ -183,7 +209,7 @@ class ConversationPersistenceTests(unittest.TestCase):
         expired = chat_message(
             FOLLOW_UP,
             mid=FOLLOW_ID,
-            reference=reply_to(GRIM_REPLY_ID),
+            reference=None,
         )
         self.assertFalse(
             main.grim_chat_turn_action(
@@ -227,13 +253,13 @@ class ConversationPersistenceTests(unittest.TestCase):
         follow = chat_message(
             FOLLOW_UP,
             mid=FOLLOW_ID,
-            reference=reply_to(GRIM_REPLY_ID),
+            reference=None,
         )
         self.assertTrue(main.grim_chat_turn_action(follow, now=T0 + 200))
         later = chat_message(
             "and tonight?",
             mid=3,
-            reference=reply_to(FOLLOW_ID),
+            reference=None,
         )
         self.assertTrue(main.grim_chat_turn_action(later, now=T0 + 400))
         self.assertFalse(
@@ -241,7 +267,7 @@ class ConversationPersistenceTests(unittest.TestCase):
                 chat_message(
                     "still there?",
                     mid=4,
-                    reference=reply_to(FOLLOW_ID),
+                    reference=None,
                 ),
                 now=T0 + 400 + main.CONVERSATION_IDLE_SECONDS + 1,
             )
@@ -253,35 +279,71 @@ class ConversationPersistenceTests(unittest.TestCase):
             FOLLOW_UP,
             channel=OTHER_CHANNEL,
             mid=FOLLOW_ID,
-            reference=reply_to(GRIM_REPLY_ID),
+            reference=None,
         )
         self.assertFalse(main.grim_chat_turn_action(other, now=T0 + 10))
+        ladder = chat_message(
+            FOLLOW_UP,
+            channel=OTHER_CHANNEL,
+            mid=3,
+            reference=reply_to(GRIM_REPLY_ID),
+        )
+        self.assertFalse(main.grim_chat_turn_action(ladder, now=T0 + 11))
 
-    def test_on_message_uses_the_reply_ladder_gate(self):
+    def test_on_message_uses_the_conversation_gate(self):
         source = Path(main.__file__).read_text()
         self.assertIn("grim_chat_turn_action(message)", source)
         self.assertIn("grim_should_reply_to_message(message)", source)
         self.assertIn("CONVERSATION_IDLE_SECONDS = 300", source)
-        self.assertNotIn("[REDACTED]", source[source.index("def grim_chat_turn_action"):source.index("async def generate_haiku")])
+        action = source[
+            source.index("def grim_chat_turn_action") : source.index(
+                "async def generate_haiku"
+            )
+        ]
+        self.assertNotIn("[REDACTED]", action)
+        self.assertIn("without a Discord", action)
+        miss = 'Live Search has zero info on this'
+        self.assertIn(miss, source)
+        self.assertNotIn(miss, action)
 
     def test_changelog_feeds_conversation_patch_notes(self):
         changelog = Path(__file__).resolve().parents[1].joinpath("CHANGELOG.md").read_text()
-        self.assertIn("Discord reply chain", changelog)
+        self.assertIn("same channel", changelog)
+        self.assertIn("without a Discord reply-arrow", changelog)
+        self.assertIn("Discord reply-ladder messages still continue", changelog)
         self.assertIn("5 minutes of silence", changelog)
         self.assertIn("without naming him again", changelog)
         self.assertIn("weather or fact questions still live-search", changelog)
         self.assertIn("mention or address someone else", changelog)
-        patch = """@@ -7,6 +7,8 @@
+        self.assertIn('lone "Grim" ping still counts as "you there"', changelog)
+        added = (
+            "After a name-call (`Grim` with or without @), Grim stays with that "
+            "original poster in the same channel. Follow-ups get a reply even "
+            "without naming him again and without a Discord reply-arrow; Discord "
+            "reply-ladder messages still continue, and weather or fact questions "
+            "still live-search. The conversation ends after 5 minutes of silence "
+            "from the original poster, or as soon as they mention or address "
+            "someone else. Other people's side talk does not keep him in."
+        )
+        fixed = (
+            "After a name-call, in-channel follow-ups from the original poster "
+            "keep the conversation even when they are not Discord replies. A "
+            'lone "Grim" ping still counts as "you there" while the conversation '
+            "is open."
+        )
+        patch = f"""@@ -7,6 +7,10 @@
  ### Added
-+- After a name-call (`Grim` with or without @), Grim stays in that Discord reply chain with the original poster. Follow-ups in the reply ladder get a reply even without naming him again, and weather or fact questions still live-search. The conversation ends after 5 minutes of silence from the original poster, or as soon as they mention or address someone else. Other people's side talk does not keep him in.
++- {added}
  ### Fixed
++- {fixed}
  context
 """
         notes = main._extract_added_changelog_notes(patch)
         public = main._deploy_card_patch_notes(notes)
         self.assertEqual(notes, public)
-        self.assertEqual(len(public), 1)
-        self.assertIn("Discord reply chain", public[0])
+        self.assertEqual(len(public), 2)
+        self.assertIn("same channel", public[0])
+        self.assertIn("not Discord replies", public[1])
         self.assertNotIn("[REDACTED]", main._format_patch_notes(public))
 
 
