@@ -38,4 +38,12 @@ When adding new time-based or scheduled commands:
 2. Add an `after_loop` handler to log unexpected stops
 3. Update `/newsfeed_status` (or the relevant status surface) to show the new task
 
+Public `/grim_updates` cards and CHANGELOG are the default. Apply stealth,
+`[REDACTED]` names, or skip-changelog only when Death says the code word
+CLASSIFIED (for example, "this is CLASSIFIED"). Do not infer it from filenames
+or feature area. When he says CLASSIFIED, ask in chat first with a
+recommendation among: (1) redacted card (`[REDACTED]` classified module names),
+(2) vanish (skip the public card; record privately), (3) stealth. Do not pick
+for him. Ordinary deploys keep real filenames and patch notes.
+
 Do not reintroduce Replit scaffolding or any “auto-sync source to GitHub” helper.

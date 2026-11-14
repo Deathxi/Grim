@@ -7,6 +7,7 @@ All notable changes to this project are documented here, organized by month.
 ## November 2026
 
 ### Added
+- Grim replies when someone names him with a real entrance or need: a question, a ping for his take, or a direct address. An @mention is not required. Empty pings and drive-by name-drops get no reply.
 - `/panopticon` — Founder-only toggle for the private deletion-report watch (including bulk delete and `/clear`). Defaults on. Run it to turn the watch off or back on. Only the Discord user ID in `FOUNDER_DISCORD_ID` / `GRIM_FOUNDER_ID` (VPS `.env`, never git) can use it. The switch persists under `~/.grim_data` so it survives restarts. When off, Grim does not DM those reports; `/clear` logs in the `/grim_updates` channel are unchanged.
 - Deleted-message reports. Grim DMs the user ID in `FOUNDER_DISCORD_ID` (alias `GRIM_FOUNDER_ID`) when a guild message is deleted, including bulk delete: channel, who deleted it when Discord's audit log provides the actor (otherwise "actor unknown"), and the posted content when the message was cached or stored. These reports are not posted to `/grim_updates`, staff, or public channels. If DMs are closed, Grim logs the failure without message content and does not fall back to a server channel. `/panopticon` toggles those DMs on or off without a code change.
 - Reply auditor (`reply_auditor.py`). By default it stays out of normal chat. It only steps in if a job or command runs longer than ten minutes, or if Grim hits an error (then a short "broke on my end" line). Optional burst/loop/voice pacing is off unless `GRIM_AUDITOR_PACE_CHAT` / `GRIM_AUDITOR_REVIEW` are on. If the auditor itself fails, Grim replies as before. Events are counts only under `~/.grim_data`. The OPSEC REPORT, DEFCON board, `/grim_opsec`, and heartbeats are unchanged.
@@ -18,6 +19,7 @@ All notable changes to this project are documented here, organized by month.
 - `/trivia subject` — a private, dismissible ten-question quiz. Grim writes the round through the existing xAI path, shows one four-choice question at a time, and scores the invoking member out of 10. A bad subject or a failed generation stops the round instead of posting a partial quiz.
 
 ### Fixed
+- `/grim_updates` deploy cards keep normal patch notes and real filenames on ordinary deploys. Filename hiding applies only when that deploy is explicitly labeled CLASSIFIED.
 - Live-search replies still show blue source links, but Discord no longer unfurls those URLs into a stack of rich embeds under the message. Casual Grim messages still unfurl as usual.
 
 ### Changed

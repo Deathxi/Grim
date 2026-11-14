@@ -6338,13 +6338,39 @@ def _format_patch_notes(notes: list[str], max_notes: int = 8) -> str:
         formatted.append(f"• {clean_note}")
     return "\n".join(formatted)
 
-# Labels kept off public /grim_updates deploy cards. Cards still post.
+# Classified module labels stay off public cards, and only when the deploy
+# itself was labeled CLASSIFIED (for example "this is CLASSIFIED").
 _DEPLOY_CARD_REDACT_LABEL = "[REDACTED]"
 _DEPLOY_CARD_REDACT_BASENAMES = frozenset({
     "delete_report.py",
     "test_delete_report.py",
 })
 _DEPLOY_CARD_REDACT_COMMANDS = ("panopticon", "nightfall")
+_CLASSIFIED_DEPLOY_LABEL = re.compile(
+    r"(?:(?i:this\s+is\s+)CLASSIFIED\b"
+    r"|^CLASSIFIED(?:\s*[:.\-]|\s*$)"
+    r"|\[CLASSIFIED\])",
+    re.MULTILINE,
+)
+
+
+def _commit_message_text(commit) -> str:
+    if isinstance(commit, str):
+        return commit
+    if not isinstance(commit, dict):
+        return ""
+    inner = commit.get("commit")
+    if isinstance(inner, dict):
+        return str(inner.get("message") or "")
+    return str(commit.get("message") or "")
+
+
+def _commits_are_classified(commits) -> bool:
+    """True only when a commit explicitly labels the work CLASSIFIED."""
+    for commit in commits or ():
+        if _CLASSIFIED_DEPLOY_LABEL.search(_commit_message_text(commit)):
+            return True
+    return False
 
 
 def _deploy_card_path_is_classified(filename) -> bool:
@@ -6356,12 +6382,18 @@ def _deploy_card_path_is_classified(filename) -> bool:
     return any(command in lowered for command in _DEPLOY_CARD_REDACT_COMMANDS)
 
 
-def _deploy_card_file_names(filenames, limit=10):
-    """File labels for deploy cards. Classified modules render as [REDACTED]."""
+def _deploy_card_file_names(filenames, limit=10, *, classified=False):
+    """File labels for deploy cards.
+
+    Ordinary deploys list real names. CLASSIFIED deploys render classified
+    modules as [REDACTED].
+    """
+    names = [str(filename).replace("\\", "/") for filename in filenames]
+    if not classified:
+        return names[:limit]
     visible = []
     redacted = False
-    for filename in filenames:
-        name = str(filename).replace("\\", "/")
+    for name in names:
         if _deploy_card_path_is_classified(name):
             redacted = True
             continue
@@ -6378,8 +6410,10 @@ def _deploy_card_note_is_classified(note: str) -> bool:
     return any(command in lowered for command in _DEPLOY_CARD_REDACT_COMMANDS)
 
 
-def _deploy_card_patch_notes(notes: list[str]) -> list[str]:
-    """Keep ordinary changelog bullets; classified ones become [REDACTED]."""
+def _deploy_card_patch_notes(notes: list[str], *, classified=False) -> list[str]:
+    """Ordinary deploys keep changelog bullets. CLASSIFIED ones redact."""
+    if not classified:
+        return list(notes)
     cleaned = []
     saw_redacted = False
     for note in notes:
@@ -6445,10 +6479,12 @@ async def post_update_notification():
         except Exception as e:
             print(f"[Updates] Could not fetch GitHub commit data: {e}")
 
-    # Build embed — always clean and minimal. Cards still post; classified names do not.
-    public_notes = _deploy_card_patch_notes(patch_notes)
+    # Ordinary deploys keep real filenames and changelog bullets.
+    # CLASSIFIED deploys still post a card, with classified modules redacted.
+    classified = _commits_are_classified(new_commits)
+    public_notes = _deploy_card_patch_notes(patch_notes, classified=classified)
     if new_commits:
-        file_names = _deploy_card_file_names(changed_files)
+        file_names = _deploy_card_file_names(changed_files, classified=classified)
         file_list = "\n".join(f"`{fname}`" for fname in file_names) if file_names else ""
         description = f"**{len(new_commits)} commit(s) deployed**"
         if file_list:

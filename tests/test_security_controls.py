@@ -619,27 +619,45 @@ class SecurityControlsTests(unittest.TestCase):
             "• new addition\n• nested addition",
         )
 
+    def test_ordinary_deploys_list_real_names_including_classified_modules(self):
+        ordinary = [
+            "main.py",
+            "tests/test_name_call.py",
+            ".github/workflows/test.yml",
+        ]
+        mixed = ordinary + ["delete_report.py", "tests/test_delete_report.py"]
+        self.assertEqual(main._deploy_card_file_names(ordinary), ordinary)
+        self.assertEqual(main._deploy_card_file_names(mixed), mixed)
+        self.assertNotIn("[REDACTED]", main._deploy_card_file_names(mixed))
+
     def test_deploy_card_redacts_stealth_module_names(self):
         names = main._deploy_card_file_names(
             [
                 "main.py",
                 "delete_report.py",
                 "tests/test_delete_report.py",
+                "tests/test_name_call.py",
                 "substance.py",
-            ]
+            ],
+            classified=True,
         )
-        self.assertEqual(names, ["main.py", "substance.py", "[REDACTED]"])
+        self.assertEqual(
+            names,
+            ["main.py", "tests/test_name_call.py", "substance.py", "[REDACTED]"],
+        )
         self.assertNotIn("delete_report.py", names)
         self.assertEqual(
-            main._deploy_card_file_names(["delete_report.py"]),
+            main._deploy_card_file_names(["delete_report.py"], classified=True),
             ["[REDACTED]"],
         )
         self.assertEqual(
-            main._deploy_card_file_names(["main.py", "substance.py"]),
+            main._deploy_card_file_names(
+                ["main.py", "substance.py"], classified=True
+            ),
             ["main.py", "substance.py"],
         )
         many = [f"public_{i}.py" for i in range(12)] + ["delete_report.py"]
-        trimmed = main._deploy_card_file_names(many)
+        trimmed = main._deploy_card_file_names(many, classified=True)
         self.assertEqual(len(trimmed), 10)
         self.assertEqual(trimmed[-1], "[REDACTED]")
         self.assertNotIn("delete_report.py", trimmed)
@@ -648,7 +666,8 @@ class SecurityControlsTests(unittest.TestCase):
         ordinary = ["trivia scoring fix", "zork hud tweak"]
         for command in main._DEPLOY_CARD_REDACT_COMMANDS:
             names = main._deploy_card_file_names(
-                ["main.py", f"docs/{command}.md", "substance.py"]
+                ["main.py", f"docs/{command}.md", "substance.py"],
+                classified=True,
             )
             joined_names = "\n".join(names).lower()
             self.assertNotIn(command, joined_names)
@@ -657,7 +676,8 @@ class SecurityControlsTests(unittest.TestCase):
             self.assertIn("substance.py", names)
 
             notes = main._deploy_card_patch_notes(
-                ordinary + [f"/{command} founder toggle"]
+                ordinary + [f"/{command} founder toggle"],
+                classified=True,
             )
             joined_notes = "\n".join(notes).lower()
             self.assertNotIn(command, joined_notes)
@@ -667,6 +687,70 @@ class SecurityControlsTests(unittest.TestCase):
             self.assertIn("[REDACTED]", formatted)
 
         self.assertEqual(main._deploy_card_patch_notes(ordinary), ordinary)
+        self.assertEqual(
+            main._deploy_card_patch_notes(ordinary, classified=False),
+            ordinary,
+        )
+
+    def test_classified_label_requires_explicit_code_word(self):
+        self.assertTrue(
+            main._commits_are_classified(
+                [{"commit": {"message": "this is CLASSIFIED\n\nfounder-only watch"}}]
+            )
+        )
+        self.assertTrue(main._commits_are_classified(["This is CLASSIFIED."]))
+        self.assertTrue(main._commits_are_classified(["CLASSIFIED:\nredacted card"]))
+        self.assertTrue(main._commits_are_classified(["[CLASSIFIED] vanish"]))
+        self.assertFalse(
+            main._commits_are_classified(
+                [
+                    {
+                        "commit": {
+                            "message": "Reply to name-calls when the turn has an entrance."
+                        }
+                    }
+                ]
+            )
+        )
+        self.assertFalse(
+            main._commits_are_classified(
+                [
+                    "Voice, live-search miss wording, CLASSIFIED commands unchanged."
+                ]
+            )
+        )
+        self.assertFalse(
+            main._commits_are_classified(
+                ["Redact classified names on /grim_updates deploy cards."]
+            )
+        )
+        self.assertFalse(main._commits_are_classified([]))
+        source = Path(main.__file__).read_text()
+        self.assertIn("_commits_are_classified(new_commits)", source)
+
+    def test_changelog_feeds_name_call_patch_notes(self):
+        changelog = Path(__file__).resolve().parents[1].joinpath("CHANGELOG.md").read_text()
+        self.assertIn(
+            "Grim replies when someone names him with a real entrance or need",
+            changelog,
+        )
+        self.assertIn("An @mention is not required", changelog)
+        self.assertIn("Empty pings and drive-by name-drops get no reply", changelog)
+        self.assertIn("real filenames on ordinary deploys", changelog)
+        patch = """@@ -7,6 +7,8 @@
+ ### Added
++- Grim replies when someone names him with a real entrance or need: a question, a ping for his take, or a direct address. An @mention is not required. Empty pings and drive-by name-drops get no reply.
+ ### Fixed
++- `/grim_updates` deploy cards keep normal patch notes and real filenames on ordinary deploys. Filename hiding applies only when that deploy is explicitly labeled CLASSIFIED.
+ context
+"""
+        notes = main._extract_added_changelog_notes(patch)
+        public = main._deploy_card_patch_notes(notes)
+        self.assertEqual(notes, public)
+        self.assertEqual(len(public), 2)
+        self.assertIn("names him with a real entrance or need", public[0])
+        self.assertNotIn("[REDACTED]", main._format_patch_notes(public))
+        self.assertIn("_commits_are_classified(new_commits)", Path(main.__file__).read_text())
 
     def test_creator_saved_language_preference_is_honored(self):
         guild_id = "50"
