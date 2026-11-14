@@ -4,9 +4,8 @@ The recipient is `FOUNDER_DISCORD_ID` (alias `GRIM_FOUNDER_ID`) in the VPS
 `.env`. Grim never posts these reports to a server channel, including
 `/grim_updates`. Application logs must not include deleted message content.
 
-`/panopticon` is the Founder-only on/off toggle. Default is on. The command
-checks the invoker against the env founder ID (never a committed ID) and
-persists the switch under `~/.grim_data`.
+`/panopticon` and `/nightfall` are Founder-only CLASSIFIED commands gated
+by the env founder ID (never a committed ID). State persists under `~/.grim_data`.
 """
 
 from __future__ import annotations
@@ -34,10 +33,16 @@ EMBED_DESCRIPTION_LIMIT = 3900
 
 DbLookup = Callable[[int], dict | None]
 
+PANOPTICON_REPORT_FOOTER = "Grim"
+PANOPTICON_REPORT_TITLE_PREFIX = "Deleted message"
+PANOPTICON_REPORT_FIELDS = ("Channel", "Deleted by")
+
 _message_snapshots: OrderedDict[int, dict] = OrderedDict()
 _invalid_founder_id_logged = False
 _delete_dms_enabled = True
 _delete_dms_state_path: str | None = None
+_nightfall_enabled = False
+_nightfall_state_path: str | None = None
 
 
 def _log(message: str) -> None:
@@ -46,10 +51,13 @@ def _log(message: str) -> None:
 
 def reset_delete_report_state() -> None:
     global _invalid_founder_id_logged, _delete_dms_enabled, _delete_dms_state_path
+    global _nightfall_enabled, _nightfall_state_path
     _message_snapshots.clear()
     _invalid_founder_id_logged = False
     _delete_dms_enabled = True
     _delete_dms_state_path = None
+    _nightfall_enabled = False
+    _nightfall_state_path = None
 
 
 def founder_discord_id() -> int | None:
@@ -93,37 +101,66 @@ def configure_founder_delete_dms_state(path: str | None) -> None:
     """Load the persisted killswitch. A missing or invalid file means ON."""
     global _delete_dms_state_path, _delete_dms_enabled
     _delete_dms_state_path = path
-    _delete_dms_enabled = _load_delete_dms_state()
+    _delete_dms_enabled = _load_enabled_flag(path, default=True)
 
 
 def toggle_founder_delete_dms() -> bool:
     """Flip the killswitch, persist it, and return the new enabled state."""
     global _delete_dms_enabled
     _delete_dms_enabled = not bool(_delete_dms_enabled)
-    _save_delete_dms_state(_delete_dms_enabled)
+    _save_enabled_flag(_delete_dms_state_path, _delete_dms_enabled)
     return _delete_dms_enabled
 
 
-def _load_delete_dms_state() -> bool:
-    if not _delete_dms_state_path or not os.path.exists(_delete_dms_state_path):
-        return True
+def nightfall_enabled() -> bool:
+    """True while `/nightfall` is on. Default off."""
+    return bool(_nightfall_enabled)
+
+
+def configure_nightfall_state(path: str | None) -> None:
+    """Load the persisted nightfall switch. A missing or invalid file means OFF."""
+    global _nightfall_state_path, _nightfall_enabled
+    _nightfall_state_path = path
+    _nightfall_enabled = _load_enabled_flag(path, default=False)
+
+
+def toggle_nightfall() -> bool:
+    """Flip nightfall, persist it, and return the new enabled state."""
+    global _nightfall_enabled
+    _nightfall_enabled = not bool(_nightfall_enabled)
+    _save_enabled_flag(_nightfall_state_path, _nightfall_enabled)
+    return _nightfall_enabled
+
+
+def founder_reports_should_send() -> bool:
+    """True only when Founder report delivery is allowed."""
+    return (
+        founder_discord_id() is not None
+        and founder_delete_dms_enabled()
+        and not nightfall_enabled()
+    )
+
+
+def _load_enabled_flag(path: str | None, *, default: bool) -> bool:
+    if not path or not os.path.exists(path):
+        return default
     try:
-        with open(_delete_dms_state_path, "r") as handle:
+        with open(path, "r") as handle:
             data = json.load(handle)
         if isinstance(data, dict) and "enabled" in data:
             return bool(data["enabled"])
     except (OSError, TypeError, ValueError, json.JSONDecodeError):
         pass
-    return True
+    return default
 
 
-def _save_delete_dms_state(enabled: bool) -> None:
-    if not _delete_dms_state_path:
+def _save_enabled_flag(path: str | None, enabled: bool) -> None:
+    if not path:
         return
-    directory = os.path.dirname(_delete_dms_state_path) or "."
+    directory = os.path.dirname(path) or "."
     os.makedirs(directory, exist_ok=True)
     fd, temporary_path = tempfile.mkstemp(
-        prefix=f".{os.path.basename(_delete_dms_state_path)}.",
+        prefix=f".{os.path.basename(path)}.",
         suffix=".tmp",
         dir=directory,
         text=True,
@@ -133,7 +170,7 @@ def _save_delete_dms_state(enabled: bool) -> None:
             json.dump({"enabled": bool(enabled)}, handle, indent=2)
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temporary_path, _delete_dms_state_path)
+        os.replace(temporary_path, path)
     finally:
         if os.path.exists(temporary_path):
             os.unlink(temporary_path)
@@ -141,7 +178,9 @@ def _save_delete_dms_state(enabled: bool) -> None:
 
 def log_founder_delete_report_status() -> None:
     if founder_discord_id() is not None:
-        if founder_delete_dms_enabled():
+        if nightfall_enabled():
+            _log("[DeleteReport] Nightfall is on.")
+        elif founder_delete_dms_enabled():
             _log("[DeleteReport] Founder deletion DMs are enabled.")
         else:
             _log("[DeleteReport] Founder deletion DMs are off (Founder killswitch).")
@@ -361,8 +400,96 @@ def _report_embed(
     )
     embed.add_field(name="Channel", value=channel_text, inline=False)
     embed.add_field(name="Deleted by", value=actor_text, inline=False)
-    embed.set_footer(text="Grim")
+    embed.set_footer(text=PANOPTICON_REPORT_FOOTER)
     return embed
+
+
+def is_panopticon_report_embed(embed: Any) -> bool:
+    """True for matching report embeds."""
+    title = str(getattr(embed, "title", None) or "")
+    if not title.startswith(PANOPTICON_REPORT_TITLE_PREFIX):
+        return False
+    fields = list(getattr(embed, "fields", None) or [])
+    names = {getattr(field, "name", None) for field in fields}
+    if any(name not in names for name in PANOPTICON_REPORT_FIELDS):
+        return False
+    footer = getattr(embed, "footer", None)
+    footer_text = getattr(footer, "text", None) if footer is not None else None
+    return footer_text == PANOPTICON_REPORT_FOOTER
+
+
+def is_grim_panopticon_dm(message: Any, grim_id: Any) -> bool:
+    if grim_id is None:
+        return False
+    author_id = getattr(getattr(message, "author", None), "id", None)
+    try:
+        if author_id is None or int(author_id) != int(grim_id):
+            return False
+    except (TypeError, ValueError):
+        return False
+    embeds = list(getattr(message, "embeds", None) or [])
+    return any(is_panopticon_report_embed(embed) for embed in embeds)
+
+
+async def _resolve_founder_user(bot: Any) -> Any:
+    founder_id = founder_discord_id()
+    if founder_id is None:
+        return None
+    getter = getattr(bot, "get_user", None)
+    user = getter(founder_id) if getter else None
+    if user is not None:
+        return user
+    fetch = getattr(bot, "fetch_user", None)
+    if fetch is None:
+        _log("[DeleteReport] Could not resolve founder user.")
+        return None
+    try:
+        return await fetch(founder_id)
+    except (discord.NotFound, discord.HTTPException, AttributeError) as error:
+        _log(f"[DeleteReport] Could not resolve founder user ({type(error).__name__}).")
+        return None
+
+
+async def wipe_founder_panopticon_dms(bot: Any) -> int:
+    """Remove matching Grim DMs in the Founder DM channel."""
+    user = await _resolve_founder_user(bot)
+    if user is None:
+        return 0
+    channel = getattr(user, "dm_channel", None)
+    if channel is None:
+        create = getattr(user, "create_dm", None)
+        if create is None:
+            _log("[DeleteReport] Nightfall could not open the channel.")
+            return 0
+        try:
+            channel = await create()
+        except (discord.Forbidden, discord.HTTPException, AttributeError) as error:
+            _log(
+                f"[DeleteReport] Nightfall could not open the channel ({type(error).__name__})."
+            )
+            return 0
+    if channel is None or not hasattr(channel, "history"):
+        _log("[DeleteReport] Nightfall could not open the channel.")
+        return 0
+    grim_id = getattr(getattr(bot, "user", None), "id", None)
+    removed = 0
+    try:
+        async for message in channel.history(limit=None):
+            if not is_grim_panopticon_dm(message, grim_id):
+                continue
+            delete = getattr(message, "delete", None)
+            if delete is None:
+                continue
+            try:
+                await delete()
+                removed += 1
+            except (discord.Forbidden, discord.HTTPException, AttributeError):
+                _log("[DeleteReport] Nightfall could not remove a message.")
+    except (discord.Forbidden, discord.HTTPException, AttributeError) as error:
+        _log(f"[DeleteReport] Nightfall wipe failed ({type(error).__name__}).")
+    if removed:
+        _log(f"[DeleteReport] Nightfall removed {removed} message(s).")
+    return removed
 
 
 def _audit_channel_id(extra: Any) -> int | None:
@@ -455,25 +582,10 @@ async def resolve_delete_actor(
 
 
 async def send_founder_delete_report(bot: Any, embeds: list[discord.Embed]) -> None:
-    founder_id = founder_discord_id()
-    if founder_id is None or not founder_delete_dms_enabled() or not embeds:
+    if not founder_reports_should_send() or not embeds:
         return
-    user = None
-    getter = getattr(bot, "get_user", None)
-    if getter:
-        user = getter(founder_id)
+    user = await _resolve_founder_user(bot)
     if user is None:
-        fetch = getattr(bot, "fetch_user", None)
-        if fetch is None:
-            _log("[DeleteReport] Could not resolve founder user.")
-            return
-        try:
-            user = await fetch(founder_id)
-        except (discord.NotFound, discord.HTTPException, AttributeError) as error:
-            _log(f"[DeleteReport] Could not resolve founder user ({type(error).__name__}).")
-            return
-    if user is None:
-        _log("[DeleteReport] Could not resolve founder user.")
         return
     send = getattr(user, "send", None)
     if send is None:
@@ -509,7 +621,7 @@ async def handle_raw_message_delete(
 ) -> None:
     if getattr(payload, "guild_id", None) is None:
         return
-    if founder_discord_id() is None or not founder_delete_dms_enabled():
+    if not founder_reports_should_send():
         return
     cached = getattr(payload, "cached_message", None)
     snapshot = take_seen_message(payload.message_id, cached)
@@ -549,7 +661,7 @@ async def handle_raw_bulk_message_delete(
 ) -> None:
     if getattr(payload, "guild_id", None) is None:
         return
-    if founder_discord_id() is None or not founder_delete_dms_enabled():
+    if not founder_reports_should_send():
         return
     cached_messages = list(getattr(payload, "cached_messages", None) or [])
     cached_by_id = {
