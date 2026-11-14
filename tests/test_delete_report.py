@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 import tempfile
 import unittest
@@ -377,6 +378,242 @@ class DeleteReportTests(unittest.TestCase):
         self.assertEqual(main.bot._connection.max_messages, 10000)
         self.assertTrue(hasattr(main, "on_raw_message_delete"))
         self.assertTrue(hasattr(main, "on_raw_bulk_message_delete"))
+        self.assertEqual(main.panopticon.name, "panopticon")
+
+    def test_is_founder_user_uses_env_id_not_creator_constant(self):
+        with patch.dict(os.environ, {delete_report.FOUNDER_ID_ENV: str(FIXTURE_FOUNDER_ID)}):
+            self.assertTrue(delete_report.is_founder_user(FIXTURE_FOUNDER_ID))
+            self.assertTrue(delete_report.is_founder_user(str(FIXTURE_FOUNDER_ID)))
+            self.assertFalse(delete_report.is_founder_user(OTHER_USER_ID))
+            self.assertFalse(delete_report.is_founder_user(main.CREATOR_DISCORD_ID))
+        os.environ.pop(delete_report.FOUNDER_ID_ENV, None)
+        self.assertFalse(delete_report.is_founder_user(FIXTURE_FOUNDER_ID))
+        self.assertFalse(delete_report.is_founder_user(main.CREATOR_DISCORD_ID))
+
+    def test_panopticon_defaults_on_and_toggles_off_then_on(self):
+        self.assertTrue(delete_report.founder_delete_dms_enabled())
+        self.assertFalse(delete_report.toggle_founder_delete_dms())
+        self.assertFalse(delete_report.founder_delete_dms_enabled())
+        self.assertTrue(delete_report.toggle_founder_delete_dms())
+        self.assertTrue(delete_report.founder_delete_dms_enabled())
+
+    def test_panopticon_off_does_not_dm_single_or_bulk_deletes(self):
+        async def run():
+            founder = self.founder_user()
+            bot = self.fake_bot(founder)
+            delete_report.toggle_founder_delete_dms()
+            self.assertFalse(delete_report.founder_delete_dms_enabled())
+            payload = SimpleNamespace(
+                guild_id=50,
+                channel_id=777,
+                message_id=9001,
+                cached_message=self.cached_message(),
+            )
+            bulk = SimpleNamespace(
+                guild_id=50,
+                channel_id=777,
+                message_ids=[9001, 9002],
+                cached_messages=[self.cached_message()],
+            )
+            with patch.dict(os.environ, {delete_report.FOUNDER_ID_ENV: str(FIXTURE_FOUNDER_ID)}):
+                await delete_report.handle_raw_message_delete(bot, payload)
+                await delete_report.handle_raw_bulk_message_delete(bot, bulk)
+            founder.send.assert_not_awaited()
+            bot.channel.send.assert_not_awaited()
+            self.assertFalse(any(SECRET_CONTENT in line for line in self.logs))
+
+        asyncio.run(run())
+
+    def test_panopticon_on_resumes_founder_dms(self):
+        async def run():
+            founder = self.founder_user()
+            bot = self.fake_bot(founder)
+            self.assertFalse(delete_report.toggle_founder_delete_dms())
+            self.assertTrue(delete_report.toggle_founder_delete_dms())
+            payload = SimpleNamespace(
+                guild_id=50,
+                channel_id=777,
+                message_id=9001,
+                cached_message=self.cached_message(),
+            )
+            with patch.dict(os.environ, {delete_report.FOUNDER_ID_ENV: str(FIXTURE_FOUNDER_ID)}):
+                await delete_report.handle_raw_message_delete(bot, payload)
+            founder.send.assert_awaited_once()
+            bot.channel.send.assert_not_awaited()
+            sent_embed = founder.send.await_args.kwargs["embed"]
+            self.assertIn(SECRET_CONTENT, sent_embed.description)
+
+        asyncio.run(run())
+
+    def test_panopticon_state_persists_off_and_on_across_reload(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = str(Path(temp_dir) / "panopticon.json")
+            delete_report.configure_founder_delete_dms_state(path)
+            self.assertTrue(delete_report.founder_delete_dms_enabled())
+            self.assertFalse(os.path.exists(path))
+
+            self.assertFalse(delete_report.toggle_founder_delete_dms())
+            with open(path, "r") as handle:
+                saved = json.load(handle)
+            self.assertEqual(saved, {"enabled": False})
+            self.assertNotIn(str(FIXTURE_FOUNDER_ID), json.dumps(saved))
+
+            delete_report.reset_delete_report_state()
+            delete_report.configure_founder_delete_dms_state(path)
+            self.assertFalse(delete_report.founder_delete_dms_enabled())
+
+            self.assertTrue(delete_report.toggle_founder_delete_dms())
+            with open(path, "r") as handle:
+                saved = json.load(handle)
+            self.assertEqual(saved, {"enabled": True})
+
+            delete_report.reset_delete_report_state()
+            delete_report.configure_founder_delete_dms_state(path)
+            self.assertTrue(delete_report.founder_delete_dms_enabled())
+
+    def test_invalid_persisted_state_defaults_on(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = str(Path(temp_dir) / "panopticon.json")
+            Path(path).write_text("{not-json", encoding="utf-8")
+            delete_report.configure_founder_delete_dms_state(path)
+            self.assertTrue(delete_report.founder_delete_dms_enabled())
+
+    def test_killswitch_off_status_log_omits_founder_id(self):
+        delete_report.toggle_founder_delete_dms()
+        with patch.dict(os.environ, {delete_report.FOUNDER_ID_ENV: str(FIXTURE_FOUNDER_ID)}):
+            delete_report.log_founder_delete_report_status()
+        self.assertTrue(any("killswitch" in line.lower() or "off" in line.lower() for line in self.logs))
+        self.assertFalse(any(str(FIXTURE_FOUNDER_ID) in line for line in self.logs))
+
+    def panopticon_event(self, user_id, *, administrator=False, owner_id=1):
+        response = SimpleNamespace(messages=[], send_message=AsyncMock())
+
+        async def send_message(*args, **kwargs):
+            response.messages.append((args, kwargs))
+
+        response.send_message.side_effect = send_message
+        return SimpleNamespace(
+            guild_id=50,
+            guild=SimpleNamespace(id=50, owner_id=owner_id),
+            user=SimpleNamespace(
+                id=user_id,
+                guild_permissions=SimpleNamespace(administrator=administrator),
+            ),
+            response=response,
+            channel=SimpleNamespace(send=AsyncMock()),
+        )
+
+    def test_panopticon_command_founder_toggles_off_then_on(self):
+        async def run():
+            event = self.panopticon_event(FIXTURE_FOUNDER_ID)
+            with (
+                patch.dict(os.environ, {delete_report.FOUNDER_ID_ENV: str(FIXTURE_FOUNDER_ID)}),
+                patch.object(main, "record_security_event") as recorded,
+            ):
+                await main.panopticon.callback(event)
+                self.assertFalse(delete_report.founder_delete_dms_enabled())
+                off_embed = event.response.send_message.await_args.kwargs["embed"]
+                self.assertEqual(off_embed.title, "Panopticon Off")
+                self.assertTrue(event.response.send_message.await_args.kwargs["ephemeral"])
+                self.assertIn("/panopticon", off_embed.description)
+
+                await main.panopticon.callback(event)
+                self.assertTrue(delete_report.founder_delete_dms_enabled())
+                on_embed = event.response.send_message.await_args.kwargs["embed"]
+                self.assertEqual(on_embed.title, "Panopticon On")
+                self.assertTrue(event.response.send_message.await_args.kwargs["ephemeral"])
+                self.assertEqual(off_embed.footer.text, main.xsi_footer())
+                self.assertEqual(on_embed.footer.text, main.xsi_footer())
+
+            event.channel.send.assert_not_awaited()
+            outcomes = [call.args[2] for call in recorded.call_args_list]
+            self.assertIn("disabled", outcomes)
+            self.assertIn("enabled", outcomes)
+            self.assertFalse(any(str(FIXTURE_FOUNDER_ID) in line for line in self.logs))
+            self.assertFalse(any(SECRET_CONTENT in line for line in self.logs))
+
+        asyncio.run(run())
+
+    def test_panopticon_command_rejects_non_founder_including_creator_constant(self):
+        async def run():
+            for user_id, kwargs in (
+                (OTHER_USER_ID, {"administrator": True, "owner_id": OTHER_USER_ID}),
+                (main.CREATOR_DISCORD_ID, {"administrator": True}),
+            ):
+                event = self.panopticon_event(user_id, **kwargs)
+                with (
+                    patch.dict(os.environ, {delete_report.FOUNDER_ID_ENV: str(FIXTURE_FOUNDER_ID)}),
+                    patch.object(main, "record_security_event") as recorded,
+                ):
+                    await main.panopticon.callback(event)
+                self.assertTrue(delete_report.founder_delete_dms_enabled())
+                event.response.send_message.assert_awaited_once()
+                args, send_kwargs = event.response.send_message.await_args
+                self.assertIn("permission", args[0].lower())
+                self.assertTrue(send_kwargs["ephemeral"])
+                event.channel.send.assert_not_awaited()
+                self.assertEqual(recorded.call_args.args[1], "panopticon")
+                self.assertEqual(recorded.call_args.args[2], "denied")
+                self.assertEqual(recorded.call_args.args[3]["reason"], "not_founder")
+
+        asyncio.run(run())
+
+    def test_panopticon_command_denies_everyone_when_founder_id_unset(self):
+        async def run():
+            event = self.panopticon_event(FIXTURE_FOUNDER_ID)
+            os.environ.pop(delete_report.FOUNDER_ID_ENV, None)
+            os.environ.pop(delete_report.FOUNDER_ID_ENV_ALIAS, None)
+            with patch.object(main, "record_security_event") as recorded:
+                await main.panopticon.callback(event)
+            event.response.send_message.assert_awaited_once()
+            self.assertTrue(event.response.send_message.await_args.kwargs["ephemeral"])
+            self.assertTrue(delete_report.founder_delete_dms_enabled())
+            self.assertEqual(recorded.call_args.args[2], "denied")
+            self.assertEqual(recorded.call_args.args[3]["reason"], "founder_id_unset")
+            self.assertFalse(any(str(FIXTURE_FOUNDER_ID) in line for line in self.logs))
+
+        asyncio.run(run())
+
+    def test_panopticon_command_accepts_founder_via_alias_env_in_dms(self):
+        async def run():
+            event = self.panopticon_event(FIXTURE_FOUNDER_ID)
+            event.guild_id = None
+            event.guild = None
+            with (
+                patch.dict(
+                    os.environ,
+                    {delete_report.FOUNDER_ID_ENV_ALIAS: str(FIXTURE_FOUNDER_ID)},
+                    clear=False,
+                ),
+                patch.object(main, "record_security_event"),
+            ):
+                os.environ.pop(delete_report.FOUNDER_ID_ENV, None)
+                await main.panopticon.callback(event)
+            self.assertFalse(delete_report.founder_delete_dms_enabled())
+            embed = event.response.send_message.await_args.kwargs["embed"]
+            self.assertEqual(embed.title, "Panopticon Off")
+            self.assertTrue(event.response.send_message.await_args.kwargs["ephemeral"])
+
+        asyncio.run(run())
+
+    def test_panopticon_command_source_gates_only_on_env_founder_id(self):
+        source = Path(main.__file__).read_text()
+        start = source.index("async def panopticon(")
+        end = source.index("@bot.tree.command(name=\"memberlog\"", start)
+        block = source[start:end]
+        self.assertIn("require_founder(", block)
+        self.assertNotIn("is_grim_creator", block)
+        self.assertNotIn("CREATOR_DISCORD_ID", block)
+        self.assertNotIn("require_permission", block)
+        self.assertNotIn("require_opsec", block)
+        helper_start = source.index("async def require_founder(")
+        helper_end = source.index("async def require_external_action(", helper_start)
+        helper = source[helper_start:helper_end]
+        self.assertIn("is_founder_user(", helper)
+        self.assertNotIn("is_grim_creator", helper)
+        self.assertNotIn("CREATOR_DISCORD_ID", helper)
+        self.assertNotIn("administrator", helper)
+        self.assertNotIn("owner_id", helper)
 
 
 if __name__ == "__main__":

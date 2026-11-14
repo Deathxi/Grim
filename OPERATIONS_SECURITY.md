@@ -95,7 +95,9 @@ reject MITM. Leave it empty only until that value is recorded.
   in Grim's `.env`.
 - `FOUNDER_DISCORD_ID` in `/root/grim/.env` is the Discord user ID that receives
   private deleted-message DMs. `GRIM_FOUNDER_ID` is accepted as an alias. Never
-  commit the value. If DMs fail, Grim logs the failure without message content
+  commit the value. `/panopticon` is the Founder-only toggle for those DMs
+  (default on; run it again to turn the watch back on; persisted under
+  `~/.grim_data`). If DMs fail, Grim logs the failure without message content
   and does not fall back to `/grim_updates` or any server channel.
 
 ## 5. Credential rotation

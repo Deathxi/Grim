@@ -22,7 +22,8 @@ with xAI's Grok API integration. Live runtime is the VPS deploy path
 
 ## Project structure
 - `main.py` — bot commands and event handlers
-- `delete_report.py` — founder-only deleted-message DMs (`FOUNDER_DISCORD_ID`)
+- `delete_report.py` — founder-only deleted-message DMs (`FOUNDER_DISCORD_ID`);
+  `/panopticon` is the Founder-only on/off toggle (default on)
 - `substance.py` — per-mood substance rules and the post-check on mention replies
 - `requirements.txt` / `pyproject.toml` / `uv.lock` — Python deps (VPS install uses `requirements.txt` into `/root/grim/venv`)
 - `systemd/grim.service` — `ExecStart` must use `/root/grim/venv/bin/python3`

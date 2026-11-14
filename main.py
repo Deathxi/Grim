@@ -56,10 +56,14 @@ from grim_health import (
 from reply_auditor import AuditorConfig, ReplyAuditor, conversation_key, format_events
 from substance import SUBSTANCE_PROMPT, ensure_substance
 from delete_report import (
+    configure_founder_delete_dms_state,
+    founder_discord_id,
     handle_raw_bulk_message_delete,
     handle_raw_message_delete,
+    is_founder_user,
     log_founder_delete_report_status,
     remember_guild_message,
+    toggle_founder_delete_dms,
 )
 
 BOT_START_TIME = None
@@ -1233,6 +1237,26 @@ async def require_permission(
         return False
     return True
 
+async def require_founder(interaction: discord.Interaction, action: str) -> bool:
+    """Allow only the env founder snowflake. Guild roles and Discord permissions do not count."""
+    user_id = getattr(getattr(interaction, "user", None), "id", None)
+    if not is_founder_user(user_id):
+        reason = "founder_id_unset" if founder_discord_id() is None else "not_founder"
+        record_security_event(interaction, action, "denied", {"reason": reason})
+        await interaction.response.send_message(
+            "You do not have permission to use this command.",
+            ephemeral=True,
+        )
+        return False
+    if not _rate_limit_allows(interaction, action):
+        record_security_event(interaction, action, "rate_limited")
+        await interaction.response.send_message(
+            "Too many requests recently. Please try again in a minute.",
+            ephemeral=True,
+        )
+        return False
+    return True
+
 async def require_external_action(interaction: discord.Interaction, action: str = "external_ai") -> bool:
     """Limit user-triggered paid/external requests across command entry points."""
     if _rate_limit_allows(interaction, action):
@@ -1741,6 +1765,7 @@ def save_updates_sha(data):
 
 updates_channels = load_updates_data()
 updates_sha = load_updates_sha()
+configure_founder_delete_dms_state(_data_path("panopticon.json"))
 
 RUNTIME_HEARTBEAT_FILE = _data_path("runtime_heartbeat.json")
 OUTAGE_REPORT_STATE_FILE = _data_path("outage_report_state.json")
@@ -9235,6 +9260,42 @@ async def grim_updates(interaction: discord.Interaction):
         )
         embed.set_footer(text=xsi_footer())
     await interaction.followup.send(embed=embed)
+
+@bot.tree.command(
+    name="panopticon",
+    description="Founder: toggle the deletion-report watch on or off",
+)
+async def panopticon(interaction: discord.Interaction):
+    if not await require_founder(interaction, "panopticon"):
+        return
+    enabled = toggle_founder_delete_dms()
+    record_security_event(
+        interaction,
+        "panopticon",
+        "enabled" if enabled else "disabled",
+    )
+    if enabled:
+        title = "Panopticon On"
+        description = (
+            "The watch is on. Grim will DM you private reports when a guild "
+            "message is deleted or cleared: who deleted it, and what was posted, "
+            "when Grim saw it. These reports stay in your DMs. "
+            "Run `/panopticon` again to turn the watch off."
+        )
+    else:
+        title = "Panopticon Off"
+        description = (
+            "The watch is off. Grim will not DM deletion or clear-log reports "
+            "until you turn it back on with `/panopticon`. Guild `/clear` logs "
+            "in the `/grim_updates` channel are unchanged."
+        )
+    embed = discord.Embed(
+        title=title,
+        description=description,
+        color=discord.Color.from_rgb(18, 18, 18),
+    )
+    embed.set_footer(text=xsi_footer())
+    await interaction.response.send_message(embed=embed, ephemeral=True)
 
 @bot.tree.command(name="memberlog", description="Configure member departure notifications")
 @discord.app_commands.describe(action="Enable, disable, or safely test departure notifications")

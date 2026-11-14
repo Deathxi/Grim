@@ -3,12 +3,18 @@
 The recipient is `FOUNDER_DISCORD_ID` (alias `GRIM_FOUNDER_ID`) in the VPS
 `.env`. Grim never posts these reports to a server channel, including
 `/grim_updates`. Application logs must not include deleted message content.
+
+`/panopticon` is the Founder-only on/off toggle. Default is on. The command
+checks the invoker against the env founder ID (never a committed ID) and
+persists the switch under `~/.grim_data`.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import os
+import tempfile
 from collections import OrderedDict
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Mapping
@@ -30,6 +36,8 @@ DbLookup = Callable[[int], dict | None]
 
 _message_snapshots: OrderedDict[int, dict] = OrderedDict()
 _invalid_founder_id_logged = False
+_delete_dms_enabled = True
+_delete_dms_state_path: str | None = None
 
 
 def _log(message: str) -> None:
@@ -37,9 +45,11 @@ def _log(message: str) -> None:
 
 
 def reset_delete_report_state() -> None:
-    global _invalid_founder_id_logged
+    global _invalid_founder_id_logged, _delete_dms_enabled, _delete_dms_state_path
     _message_snapshots.clear()
     _invalid_founder_id_logged = False
+    _delete_dms_enabled = True
+    _delete_dms_state_path = None
 
 
 def founder_discord_id() -> int | None:
@@ -60,9 +70,81 @@ def founder_discord_id() -> int | None:
     return None
 
 
+def is_founder_user(user_id: Any) -> bool:
+    """True only when user_id matches FOUNDER_DISCORD_ID / GRIM_FOUNDER_ID.
+
+    No other role, permission, or committed ID (including CREATOR_DISCORD_ID) grants this.
+    """
+    founder_id = founder_discord_id()
+    if founder_id is None or user_id is None:
+        return False
+    try:
+        return int(user_id) == founder_id
+    except (TypeError, ValueError):
+        return False
+
+
+def founder_delete_dms_enabled() -> bool:
+    """Founder deletion DMs default ON; `/panopticon` toggles them off or back on."""
+    return bool(_delete_dms_enabled)
+
+
+def configure_founder_delete_dms_state(path: str | None) -> None:
+    """Load the persisted killswitch. A missing or invalid file means ON."""
+    global _delete_dms_state_path, _delete_dms_enabled
+    _delete_dms_state_path = path
+    _delete_dms_enabled = _load_delete_dms_state()
+
+
+def toggle_founder_delete_dms() -> bool:
+    """Flip the killswitch, persist it, and return the new enabled state."""
+    global _delete_dms_enabled
+    _delete_dms_enabled = not bool(_delete_dms_enabled)
+    _save_delete_dms_state(_delete_dms_enabled)
+    return _delete_dms_enabled
+
+
+def _load_delete_dms_state() -> bool:
+    if not _delete_dms_state_path or not os.path.exists(_delete_dms_state_path):
+        return True
+    try:
+        with open(_delete_dms_state_path, "r") as handle:
+            data = json.load(handle)
+        if isinstance(data, dict) and "enabled" in data:
+            return bool(data["enabled"])
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        pass
+    return True
+
+
+def _save_delete_dms_state(enabled: bool) -> None:
+    if not _delete_dms_state_path:
+        return
+    directory = os.path.dirname(_delete_dms_state_path) or "."
+    os.makedirs(directory, exist_ok=True)
+    fd, temporary_path = tempfile.mkstemp(
+        prefix=f".{os.path.basename(_delete_dms_state_path)}.",
+        suffix=".tmp",
+        dir=directory,
+        text=True,
+    )
+    try:
+        with os.fdopen(fd, "w") as handle:
+            json.dump({"enabled": bool(enabled)}, handle, indent=2)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_path, _delete_dms_state_path)
+    finally:
+        if os.path.exists(temporary_path):
+            os.unlink(temporary_path)
+
+
 def log_founder_delete_report_status() -> None:
     if founder_discord_id() is not None:
-        _log("[DeleteReport] Founder deletion DMs are enabled.")
+        if founder_delete_dms_enabled():
+            _log("[DeleteReport] Founder deletion DMs are enabled.")
+        else:
+            _log("[DeleteReport] Founder deletion DMs are off (Founder killswitch).")
         return
     raw = (
         os.environ.get(FOUNDER_ID_ENV, "").strip()
@@ -374,7 +456,7 @@ async def resolve_delete_actor(
 
 async def send_founder_delete_report(bot: Any, embeds: list[discord.Embed]) -> None:
     founder_id = founder_discord_id()
-    if founder_id is None or not embeds:
+    if founder_id is None or not founder_delete_dms_enabled() or not embeds:
         return
     user = None
     getter = getattr(bot, "get_user", None)
@@ -427,7 +509,7 @@ async def handle_raw_message_delete(
 ) -> None:
     if getattr(payload, "guild_id", None) is None:
         return
-    if founder_discord_id() is None:
+    if founder_discord_id() is None or not founder_delete_dms_enabled():
         return
     cached = getattr(payload, "cached_message", None)
     snapshot = take_seen_message(payload.message_id, cached)
@@ -467,7 +549,7 @@ async def handle_raw_bulk_message_delete(
 ) -> None:
     if getattr(payload, "guild_id", None) is None:
         return
-    if founder_discord_id() is None:
+    if founder_discord_id() is None or not founder_delete_dms_enabled():
         return
     cached_messages = list(getattr(payload, "cached_messages", None) or [])
     cached_by_id = {
