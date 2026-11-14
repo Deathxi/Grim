@@ -2261,6 +2261,12 @@ LIVE_RESEARCH_REQUESTS = (
     "get fresh numbers", "pull live", "go check", "research this",
     "check again", "search again",
 )
+LIVE_SEARCH_RETRY_PHRASES = (
+    "recall", "try again", "search again", "check again",
+)
+_LIVE_SEARCH_RETRY_EXTRA = frozenset({
+    "rn", "now", "please", "pls", "just", "again",
+})
 LIVE_RESEARCH_FOLLOWUPS = (
     "do that", "go do that", "check it", "check that", "look it up",
     "go ahead", "get back to me", "rn", "right now",
@@ -2358,6 +2364,7 @@ _FIRST_PERSON = re.compile(r"(?<!\w)(?:i|im|i m|me|my|we|our|us)(?!\w)")
 LIVE_FAILURE_MEMORY_SECONDS = 1800
 _LIVE_RESEARCH_FAILURES: dict[str, float] = {}
 _WEATHER_LIVE_FAILURES: set[str] = set()
+_PENDING_LIVE_ASKS: dict[tuple[str, str], str] = {}
 WEATHER_LEFTOVER_TURN_NOTE = (
     "This turn is not a weather or forecast question. "
     "Do not say live weather data was missing, that a forecast search failed, "
@@ -2492,8 +2499,9 @@ def _needs_live_sources(
     Causal health questions are facts. Weather and forecasts are always live.
     Internet/capability asks are bot state, not news. Greetings, quotes, vibes,
     and personality stay on the chat path. After one honest miss, later pings
-    stay on chat demeanor unless the member explicitly asks to search again or
-    asks the weather.
+    stay on chat demeanor unless the member explicitly asks to search again,
+    says Recall / try again, or asks the weather. Those retry lines re-run
+    the last unanswered fact question instead of searching the retry phrase.
     """
     own_text = _strip_quote_lines(current_text)
     if _is_self_capability_question(own_text):
@@ -2550,6 +2558,66 @@ def _search_tools_for(current_text: str):
     if _needs_x_search(current_text):
         return XAI_SEARCH_TOOLS
     return XAI_WEB_SEARCH_TOOLS
+
+def _remember_pending_live_ask(message, text: str) -> None:
+    key = _conversation_key(message)
+    ask = str(text or "").strip()
+    if key is None or not ask:
+        return
+    _PENDING_LIVE_ASKS[key] = ask
+    if len(_PENDING_LIVE_ASKS) > 200:
+        oldest = next(iter(_PENDING_LIVE_ASKS))
+        _PENDING_LIVE_ASKS.pop(oldest, None)
+
+
+def _clear_pending_live_ask(message) -> None:
+    key = _conversation_key(message)
+    if key is not None:
+        _PENDING_LIVE_ASKS.pop(key, None)
+
+
+def _pending_live_ask(message) -> str | None:
+    key = _conversation_key(message)
+    if key is None:
+        return None
+    ask = _PENDING_LIVE_ASKS.get(key)
+    return ask or None
+
+
+def _is_live_search_retry(text: str | None) -> bool:
+    """True for Recall / try again / search again with no new fact topic."""
+    folded = _output_match_text(_conversation_text(text))
+    if not folded:
+        return False
+    if not _contains_research_phrase(folded, LIVE_SEARCH_RETRY_PHRASES):
+        return False
+    leftover = folded
+    for phrase in sorted(LIVE_SEARCH_RETRY_PHRASES, key=len, reverse=True):
+        leftover = re.sub(
+            rf"(?<!\w){re.escape(phrase)}(?!\w)",
+            " ",
+            leftover,
+        )
+    skip = (
+        _CONVERSATION_SMALL_TALK
+        | _NAME_CALL_GREETINGS
+        | _LIVE_SEARCH_RETRY_EXTRA
+        | {"grim"}
+    )
+    leftover_tokens = [
+        token
+        for token in leftover.split()
+        if token not in skip and len(token) >= 2
+    ]
+    return not leftover_tokens
+
+
+def _live_search_retry_ask(message, text: str | None) -> str | None:
+    """Last unanswered fact question when this turn is a hold retry line."""
+    if not _is_live_search_retry(text):
+        return None
+    return _pending_live_ask(message)
+
 
 def _remember_live_failure(scope: str) -> None:
     _LIVE_RESEARCH_FAILURES[scope] = time.time()
@@ -2627,6 +2695,27 @@ def live_source_failure_text(status: str | None) -> str:
 def _live_search_was_empty(status: str | None) -> bool:
     return str(status or "") in {"empty", "unverified"}
 
+def _is_memory_risk_refusal(text: str | None) -> bool:
+    """True for timeout-copy or vitamin-risk refusals, not a casual miss wrap."""
+    folded = _output_match_text(text)
+    if not folded:
+        return False
+    if any(marker in folded for marker in (
+        "can t risk",
+        "cant risk",
+        "outdated targets",
+        "no solid recall",
+        "not guessing from old memory",
+        "live search timed out",
+        "live search broke on my end",
+    )):
+        return True
+    return folded in {
+        _output_match_text(LIVE_SOURCE_FAILURE_LINES["timeout"]),
+        _output_match_text(LIVE_SOURCE_FAILURE_LINES["error"]),
+    }
+
+
 def format_live_search_miss_reply(wrap: str | None) -> str:
     """Exact miss line, one newline, then Grim's own casual wrap."""
     body = str(wrap or "").strip()
@@ -2636,7 +2725,7 @@ def format_live_search_miss_reply(wrap: str | None) -> str:
         body = ""
     elif folded.startswith(marker):
         body = body.split("\n", 1)[-1].strip()
-    if not body:
+    if not body or _is_memory_risk_refusal(body):
         body = LIVE_SEARCH_MISS_WRAP_FALLBACK
     return f"{LIVE_SEARCH_ZERO_INFO}\n{body}"
 
@@ -3449,6 +3538,7 @@ def _prune_open_conversations(now: float) -> None:
         _open_conversations.pop(key, None)
         _conversation_ladders.pop(key, None)
         _conversation_media_kind.pop(key, None)
+        _PENDING_LIVE_ASKS.pop(key, None)
 
 
 def grim_end_conversation(message) -> None:
@@ -3458,6 +3548,7 @@ def grim_end_conversation(message) -> None:
     _open_conversations.pop(key, None)
     _conversation_ladders.pop(key, None)
     _conversation_media_kind.pop(key, None)
+    _PENDING_LIVE_ASKS.pop(key, None)
 
 
 def grim_conversation_open(message, *, now: float | None = None) -> bool:
@@ -5438,7 +5529,6 @@ async def generate_contextual_reply(message: discord.Message) -> ContextualReply
         if content and content.strip()
     ]
     recent_channel_text = "\n".join(research_context)
-    research_prompt = _live_search_user_prompt(current_text, recent_channel_text)
     live_context_block = ""
     research_scope = f"{guild_id}:{channel_id}"
     live_search_system = with_grim_voice(
@@ -5446,7 +5536,15 @@ async def generate_contextual_reply(message: discord.Message) -> ContextualReply
     )
     live_miss_wrap = False
     recent_failure = _recent_live_failure(research_scope)
-    weather_ask = _is_weather_ask(current_text)
+    retry_ask = _live_search_retry_ask(message, current_text)
+    retry_only = _is_live_search_retry(current_text)
+    search_text = retry_ask or current_text
+    research_prompt = (
+        retry_ask
+        if retry_ask
+        else _live_search_user_prompt(current_text, recent_channel_text)
+    )
+    weather_ask = _is_weather_ask(search_text)
     weather_leftover_note = ""
     if not weather_ask:
         weather_leftover = _clear_weather_live_failure(research_scope)
@@ -5485,14 +5583,19 @@ async def generate_contextual_reply(message: discord.Message) -> ContextualReply
                 )[:6000]
             )
         return ContextualReply(text=live_capability_reply_text(research.get("status")))
-    if current_text and (
-        weather_ask
-        or _needs_live_sources(
-            current_text,
-            recent_channel_text,
-            recent_failure=recent_failure,
+    needs_search = bool(retry_ask) or (
+        bool(current_text)
+        and not retry_only
+        and (
+            weather_ask
+            or _needs_live_sources(
+                current_text,
+                recent_channel_text,
+                recent_failure=recent_failure,
+            )
         )
-    ):
+    )
+    if needs_search:
         research = await _consult_live_sources(
             message,
             guild_id=guild_id,
@@ -5500,14 +5603,22 @@ async def generate_contextual_reply(message: discord.Message) -> ContextualReply
             research_scope=research_scope,
             research_prompt=research_prompt,
             system_prompt=live_search_system,
-            tools=_search_tools_for(current_text),
+            tools=_search_tools_for(search_text),
             remember_failure=not weather_ask,
         )
         if _live_research_succeeded(research):
+            _clear_pending_live_ask(message)
             return ContextualReply(
-                text=await _sourced_live_reply(research, current_text)
+                text=await _sourced_live_reply(research, search_text)
             )
-        if weather_ask or _live_search_was_empty(research.get("status")):
+        _remember_pending_live_ask(message, search_text)
+        if research.get("status") == "rate_limited" and not retry_ask:
+            return ContextualReply(text=live_source_failure_text("rate_limited"))
+        if (
+            retry_ask
+            or weather_ask
+            or _live_search_was_empty(research.get("status"))
+        ):
             live_miss_wrap = True
         else:
             return ContextualReply(text=live_source_failure_text(research.get("status")))
@@ -5517,7 +5628,9 @@ async def generate_contextual_reply(message: discord.Message) -> ContextualReply
         miss_wrap_note = (
             "\n\nA live search just returned nothing relevant. Speak in your regular "
             "demeanor as a short casual wrap. Do not invent facts, dates, sources, "
-            "or news. Do not write a miss line; one is added for you.\n"
+            "vitamin or mineral numbers, or news. Do not write a miss line; one is "
+            "added for you. Do not refuse with outdated-memory, timeout, or "
+            "'can't risk' copy.\n"
         )
 
     system_prompt = f"""You are Grim — a permanent member of {server_name}. Not a tool people summon, not a bot with a gimmick. You've been here, watching the channels, reading what people say, picking up the dynamics. When someone @s you, they're talking to someone who's been paying attention.

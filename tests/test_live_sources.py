@@ -81,6 +81,16 @@ WEATHER_ASKS = (
 
 TRAINING_CLAIMS = ("stable", "no reports", "available info", "still ceo", "as far as i know")
 MISS_WRAP = "can't verify that from here, and i'm not going to invent it."
+VITAMIN_ASK = (
+    "what does an average balanced meal look like for breakfast, lunch and "
+    "dinner and snacks, that meet the daily requirements of all vitamins "
+    "and minerals?"
+)
+VITAMIN_RISK = (
+    "no solid recall on exact daily breakdowns without fresh numbers. "
+    "can't risk outdated targets on vitamins and minerals."
+)
+RETRY_LINES = ("Recall", "try again", "search again")
 
 
 class FakeResponse:
@@ -126,6 +136,7 @@ class LiveSourcesTests(unittest.TestCase):
         main._AI_RESEARCH_CACHE.clear()
         main._LIVE_RESEARCH_FAILURES.clear()
         main._WEATHER_LIVE_FAILURES.clear()
+        main._PENDING_LIVE_ASKS.clear()
         main._open_conversations.clear()
         main._conversation_ladders.clear()
         main._conversation_media_kind.clear()
@@ -136,6 +147,7 @@ class LiveSourcesTests(unittest.TestCase):
         main._AI_RESEARCH_CACHE.clear()
         main._LIVE_RESEARCH_FAILURES.clear()
         main._WEATHER_LIVE_FAILURES.clear()
+        main._PENDING_LIVE_ASKS.clear()
         main._open_conversations.clear()
         main._conversation_ladders.clear()
         main._conversation_media_kind.clear()
@@ -458,6 +470,182 @@ class LiveSourcesTests(unittest.TestCase):
         self.assertEqual(replies[2].text, "told you.")
         prompt = model.await_args.args[2]
         self.assertNotIn("<LIVE_RESEARCH_STATUS>", prompt)
+        self.assertEqual(
+            research.await_args_list[1].args[1],
+            "what's jensen huang's position?",
+        )
+
+    def test_recall_retry_phrases_are_not_new_fact_asks(self):
+        for text in (*RETRY_LINES, "check again", "check again rn", "please try again"):
+            self.assertTrue(main._is_live_search_retry(text), text)
+            self.assertIsNone(main.parse_chat_media_request(text), text)
+        for text in ("Recall", "try again", "please try again"):
+            self.assertFalse(main._needs_live_sources(text, ""), text)
+            self.assertFalse(
+                main._needs_live_sources(text, "", recent_failure=True),
+                text,
+            )
+        self.assertFalse(
+            main._is_live_search_retry(
+                "Recall the daily vitamin and mineral targets"
+            )
+        )
+        self.assertFalse(main._is_live_search_retry("what's the weather tomorrow"))
+
+    def test_timeout_then_recall_retries_the_last_fact_search(self):
+        research = AsyncMock(side_effect=[{"status": "timeout"}, SUCCESS])
+        replies, model = self.converse(
+            [VITAMIN_ASK, "Recall"],
+            research,
+            model_reply=VITAMIN_RISK,
+        )
+        self.assertEqual(research.await_count, 2)
+        self.assertEqual(research.await_args_list[0].args[1], VITAMIN_ASK)
+        self.assertEqual(research.await_args_list[1].args[1], VITAMIN_ASK)
+        self.assertEqual(replies[0].text, main.LIVE_SOURCE_FAILURE_LINES["timeout"])
+        self.assertTrue(replies[1].text.startswith(SUCCESS["text"]))
+        self.assertIn("-# sources:", replies[1].text)
+        self.assertIn("reuters.com", replies[1].text)
+        self.assertTrue(main._reply_has_source_links(replies[1].text))
+        self.assertEqual(
+            main._source_unfurl_kwargs(replies[1].text),
+            {"suppress_embeds": True},
+        )
+        self.assertNotIn(VITAMIN_RISK, replies[1].text)
+        self.assertNotIn("can't risk", replies[1].text.casefold())
+        self.assertNotIn("outdated targets", replies[1].text.casefold())
+        model.assert_not_awaited()
+
+    def test_try_again_and_search_again_retry_the_last_fact_search(self):
+        for line in ("try again", "search again"):
+            main._LIVE_RESEARCH_FAILURES.clear()
+            main._PENDING_LIVE_ASKS.clear()
+            research = AsyncMock(side_effect=[{"status": "timeout"}, SUCCESS])
+            replies, model = self.converse(
+                [VITAMIN_ASK, line],
+                research,
+                model_reply=VITAMIN_RISK,
+            )
+            self.assertEqual(research.await_count, 2, line)
+            self.assertEqual(research.await_args_list[1].args[1], VITAMIN_ASK, line)
+            self.assertIn("-# sources:", replies[1].text, line)
+            model.assert_not_awaited()
+
+    def test_failed_recall_uses_zero_info_not_vitamin_risk_or_timeout_copy(self):
+        research = AsyncMock(return_value={"status": "timeout"})
+        replies, model = self.converse(
+            [VITAMIN_ASK, "Recall"],
+            research,
+            model_reply=VITAMIN_RISK,
+        )
+        self.assertEqual(research.await_count, 2)
+        self.assertEqual(research.await_args_list[1].args[1], VITAMIN_ASK)
+        self.assertEqual(replies[0].text, main.LIVE_SOURCE_FAILURE_LINES["timeout"])
+        self.assert_zero_info_miss(replies[1], main.LIVE_SEARCH_MISS_WRAP_FALLBACK)
+        self.assertNotEqual(replies[1].text, main.LIVE_SOURCE_FAILURE_LINES["timeout"])
+        self.assertNotIn("try again in a bit", replies[1].text)
+        self.assertNotIn(VITAMIN_RISK, replies[1].text)
+        self.assertNotIn("can't risk", replies[1].text.casefold())
+        self.assertNotIn("outdated targets", replies[1].text.casefold())
+        self.assertNotIn("no solid recall", replies[1].text.casefold())
+        self.assertNotIn("90 mg", replies[1].text)
+        self.assertNotIn("-# sources:", replies[1].text)
+        model.assert_awaited()
+
+    def test_failed_recall_empty_search_uses_zero_info_plus_take(self):
+        research = AsyncMock(side_effect=[{"status": "timeout"}, {"status": "empty"}])
+        replies, model = self.converse(
+            [VITAMIN_ASK, "Recall"],
+            research,
+            model_reply=MISS_WRAP,
+        )
+        self.assertEqual(research.await_count, 2)
+        self.assert_zero_info_miss(replies[1], MISS_WRAP)
+        self.assertNotEqual(replies[1].text, main.LIVE_SOURCE_FAILURE_LINES["timeout"])
+        self.assertNotIn(VITAMIN_RISK, replies[1].text)
+
+    def test_recall_without_a_prior_fact_ask_is_normal_chat(self):
+        research = AsyncMock(return_value=SUCCESS)
+        replies, model = self.converse(
+            ["yo grim how we doing", "Recall"],
+            research,
+            model_reply=["still here.", "what's on your mind."],
+        )
+        research.assert_not_awaited()
+        self.assertEqual(replies[0].text, "still here.")
+        self.assertEqual(replies[1].text, "what's on your mind.")
+        self.assertNotIn(main.LIVE_SEARCH_ZERO_INFO, replies[1].text)
+        self.assertNotIn(VITAMIN_RISK, replies[1].text)
+        self.assertNotIn("-# sources:", replies[1].text)
+
+    def test_recall_in_open_hold_retries_and_is_not_a_gif_ask(self):
+        grim_user = SimpleNamespace(id=999)
+        opener = mention(VITAMIN_ASK)
+        opener.mentions = [grim_user]
+        follow = hold_follow("Recall")
+        research = AsyncMock(side_effect=[{"status": "timeout"}, SUCCESS])
+        model = AsyncMock(return_value=VITAMIN_RISK)
+        main._conversation_media_kind[("9", "10")] = "gif"
+
+        async def run():
+            with patch.object(
+                main.discord.Client,
+                "user",
+                new_callable=PropertyMock,
+                return_value=grim_user,
+            ):
+                self.assertTrue(main.grim_chat_turn_action(opener, now=1_700_000_000.0))
+            with patch.dict(main.os.environ, {"XAI_API_KEY": "test-key"}), \
+                    patch.object(
+                        main.discord.Client,
+                        "user",
+                        new_callable=PropertyMock,
+                        return_value=grim_user,
+                    ), \
+                    patch.object(
+                        main.bot,
+                        "get_channel",
+                        return_value=SimpleNamespace(name="general"),
+                    ), \
+                    patch.object(main, "grok_research_query", research), \
+                    patch.object(main, "_complete_contextual_reply", model):
+                first = await main.generate_contextual_reply(opener)
+                self.assertTrue(
+                    main.grim_chat_turn_action(follow, now=1_700_000_010.0)
+                )
+                self.assertIsNone(main.parse_chat_media_request(follow.content, follow))
+                second = await main.generate_contextual_reply(follow)
+                return first, second
+
+        first, second = asyncio.run(run())
+        self.assertEqual(research.await_count, 2)
+        self.assertEqual(research.await_args_list[1].args[1], VITAMIN_ASK)
+        self.assertEqual(first.text, main.LIVE_SOURCE_FAILURE_LINES["timeout"])
+        self.assertTrue(second.text.startswith(SUCCESS["text"]))
+        self.assertIn("-# sources:", second.text)
+        self.assertIsNone(second.media)
+        self.assertIsNone(second.media_url)
+        self.assertNotIn(("9", "10"), main._conversation_media_kind)
+        model.assert_not_awaited()
+
+    def test_memory_risk_wrap_is_replaced_on_the_zero_info_line(self):
+        self.assertEqual(
+            main.format_live_search_miss_reply(VITAMIN_RISK),
+            f"{main.LIVE_SEARCH_ZERO_INFO}\n{main.LIVE_SEARCH_MISS_WRAP_FALLBACK}",
+        )
+        self.assertEqual(
+            main.format_live_search_miss_reply(main.LIVE_SOURCE_FAILURE_LINES["timeout"]),
+            f"{main.LIVE_SEARCH_ZERO_INFO}\n{main.LIVE_SEARCH_MISS_WRAP_FALLBACK}",
+        )
+
+    def test_changelog_names_the_recall_retry(self):
+        changelog = Path(__file__).resolve().parents[1].joinpath("CHANGELOG.md").read_text()
+        self.assertIn("`Recall` / `try again` / `search again`", changelog)
+        self.assertIn("last fact question", changelog)
+        self.assertIn("`main.py`", changelog)
+        self.assertIn("Live Search has zero info on this", changelog)
+        self.assertIn("not a GIF/media ask", changelog)
+        self.assertNotIn("[REDACTED]", changelog.split("After a live-search timeout")[1][:800])
 
     def test_casual_chat_never_searches(self):
         research = AsyncMock(return_value=SUCCESS)
