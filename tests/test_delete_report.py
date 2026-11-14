@@ -608,7 +608,7 @@ class DeleteReportTests(unittest.TestCase):
     def test_panopticon_command_source_gates_only_on_env_founder_id(self):
         source = Path(main.__file__).read_text()
         start = source.index("async def panopticon(")
-        end = source.index("@bot.tree.command(name=\"memberlog\"", start)
+        end = source.index("async def nightfall(", start)
         block = source[start:end]
         self.assertIn("require_founder(", block)
         self.assertNotIn("is_grim_creator", block)
@@ -623,6 +623,234 @@ class DeleteReportTests(unittest.TestCase):
         self.assertNotIn("CREATOR_DISCORD_ID", helper)
         self.assertNotIn("administrator", helper)
         self.assertNotIn("owner_id", helper)
+
+    def test_nightfall_command_is_classified_and_wired(self):
+        self.assertEqual(main.nightfall.name, "nightfall")
+        self.assertEqual(main.nightfall.description, "CLASSIFIED")
+        self.assertNotIn("Founder", main.nightfall.description)
+        self.assertNotIn("toggle", main.nightfall.description.lower())
+        source = Path(main.__file__).read_text()
+        start = source.index("async def nightfall(")
+        end = source.index("@bot.tree.command(name=\"memberlog\"", start)
+        block = source[start:end]
+        self.assertIn("require_founder(", block)
+        self.assertNotIn("is_grim_creator", block)
+        self.assertNotIn("CREATOR_DISCORD_ID", block)
+        self.assertNotIn("require_permission", block)
+        self.assertNotIn("CHANGELOG.md", source[source.index("async def nightfall("):end])
+
+    def test_nightfall_defaults_off_and_toggles(self):
+        self.assertFalse(delete_report.nightfall_enabled())
+        self.assertTrue(delete_report.toggle_nightfall())
+        self.assertTrue(delete_report.nightfall_enabled())
+        self.assertFalse(delete_report.toggle_nightfall())
+        self.assertFalse(delete_report.nightfall_enabled())
+
+    def test_nightfall_state_persists_and_omits_founder_id(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = str(Path(temp_dir) / "nightfall.json")
+            delete_report.configure_nightfall_state(path)
+            self.assertFalse(delete_report.nightfall_enabled())
+            self.assertTrue(delete_report.toggle_nightfall())
+            with open(path, "r") as handle:
+                saved = json.load(handle)
+            self.assertEqual(saved, {"enabled": True})
+            self.assertNotIn(str(FIXTURE_FOUNDER_ID), json.dumps(saved))
+            delete_report.reset_delete_report_state()
+            delete_report.configure_nightfall_state(path)
+            self.assertTrue(delete_report.nightfall_enabled())
+            self.assertFalse(delete_report.toggle_nightfall())
+            delete_report.reset_delete_report_state()
+            delete_report.configure_nightfall_state(path)
+            self.assertFalse(delete_report.nightfall_enabled())
+
+    def test_nightfall_on_skips_send_without_logging_bodies(self):
+        async def run():
+            founder = self.founder_user()
+            bot = self.fake_bot(founder)
+            self.assertTrue(delete_report.toggle_nightfall())
+            payload = SimpleNamespace(
+                guild_id=50,
+                channel_id=777,
+                message_id=9001,
+                cached_message=self.cached_message(),
+            )
+            with patch.dict(os.environ, {delete_report.FOUNDER_ID_ENV: str(FIXTURE_FOUNDER_ID)}):
+                await delete_report.handle_raw_message_delete(bot, payload)
+                await delete_report.handle_raw_bulk_message_delete(
+                    bot,
+                    SimpleNamespace(
+                        guild_id=50,
+                        channel_id=777,
+                        message_ids=[9001],
+                        cached_messages=[self.cached_message()],
+                    ),
+                )
+            founder.send.assert_not_awaited()
+            bot.channel.send.assert_not_awaited()
+            self.assertFalse(any(SECRET_CONTENT in line for line in self.logs))
+            self.assertFalse(any(str(FIXTURE_FOUNDER_ID) in line for line in self.logs))
+
+        asyncio.run(run())
+
+    def test_nightfall_off_restores_send_when_watch_is_on(self):
+        async def run():
+            founder = self.founder_user()
+            bot = self.fake_bot(founder)
+            self.assertTrue(delete_report.toggle_nightfall())
+            self.assertFalse(delete_report.toggle_nightfall())
+            payload = SimpleNamespace(
+                guild_id=50,
+                channel_id=777,
+                message_id=9001,
+                cached_message=self.cached_message(content="fixture-line"),
+            )
+            with patch.dict(os.environ, {delete_report.FOUNDER_ID_ENV: str(FIXTURE_FOUNDER_ID)}):
+                await delete_report.handle_raw_message_delete(bot, payload)
+            founder.send.assert_awaited_once()
+            bot.channel.send.assert_not_awaited()
+
+        asyncio.run(run())
+
+    def test_nightfall_off_does_not_send_when_watch_is_off(self):
+        async def run():
+            founder = self.founder_user()
+            bot = self.fake_bot(founder)
+            delete_report.toggle_founder_delete_dms()
+            self.assertFalse(delete_report.founder_delete_dms_enabled())
+            self.assertFalse(delete_report.nightfall_enabled())
+            payload = SimpleNamespace(
+                guild_id=50,
+                channel_id=777,
+                message_id=9001,
+                cached_message=self.cached_message(),
+            )
+            with patch.dict(os.environ, {delete_report.FOUNDER_ID_ENV: str(FIXTURE_FOUNDER_ID)}):
+                await delete_report.handle_raw_message_delete(bot, payload)
+            founder.send.assert_not_awaited()
+
+        asyncio.run(run())
+
+    def test_nightfall_wipe_removes_matching_dms_only(self):
+        async def run():
+            grim_id = 404040404040404040
+            report = delete_report.build_delete_report_embeds(
+                channel_text="<#777> in Fixture Server",
+                actor_label="actor unknown",
+                snapshots=[{
+                    "message_id": 1,
+                    "author_id": None,
+                    "author_name": None,
+                    "content": None,
+                    "created_at": None,
+                    "attachments": [],
+                    "stickers": [],
+                }],
+            )[0]
+            other = discord.Embed(title="Nightfall On", description="Nightfall is on.")
+            other.set_footer(text=main.xsi_footer())
+            matching = SimpleNamespace(
+                author=SimpleNamespace(id=grim_id),
+                embeds=[report],
+                delete=AsyncMock(),
+                content="",
+            )
+            kept_other = SimpleNamespace(
+                author=SimpleNamespace(id=grim_id),
+                embeds=[other],
+                delete=AsyncMock(),
+                content="",
+            )
+            kept_founder = SimpleNamespace(
+                author=SimpleNamespace(id=FIXTURE_FOUNDER_ID),
+                embeds=[report],
+                delete=AsyncMock(),
+                content="",
+            )
+            updates_channel = SimpleNamespace(send=AsyncMock())
+            dm_channel = SimpleNamespace(
+                history=lambda **kwargs: FakeAsyncAudit(
+                    [matching, kept_other, kept_founder]
+                ),
+                send=AsyncMock(),
+            )
+            founder = self.founder_user()
+            founder.dm_channel = dm_channel
+            founder.create_dm = AsyncMock(return_value=dm_channel)
+            bot = self.fake_bot(founder)
+            bot.user = SimpleNamespace(id=grim_id)
+            bot.get_channel = lambda channel_id: updates_channel
+            with patch.dict(os.environ, {delete_report.FOUNDER_ID_ENV: str(FIXTURE_FOUNDER_ID)}):
+                removed = await delete_report.wipe_founder_panopticon_dms(bot)
+            self.assertEqual(removed, 1)
+            matching.delete.assert_awaited_once()
+            kept_other.delete.assert_not_awaited()
+            kept_founder.delete.assert_not_awaited()
+            dm_channel.send.assert_not_awaited()
+            updates_channel.send.assert_not_awaited()
+            self.assertFalse(any(SECRET_CONTENT in line for line in self.logs))
+            self.assertFalse(any(str(FIXTURE_FOUNDER_ID) in line for line in self.logs))
+
+        asyncio.run(run())
+
+    def test_nightfall_command_founder_toggles_and_wipes(self):
+        async def run():
+            event = self.panopticon_event(FIXTURE_FOUNDER_ID)
+            event.response.defer = AsyncMock()
+            event.followup = SimpleNamespace(send=AsyncMock())
+            with (
+                patch.dict(os.environ, {delete_report.FOUNDER_ID_ENV: str(FIXTURE_FOUNDER_ID)}),
+                patch.object(main, "record_security_event") as recorded,
+                patch.object(main, "wipe_founder_panopticon_dms", new_callable=AsyncMock) as wipe,
+            ):
+                await main.nightfall.callback(event)
+                self.assertTrue(delete_report.nightfall_enabled())
+                wipe.assert_awaited_once()
+                event.response.defer.assert_awaited_once_with(ephemeral=True)
+                on_embed = event.followup.send.await_args.kwargs["embed"]
+                self.assertEqual(on_embed.title, "Nightfall On")
+                self.assertTrue(event.followup.send.await_args.kwargs["ephemeral"])
+                self.assertEqual(on_embed.footer.text, main.xsi_footer())
+
+                await main.nightfall.callback(event)
+                self.assertFalse(delete_report.nightfall_enabled())
+                self.assertEqual(wipe.await_count, 1)
+                off_embed = event.followup.send.await_args.kwargs["embed"]
+                self.assertEqual(off_embed.title, "Nightfall Off")
+
+            event.channel.send.assert_not_awaited()
+            outcomes = [call.args[2] for call in recorded.call_args_list]
+            self.assertIn("enabled", outcomes)
+            self.assertIn("disabled", outcomes)
+            self.assertFalse(any(SECRET_CONTENT in line for line in self.logs))
+            self.assertFalse(any(str(FIXTURE_FOUNDER_ID) in line for line in self.logs))
+
+        asyncio.run(run())
+
+    def test_nightfall_command_rejects_non_founder(self):
+        async def run():
+            event = self.panopticon_event(
+                OTHER_USER_ID, administrator=True, owner_id=OTHER_USER_ID
+            )
+            event.response.defer = AsyncMock()
+            event.followup = SimpleNamespace(send=AsyncMock())
+            with (
+                patch.dict(os.environ, {delete_report.FOUNDER_ID_ENV: str(FIXTURE_FOUNDER_ID)}),
+                patch.object(main, "record_security_event") as recorded,
+                patch.object(main, "wipe_founder_panopticon_dms", new_callable=AsyncMock) as wipe,
+            ):
+                await main.nightfall.callback(event)
+            self.assertFalse(delete_report.nightfall_enabled())
+            wipe.assert_not_awaited()
+            event.response.defer.assert_not_awaited()
+            event.followup.send.assert_not_awaited()
+            args, send_kwargs = event.response.send_message.await_args
+            self.assertIn("permission", args[0].lower())
+            self.assertTrue(send_kwargs["ephemeral"])
+            self.assertEqual(recorded.call_args.args[1], "nightfall")
+            self.assertEqual(recorded.call_args.args[2], "denied")
+
+        asyncio.run(run())
 
 
 if __name__ == "__main__":

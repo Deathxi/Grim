@@ -57,6 +57,7 @@ from reply_auditor import AuditorConfig, ReplyAuditor, conversation_key, format_
 from substance import SUBSTANCE_PROMPT, ensure_substance
 from delete_report import (
     configure_founder_delete_dms_state,
+    configure_nightfall_state,
     founder_discord_id,
     handle_raw_bulk_message_delete,
     handle_raw_message_delete,
@@ -64,6 +65,8 @@ from delete_report import (
     log_founder_delete_report_status,
     remember_guild_message,
     toggle_founder_delete_dms,
+    toggle_nightfall,
+    wipe_founder_panopticon_dms,
 )
 
 BOT_START_TIME = None
@@ -1766,6 +1769,7 @@ def save_updates_sha(data):
 updates_channels = load_updates_data()
 updates_sha = load_updates_sha()
 configure_founder_delete_dms_state(_data_path("panopticon.json"))
+configure_nightfall_state(_data_path("nightfall.json"))
 
 RUNTIME_HEARTBEAT_FILE = _data_path("runtime_heartbeat.json")
 OUTAGE_REPORT_STATE_FILE = _data_path("outage_report_state.json")
@@ -9296,6 +9300,35 @@ async def panopticon(interaction: discord.Interaction):
     )
     embed.set_footer(text=xsi_footer())
     await interaction.response.send_message(embed=embed, ephemeral=True)
+
+@bot.tree.command(
+    name="nightfall",
+    description="CLASSIFIED",
+)
+async def nightfall(interaction: discord.Interaction):
+    if not await require_founder(interaction, "nightfall"):
+        return
+    await interaction.response.defer(ephemeral=True)
+    enabled = toggle_nightfall()
+    record_security_event(
+        interaction,
+        "nightfall",
+        "enabled" if enabled else "disabled",
+    )
+    if enabled:
+        await wipe_founder_panopticon_dms(bot)
+        title = "Nightfall On"
+        description = "Nightfall is on."
+    else:
+        title = "Nightfall Off"
+        description = "Nightfall is off."
+    embed = discord.Embed(
+        title=title,
+        description=description,
+        color=discord.Color.from_rgb(18, 18, 18),
+    )
+    embed.set_footer(text=xsi_footer())
+    await interaction.followup.send(embed=embed, ephemeral=True)
 
 @bot.tree.command(name="memberlog", description="Configure member departure notifications")
 @discord.app_commands.describe(action="Enable, disable, or safely test departure notifications")

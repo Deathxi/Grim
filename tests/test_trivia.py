@@ -1021,6 +1021,7 @@ class TriviaTests(unittest.TestCase):
             "async def grim_translate(",
             "async def grim_updates(",
             "async def panopticon(",
+            "async def nightfall(",
             "async def on_member_join(",
         ):
             self.assertIn("xsi_footer(", _following_block(source, signature), signature)
