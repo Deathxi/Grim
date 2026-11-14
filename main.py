@@ -3361,9 +3361,10 @@ def grim_should_reply_to_message(message) -> bool:
     return grim_turn_needs_reply(content, mentioned=mentioned)
 
 
-# After a name-call, stay with that original poster only in the Discord reply
-# chain (message.reference). Five minutes of OP silence ends it. Speaking to
-# someone else ends it immediately. Side talk does not keep him in.
+# After a name-call, stay with that original poster in the same channel:
+# Discord reply-ladder (message.reference) or same-channel follow-ups with
+# no reply-arrow. Five minutes of OP silence ends it. Speaking to someone
+# else ends it immediately. Side talk does not keep him in.
 CONVERSATION_IDLE_SECONDS = 300
 _open_conversations: dict[tuple[str, str], float] = {}
 _conversation_ladders: dict[tuple[str, str], set[str]] = {}
@@ -3522,10 +3523,12 @@ def _follow_up_in_reply_ladder(message) -> bool:
 def grim_chat_turn_action(message, *, now: float | None = None) -> bool:
     """True when Grim should produce a contextual reply for this turn.
 
-    Naming Grim (@ or plain) with an entrance starts a reply-ladder
-    conversation. Later turns from that original poster keep getting replies
-    only in that Discord reply chain, without naming him again. Five minutes
-    of OP silence, or speaking to someone else, ends it.
+    Naming Grim (@ or plain) with an entrance starts a conversation with
+    that original poster. Later turns from that OP in the same channel keep
+    getting replies without naming him again and without a Discord
+    reply-arrow. Discord reply-ladder messages still continue. A lone
+    "Grim" ping counts as still here while the conversation is open. Five
+    minutes of OP silence, or speaking to someone else, ends it.
     """
     content = getattr(message, "content", "") or ""
     if content.lstrip().startswith("!"):
@@ -3539,10 +3542,8 @@ def grim_chat_turn_action(message, *, now: float | None = None) -> bool:
     if grim_follow_up_addresses_someone_else(message):
         grim_end_conversation(message)
         return False
-    if _follow_up_in_reply_ladder(message):
-        _touch_conversation(message, now=current)
-        return True
-    return False
+    _touch_conversation(message, now=current)
+    return True
 
 async def generate_haiku():
     client = get_grok_client()
@@ -10185,7 +10186,7 @@ async def on_message(message):
             else:
                 print("[Grim] Conversational mention produced no reply")
     elif not is_prefix_command:
-        # No name-call, @mention, or open reply-ladder follow-up — maybe a periodic chime
+        # No name-call, @mention, or open same-channel follow-up — maybe a periodic chime
         await maybe_chime_in(message)
 
     await bot.process_commands(message)
