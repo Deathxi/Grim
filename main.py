@@ -4459,10 +4459,23 @@ _CHAT_MEME_RE = re.compile(
 )
 _CHAT_CLIP_RE = re.compile(r"(?<!\w)clips?(?!\w)")
 _CHAT_SEND_RE = re.compile(
-    r"(?<!\w)(?:show|send|post|pull|gimme|give|drop|throw)(?!\w)"
+    r"(?<!\w)(?:show|send|post|pull|gimme|give|drop|throw|find|get|fetch)(?!\w)"
 )
 _CHAT_CAN_YOU_RE = re.compile(
     r"(?<!\w)(?:can you|could you|can u|could u|do you|are you able|you able to)(?!\w)"
+)
+_CHAT_WANT_RE = re.compile(
+    r"(?<!\w)(?:want|wanna|need|lemme|let me)(?!\w)"
+)
+_CHAT_ANOTHER_RE = re.compile(r"(?<!\w)(?:another|one more)(?!\w)")
+_CHAT_MEDIA_OF_RE = re.compile(
+    r"(?<!\w)(?:gifs?|giphy|tenor|pictures?|pics?|photos?|images?|"
+    r"jpegs?|pngs?|webps?|memes?|copypastas?|copy\s*pastas?|wojaks?|"
+    r"reaction\s+images?)\s+of\b"
+)
+_CHAT_MEDIA_AS_RE = re.compile(
+    r"\bas\s+(?:an?\s+)?(?:gifs?|pictures?|pics?|photos?|images?|memes?|"
+    r"jpegs?|pngs?|webps?|clips?)\b"
 )
 _CHAT_CURRENT_EVENTS_RE = re.compile(
     r"(?:current events?|world news|news today|today s news|todays news|"
@@ -4482,7 +4495,19 @@ _CHAT_MEDIA_SCAFFOLD = frozenset({
     "jpeg", "jpg", "png", "webp", "meme", "memes", "copypasta",
     "copypastas", "copy", "pasta", "clip", "clips", "wojak", "wojaks",
     "reaction", "form", "this", "that", "those", "these", "something",
-    "anything", "still",
+    "anything", "still", "wanna", "lemme", "let", "fetch", "another",
+    "more",
+})
+_CHAT_MEDIA_REACTIONS = frozenset({
+    "lmao", "lmfao", "lmaoo", "lmaooo", "lmaoooo", "lol", "lolz", "haha",
+    "hahaha", "heh", "ha", "wtf", "wth", "wtaf", "huh", "damn", "damnn",
+    "bruh", "bro", "broo", "yo", "ok", "okay", "k", "kk", "yeah", "yea",
+    "yup", "yep", "nah", "nope", "wow", "whoa", "oof", "rip", "gg", "fr",
+    "ong", "omg", "omfg", "ikr", "true", "facts", "same", "mood", "wild",
+    "crazy", "insane", "dead", "what", "wait", "hm", "hmm", "hmmm", "mhm",
+    "uh", "uhh", "oh", "ohh", "ah", "ahh", "ay", "ayy", "nice", "cool",
+    "bet", "word", "sheesh", "fire", "holy", "shit", "fuck", "fucking",
+    "lmaowtf",
 })
 
 
@@ -4496,30 +4521,55 @@ def _remember_conversation_media(message, kind: str | None) -> None:
         _conversation_media_kind.pop(key, None)
 
 
-def _looks_like_media_subject(text: str, folded: str) -> bool:
-    if "?" in str(text or ""):
-        return False
+def _chat_media_reaction_line(folded: str) -> bool:
+    """Laughs, wtf/huh, and short acks are not image asks."""
     tokens = folded.split()
-    if not tokens or len(tokens) > 3:
+    if not tokens:
         return False
-    if all(
-        token in _CONVERSATION_SMALL_TALK or token in _NAME_CALL_GREETINGS
-        for token in tokens
-    ):
+    allow = (
+        _CHAT_MEDIA_REACTIONS
+        | _CONVERSATION_SMALL_TALK
+        | _NAME_CALL_GREETINGS
+    )
+    return all(token in allow for token in tokens)
+
+
+def _explicit_chat_media_ask(folded: str) -> bool:
+    """True only for send/show/gif-of/pic-of style asks, never reactions."""
+    wants_visual = bool(
+        _CHAT_GIF_RE.search(folded)
+        or _CHAT_IMAGE_RE.search(folded)
+        or _CHAT_MEME_RE.search(folded)
+        or _CHAT_CLIP_RE.search(folded)
+    )
+    if not wants_visual:
         return False
-    if any(
-        re.search(rf"(?<!\w){re.escape(phrase)}(?!\w)", folded)
-        for phrase in _STOP_REPLY_PHRASES
-    ):
+    if _chat_media_reaction_line(folded):
         return False
-    return True
+    if _CHAT_MEDIA_OF_RE.search(folded):
+        return True
+    if _CHAT_MEDIA_AS_RE.search(folded):
+        return True
+    if _CHAT_SEND_RE.search(folded):
+        return True
+    if _CHAT_CAN_YOU_RE.search(folded):
+        return True
+    if _CHAT_WANT_RE.search(folded):
+        return True
+    if _CHAT_ANOTHER_RE.search(folded):
+        return True
+    return False
 
 
 def parse_chat_media_request(text: str | None, message=None) -> dict | None:
-    """Visual ask: GIF, picture, meme/copypasta image. Not ASCII unless asked."""
+    """Visual ask: GIF, picture, meme/copypasta image. Not ASCII unless asked.
+
+    Conversation hold does not turn reactions or follow-ups into files.
+    A prior GIF/picture in the thread is not enough; this turn has to ask.
+    """
     visible = _conversation_text(text)
     folded = _output_match_text(visible)
-    if not folded:
+    if not folded or not _explicit_chat_media_ask(folded):
         return None
     wants_gif = bool(_CHAT_GIF_RE.search(folded))
     wants_image = bool(_CHAT_IMAGE_RE.search(folded))
@@ -4535,20 +4585,12 @@ def parse_chat_media_request(text: str | None, message=None) -> dict | None:
         kind = "gif"
     elif wants_image or wants_meme:
         kind = "image"
+    if kind is None:
+        return None
     current_events = bool(_CHAT_CURRENT_EVENTS_RE.search(folded))
     topic = " ".join(
         token for token in folded.split() if token not in _CHAT_MEDIA_SCAFFOLD
     )[:80]
-    if kind is None:
-        expected = None
-        key = _conversation_key(message) if message is not None else None
-        if key is not None:
-            expected = _conversation_media_kind.get(key)
-        if expected and _looks_like_media_subject(visible, folded):
-            kind = expected
-            topic = folded[:80]
-        else:
-            return None
     capability = bool(
         _CHAT_CAN_YOU_RE.search(folded) and not topic and not current_events
     )
