@@ -379,6 +379,15 @@ class DeleteReportTests(unittest.TestCase):
         self.assertTrue(hasattr(main, "on_raw_message_delete"))
         self.assertTrue(hasattr(main, "on_raw_bulk_message_delete"))
         self.assertEqual(main.panopticon.name, "panopticon")
+        self.assertEqual(main.panopticon.description, "CLASSIFIED")
+        self.assertNotIn("Founder", main.panopticon.description)
+        self.assertNotIn("toggle", main.panopticon.description.lower())
+        self.assertNotIn("deletion-report", main.panopticon.description)
+        source = Path(main.__file__).read_text()
+        self.assertNotIn(
+            "Founder: toggle the deletion-report watch on or off",
+            source,
+        )
 
     def test_is_founder_user_uses_env_id_not_creator_constant(self):
         with patch.dict(os.environ, {delete_report.FOUNDER_ID_ENV: str(FIXTURE_FOUNDER_ID)}):
