@@ -172,6 +172,8 @@ def classify_security_rows(rows: Iterable[tuple]) -> dict[str, tuple[int, float]
                 category = "rate_limited"
             elif outcome in SEARCH_FAILURES:
                 category = "search_failed"
+            elif outcome in {"success", "recovered"}:
+                category = "search_recovered"
             else:
                 continue
         elif outcome == "denied":
@@ -184,6 +186,17 @@ def classify_security_rows(rows: Iterable[tuple]) -> dict[str, tuple[int, float]
             continue
         seen, latest = totals.get(category, (0, 0.0))
         totals[category] = (seen + count, max(latest, last_at))
+    failed = totals.get("search_failed")
+    recovered = totals.get("search_recovered")
+    if (
+        failed
+        and recovered
+        and recovered[1] >= failed[1]
+    ):
+        # A later live hit or a later non-search turn clears leftover misses
+        # so one timeout cannot hold DEFCON 4 for the rest of the window.
+        totals.pop("search_failed", None)
+    totals.pop("search_recovered", None)
     return totals
 
 
