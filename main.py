@@ -10882,48 +10882,6 @@ async def welcome_off(interaction: discord.Interaction):
         await interaction.response.send_message("Welcome messages are not enabled in this server.", ephemeral=True)
 
 # ── Voice Channel Commands ────────────────────────────────────────────────────
-@bot.tree.command(name="vc_join", description="Have Grim join your voice channel")
-async def vc_join(interaction: discord.Interaction):
-    if not await require_permission(interaction, "move_members", "voice_join"):
-        return
-    await interaction.response.defer(ephemeral=True)
-    guild_id = str(interaction.guild_id)
-
-    # Must be in a voice channel
-    if not interaction.user.voice or not interaction.user.voice.channel:
-        await interaction.followup.send("You need to be in a voice channel first.", ephemeral=True)
-        return
-
-    channel = interaction.user.voice.channel
-
-    # Already connected in this guild — move if needed
-    existing = vc_sessions.get(guild_id)
-    if existing and existing["vc"] and existing["vc"].is_connected():
-        if existing["vc"].channel.id == channel.id:
-            await interaction.followup.send(f"Already in **{channel.name}**.", ephemeral=True)
-            return
-        await existing["vc"].move_to(channel)
-        existing["empty_since"] = None
-        await interaction.followup.send(f"Moved to **{channel.name}**.", ephemeral=True)
-        return
-
-    try:
-        vc = await channel.connect()
-        vc_sessions[guild_id] = {"vc": vc, "empty_since": None}
-        record_security_event(interaction, "voice_join", "success")
-        embed = discord.Embed(
-            description=f"Joined **{channel.name}**.\nI'll leave automatically if the channel stays empty for 1 hour.",
-            color=discord.Color.from_rgb(18, 18, 18)
-        )
-        embed.set_footer(text=f"Grim · {VERSION}")
-        await interaction.followup.send(embed=embed, ephemeral=True)
-        print(f"[VC] Joined {channel.name} in guild {guild_id}")
-    except discord.ClientException as e:
-        await interaction.followup.send(f"Couldn't join: {e}", ephemeral=True)
-    except Exception as e:
-        await interaction.followup.send("Something went wrong joining the channel.", ephemeral=True)
-        print(f"[VC] Join error: {e}")
-
 @bot.tree.command(name="vc_leave", description="Have Grim leave the voice channel")
 async def vc_leave(interaction: discord.Interaction):
     if not await require_permission(interaction, "move_members", "voice_leave"):
