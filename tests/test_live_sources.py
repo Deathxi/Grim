@@ -255,6 +255,43 @@ class LiveSourcesTests(unittest.TestCase):
                 text,
             )
 
+    def test_meme_judgment_and_right_or_wrong_do_not_live_search(self):
+        for text in (
+            "right or wrong?",
+            "@Grim right or wrong?",
+            "https://x.com/MK_007/status/1 We need Silverhand to put a crew "
+            "together to enter an alternate universe and destroy G Man Altman "
+            "right or wrong?",
+            "thoughts on this shitpost",
+            "agree or disagree?",
+            "your take on this meme",
+            "hot take?",
+        ):
+            self.assertTrue(main._is_judgment_or_meme_take(text), text)
+            self.assertFalse(main._needs_live_sources(text, ""), text)
+            self.assertFalse(main.mention_asks_for_facts(text), text)
+            self.assertFalse(
+                main._needs_live_sources(
+                    text,
+                    "Death: explain the kardashev scale type i planetary watts",
+                ),
+                text,
+            )
+
+    def test_real_teaching_and_fact_check_still_live_search(self):
+        for text in (
+            "is this true",
+            "fact check that nvidia investment claim",
+            "what's jensen huang's position?",
+            "what does an average balanced meal look like for breakfast that "
+            "meets daily vitamin requirements?",
+            "do you think excessive smoking can cause apathy?",
+            "what's going on with Jensen Huang",
+            "whats the weather like tomorrow in the Bay Area?",
+        ):
+            self.assertFalse(main._is_judgment_or_meme_take(text), text)
+            self.assertTrue(main._needs_live_sources(text, ""), text)
+
     def test_capability_question_is_not_a_news_search(self):
         for text in (
             "let me try here but do you have any live search capability?",
@@ -699,7 +736,7 @@ class LiveSourcesTests(unittest.TestCase):
 
     def test_greeting_and_quote_do_not_take_the_news_miss_path(self):
         research = AsyncMock(return_value={"status": "empty"})
-        main._remember_live_failure("50:9")
+        main._remember_live_failure("50:9:10")
         (hello,), model = self.converse(
             ["you okay?"],
             research,
@@ -711,7 +748,7 @@ class LiveSourcesTests(unittest.TestCase):
         self.assertNotIn("where it stands", hello.text)
         self.assertNotEqual(hello.text, main.LIVE_SOURCE_FAILURE_LINES["empty"])
 
-        main._remember_live_failure("50:9")
+        main._remember_live_failure("50:9:10")
         (hello,), model = self.converse(
             ["how is it going pal"],
             research,
@@ -724,7 +761,7 @@ class LiveSourcesTests(unittest.TestCase):
         self.assertNotEqual(hello.text, main.LIVE_SOURCE_FAILURE_LINES["empty"])
         self.assertNotIn("<LIVE_RESEARCH_STATUS>", model.await_args.args[2])
 
-        main._remember_live_failure("50:9")
+        main._remember_live_failure("50:9:10")
         quoted = (
             "> exactly they've got their priorities jacked up\n"
             "huh bruh"
@@ -782,7 +819,7 @@ class LiveSourcesTests(unittest.TestCase):
 
     def test_capability_question_ignores_channel_failure_memory(self):
         research = AsyncMock(return_value=SUCCESS)
-        main._remember_live_failure("50:9")
+        main._remember_live_failure("50:9:10")
         (reply,), model = self.converse(
             ["let me try here but do you have any live search capability?"],
             research,
@@ -1137,7 +1174,7 @@ class LiveSourcesTests(unittest.TestCase):
         research = AsyncMock(return_value=FORECAST)
         model = AsyncMock(side_effect=AssertionError("weather should not use chat"))
         main._conversation_media_kind[("9", "10")] = "gif"
-        main._remember_live_failure("50:9")
+        main._remember_live_failure("50:9:10")
 
         async def run():
             with patch.object(
@@ -1281,15 +1318,25 @@ class LiveSourcesTests(unittest.TestCase):
                 )
 
     def test_weather_miss_does_not_frame_later_name_calls(self):
+        # Same operator's prior weather lines in this channel can linger in
+        # research context; another operator's weather must not.
         main.save_message_to_db(
-            "50", "9", "w1", "Kōshin",
+            "50", "9", "w1", "Noct",
             "whats the weather like tomorrow in the Bay Area?", 1.0, False,
+            author_id="10",
         )
         main.save_message_to_db(
-            "50", "9", "w2", "Kōshin", "in the Bay Area", 2.0, False,
+            "50", "9", "w2", "Noct", "in the Bay Area", 2.0, False,
+            author_id="10",
         )
         main.save_message_to_db(
-            "50", "9", "w3", "Kōshin", "you there", 3.0, False,
+            "50", "9", "w3", "Noct", "you there", 3.0, False,
+            author_id="10",
+        )
+        main.save_message_to_db(
+            "50", "9", "wx", "Kōshin",
+            "whats the weather like tomorrow in Tokyo?", 1.5, False,
+            author_id="77",
         )
         research = AsyncMock(return_value={"status": "timeout"})
         later = (
@@ -1306,8 +1353,8 @@ class LiveSourcesTests(unittest.TestCase):
         )
         self.assertEqual(research.await_count, 2)
         self.assert_zero_info_miss(replies[0], MISS_WRAP)
-        self.assertFalse(main._recent_live_failure("50:9"))
-        self.assertNotIn("50:9", main._WEATHER_LIVE_FAILURES)
+        self.assertFalse(main._recent_live_failure("50:9:10"))
+        self.assertNotIn("50:9:10", main._WEATHER_LIVE_FAILURES)
         for reply, expected in zip(replies[1:], ("already here.", "up.", "here.", "he asked.", "that one.")):
             with self.subTest(reply=reply.text):
                 self.assertEqual(reply.text, expected)
@@ -1319,6 +1366,7 @@ class LiveSourcesTests(unittest.TestCase):
             prompt = call.args[2]
             self.assertIn(main.WEATHER_LEFTOVER_TURN_NOTE, prompt)
             self.assertNotIn("casual wrap", prompt)
+            self.assertNotIn("Tokyo", prompt)
 
     def test_weather_fail_memory_cleared_after_non_weather_turn(self):
         research = AsyncMock(side_effect=[
@@ -1333,8 +1381,8 @@ class LiveSourcesTests(unittest.TestCase):
         )
         self.assertEqual(research.await_count, 2)
         self.assertEqual(replies[1].text, "already here.")
-        self.assertNotIn("50:9", main._WEATHER_LIVE_FAILURES)
-        self.assertFalse(main._recent_live_failure("50:9"))
+        self.assertNotIn("50:9:10", main._WEATHER_LIVE_FAILURES)
+        self.assertFalse(main._recent_live_failure("50:9:10"))
         nvidia, _ = self.converse(
             ["what's jensen huang's position?"],
             research,
@@ -1417,7 +1465,7 @@ class LiveSourcesTests(unittest.TestCase):
             {"suppress_embeds": True},
         )
         self.assertNotIn("try again in a bit", reply.text)
-        self.assertFalse(main._recent_live_failure("50:9"))
+        self.assertFalse(main._recent_live_failure("50:9:10"))
 
     def test_theology_followup_after_news_miss_is_chat_not_timeout_copy(self):
         research = AsyncMock(return_value={"status": "timeout"})
@@ -1436,7 +1484,7 @@ class LiveSourcesTests(unittest.TestCase):
             self.assertNotIn("live search timed out", reply.text.casefold())
             self.assertNotIn("-# sources:", reply.text)
         self.assertTrue(
-            main._recent_live_failure("50:9"),
+            main._recent_live_failure("50:9:10"),
             "Recall latch stays so a later fact ask does not loop the miss line",
         )
 

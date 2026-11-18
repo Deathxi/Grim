@@ -347,6 +347,122 @@ class ConversationPersistenceTests(unittest.TestCase):
         self.assertIn(miss, source)
         self.assertNotIn(miss, action)
 
+    def test_different_operators_never_share_hold_memory(self):
+        import tempfile
+        from pathlib import Path as _Path
+
+        original_db = main.CHAT_DB_FILE
+        temp_dir = tempfile.TemporaryDirectory()
+        try:
+            main.CHAT_DB_FILE = str(_Path(temp_dir.name) / "chat_history.db")
+            main.init_chat_db()
+            main.save_message_to_db(
+                "50", "9", "a1", "Death",
+                "the kardashev scale type i sits around planetary watts",
+                1.0, False, author_id="99",
+            )
+            main.save_message_to_db(
+                "50", "9", "a2", "Kōshin",
+                "right or wrong on this meme",
+                2.0, False, author_id="10",
+            )
+            koshin = main.get_operator_channel_history_from_db(
+                "50", "9", author_id="10", author_name="Kōshin", limit=20,
+            )
+            death = main.get_operator_channel_history_from_db(
+                "50", "9", author_id="99", author_name="Death", limit=20,
+            )
+            self.assertEqual(len(koshin), 1)
+            self.assertIn("right or wrong", koshin[0][1])
+            self.assertNotIn("kardashev", " ".join(row[1] for row in koshin).casefold())
+            self.assertEqual(len(death), 1)
+            self.assertIn("kardashev", death[0][1].casefold())
+            self.assertEqual(
+                main._research_scope_key("50", "9", "10"),
+                "50:9:10",
+            )
+            self.assertNotEqual(
+                main._research_scope_key("50", "9", "10"),
+                main._research_scope_key("50", "9", "99"),
+            )
+        finally:
+            main.CHAT_DB_FILE = original_db
+            temp_dir.cleanup()
+
+    def test_same_user_other_channel_uncorrelated_ask_does_not_dump(self):
+        import tempfile
+        from pathlib import Path as _Path
+
+        original_db = main.CHAT_DB_FILE
+        temp_dir = tempfile.TemporaryDirectory()
+        try:
+            main.CHAT_DB_FILE = str(_Path(temp_dir.name) / "chat_history.db")
+            main.init_chat_db()
+            main.save_message_to_db(
+                "50", "9", "c1", "Oxy",
+                "kardashev type i planetary insolation breakdown",
+                1.0, False, author_id="20",
+            )
+            main.save_message_to_db(
+                "50", "9", "c2", "Zed",
+                "yeah listening to that kardashev talk",
+                2.0, False, author_id="10",
+            )
+            related = main.correlated_foreign_channel_context(
+                "50",
+                "11",
+                author_id="10",
+                author_name="Zed",
+                ask_text="yo grim how we doing",
+                limit=4,
+            )
+            self.assertEqual(related, [])
+        finally:
+            main.CHAT_DB_FILE = original_db
+            temp_dir.cleanup()
+
+    def test_same_user_other_channel_correlated_ask_gets_limited_context(self):
+        import tempfile
+        from pathlib import Path as _Path
+
+        original_db = main.CHAT_DB_FILE
+        temp_dir = tempfile.TemporaryDirectory()
+        try:
+            main.CHAT_DB_FILE = str(_Path(temp_dir.name) / "chat_history.db")
+            main.init_chat_db()
+            main.save_message_to_db(
+                "50", "9", "c1", "Oxy",
+                "kardashev type i planetary insolation breakdown",
+                1.0, False, author_id="20",
+            )
+            main.save_message_to_db(
+                "50", "9", "c2", "Zed",
+                "yeah listening to that kardashev talk",
+                2.0, False, author_id="10",
+            )
+            main.save_message_to_db(
+                "50", "9", "c3", "Oxy",
+                "unrelated pizza topping debate about pineapple",
+                3.0, False, author_id="20",
+            )
+            related = main.correlated_foreign_channel_context(
+                "50",
+                "11",
+                author_id="10",
+                author_name="Zed",
+                ask_text="grim remind me what the kardashev breakdown was",
+                limit=4,
+            )
+            self.assertTrue(related)
+            blob = " ".join(item["content"] for item in related).casefold()
+            self.assertIn("kardashev", blob)
+            self.assertIn("related from", blob)
+            self.assertNotIn("pineapple", blob)
+            self.assertLessEqual(len(related), 4)
+        finally:
+            main.CHAT_DB_FILE = original_db
+            temp_dir.cleanup()
+
     def test_changelog_feeds_conversation_patch_notes(self):
         changelog = Path(__file__).resolve().parents[1].joinpath("CHANGELOG.md").read_text()
         self.assertIn("same channel", changelog)

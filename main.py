@@ -618,11 +618,17 @@ def init_chat_db():
             channel_id TEXT,
             message_id TEXT UNIQUE,
             author_name TEXT,
+            author_id TEXT,
             content TEXT,
             timestamp REAL,
             is_grim INTEGER DEFAULT 0
         )
     """)
+    message_cols = {
+        row[1] for row in conn.execute("PRAGMA table_info(messages)")
+    }
+    if "author_id" not in message_cols:
+        conn.execute("ALTER TABLE messages ADD COLUMN author_id TEXT")
     conn.execute("""
         CREATE TABLE IF NOT EXISTS member_profiles (
             guild_id TEXT,
@@ -1345,17 +1351,34 @@ def _format_duration(total_seconds: float) -> str:
         parts.append(f"{minutes}m")
     return " ".join(parts)
 
-def save_message_to_db(guild_id: str, channel_id: str, message_id: str,
-                        author_name: str, content: str, timestamp: float, is_grim: bool = False):
+def save_message_to_db(
+    guild_id: str,
+    channel_id: str,
+    message_id: str,
+    author_name: str,
+    content: str,
+    timestamp: float,
+    is_grim: bool = False,
+    author_id: str | None = None,
+):
     if not content.strip():
         return
     try:
         conn = sqlite3.connect(CHAT_DB_FILE)
         conn.execute("""
             INSERT OR IGNORE INTO messages
-            (guild_id, channel_id, message_id, author_name, content, timestamp, is_grim)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-        """, (guild_id, channel_id, message_id, author_name, content, timestamp, 1 if is_grim else 0))
+            (guild_id, channel_id, message_id, author_name, author_id, content, timestamp, is_grim)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            guild_id,
+            channel_id,
+            message_id,
+            author_name,
+            str(author_id) if author_id is not None else None,
+            content,
+            timestamp,
+            1 if is_grim else 0,
+        ))
         conn.commit()
         conn.close()
     except Exception as e:
@@ -1410,9 +1433,208 @@ def get_channel_history_from_db(guild_id: str, channel_id: str, limit: int = 50)
         print(f"[DB] Fetch error: {e}")
         return []
 
+def get_operator_channel_history_from_db(
+    guild_id: str,
+    channel_id: str,
+    *,
+    author_id: str | None,
+    author_name: str,
+    grim_message_ids: set[str] | None = None,
+    limit: int = 50,
+):
+    """Hold memory for one operator in one channel/thread.
+
+    Rows are (author_name, content, is_grim, message_id) in chronological order.
+    Other operators never appear. Grim lines are kept only on this hold's ladder.
+    Legacy rows without author_id still match on display name.
+    """
+    try:
+        conn = sqlite3.connect(CHAT_DB_FILE)
+        actor = str(author_id) if author_id is not None else ""
+        name = str(author_name or "")
+        rows = conn.execute("""
+            SELECT author_name, content, is_grim, message_id FROM messages
+            WHERE guild_id = ? AND channel_id = ?
+              AND (
+                (
+                    is_grim = 0
+                    AND (
+                        (author_id IS NOT NULL AND author_id != '' AND author_id = ?)
+                        OR (
+                            (author_id IS NULL OR author_id = '')
+                            AND author_name = ?
+                        )
+                    )
+                )
+                OR is_grim = 1
+              )
+            ORDER BY timestamp DESC LIMIT ?
+        """, (guild_id, channel_id, actor, name, limit)).fetchall()
+        conn.close()
+        ladder = {str(mid) for mid in (grim_message_ids or set()) if mid}
+        if ladder:
+            rows = [
+                row for row in rows
+                if not row[2] or str(row[3] or "") in ladder
+            ]
+        else:
+            rows = [row for row in rows if not row[2]]
+        rows.reverse()
+        return rows[-limit:]
+    except Exception as e:
+        print(f"[DB] Operator channel history fetch error: {e}")
+        return []
+
+def get_operator_other_channel_ids(
+    guild_id: str,
+    channel_id: str,
+    *,
+    author_id: str | None,
+    author_name: str,
+    limit: int = 6,
+) -> list[str]:
+    """Other channels where this same operator recently posted (reading presence)."""
+    try:
+        conn = sqlite3.connect(CHAT_DB_FILE)
+        actor = str(author_id) if author_id is not None else ""
+        name = str(author_name or "")
+        rows = conn.execute("""
+            SELECT channel_id, MAX(timestamp) AS latest
+            FROM messages
+            WHERE guild_id = ?
+              AND channel_id != ?
+              AND is_grim = 0
+              AND (
+                (author_id IS NOT NULL AND author_id != '' AND author_id = ?)
+                OR (
+                    (author_id IS NULL OR author_id = '')
+                    AND author_name = ?
+                )
+              )
+            GROUP BY channel_id
+            ORDER BY latest DESC
+            LIMIT ?
+        """, (guild_id, channel_id, actor, name, limit)).fetchall()
+        conn.close()
+        return [str(row[0]) for row in rows if row and row[0] is not None]
+    except Exception as e:
+        print(f"[DB] Operator other-channel lookup error: {e}")
+        return []
+
+def get_channel_recent_lines_from_db(
+    guild_id: str,
+    channel_id: str,
+    *,
+    limit: int = 20,
+) -> list[tuple]:
+    """Recent lines in one channel for correlation checks.
+
+    Rows: (author_name, content, is_grim, channel_id).
+    """
+    try:
+        conn = sqlite3.connect(CHAT_DB_FILE)
+        rows = conn.execute("""
+            SELECT author_name, content, is_grim, channel_id FROM messages
+            WHERE guild_id = ? AND channel_id = ?
+            ORDER BY timestamp DESC LIMIT ?
+        """, (guild_id, channel_id, limit)).fetchall()
+        conn.close()
+        rows.reverse()
+        return rows
+    except Exception as e:
+        print(f"[DB] Channel recent lines fetch error: {e}")
+        return []
+
+def _memory_topic_tokens(text: str | None) -> set[str]:
+    """Content tokens used to decide whether a foreign line correlates with this ask."""
+    folded = _output_match_text(_conversation_text(text))
+    if not folded:
+        return set()
+    skip = _OUTPUT_STOPWORDS | _CONVERSATION_SMALL_TALK | _CASUAL_VOCAB | {
+        "grim", "right", "wrong", "or", "channel", "thread", "discord",
+    }
+    return {
+        token
+        for token in folded.split()
+        if token not in skip and len(token) >= 3
+    }
+
+def _line_correlates_with_ask(ask_tokens: set[str], line_text: str | None) -> bool:
+    """True when a foreign-channel line clearly shares topic with this ask."""
+    if len(ask_tokens) < 1:
+        return False
+    line_tokens = _memory_topic_tokens(line_text)
+    overlap = ask_tokens & line_tokens
+    if not overlap:
+        return False
+    if len(overlap) >= 2:
+        return True
+    return any(len(token) >= 6 for token in overlap)
+
+def correlated_foreign_channel_context(
+    guild_id: str,
+    channel_id: str,
+    *,
+    author_id: str | None,
+    author_name: str,
+    ask_text: str | None,
+    limit: int = 4,
+) -> list[dict]:
+    """Same user, other channels: only lines that clearly correlate with this ask.
+
+    Default is no foreign dump. Never blends another operator's hold — only
+    recent lines from channels where this operator was active, filtered hard
+    by topic overlap with the current ask.
+    """
+    ask_tokens = _memory_topic_tokens(ask_text)
+    if len(ask_tokens) < 1:
+        return []
+    other_channels = get_operator_other_channel_ids(
+        guild_id,
+        channel_id,
+        author_id=author_id,
+        author_name=author_name,
+        limit=6,
+    )
+    if not other_channels:
+        return []
+    picked: list[dict] = []
+    seen: set[str] = set()
+    for other_id in other_channels:
+        for row_author, content, is_grim, row_channel in get_channel_recent_lines_from_db(
+            guild_id,
+            other_id,
+            limit=16,
+        ):
+            text = str(content or "").strip()
+            if not text or not _line_correlates_with_ask(ask_tokens, text):
+                continue
+            key = f"{row_channel}:{text[:160].casefold()}"
+            if key in seen:
+                continue
+            seen.add(key)
+            ch_obj = bot.get_channel(int(row_channel)) if str(row_channel).isdigit() else None
+            ch_label = f"#{ch_obj.name}" if ch_obj else f"#channel-{row_channel}"
+            speaker = "Grim" if is_grim else (row_author or "member")
+            picked.append({
+                "role": "assistant" if is_grim else "user",
+                "content": (
+                    f"[related from {ch_label}, only because it correlates "
+                    f"with this ask] {speaker}: {text[:350]}"
+                ),
+            })
+            if len(picked) >= limit:
+                return picked
+    return picked
+
 def get_server_history_from_db(guild_id: str, limit: int = 50):
     """Returns last N messages from the entire server (all channels), in chronological order.
-    Returns rows as (author_name, content, is_grim, channel_id)."""
+    Returns rows as (author_name, content, is_grim, channel_id).
+
+    Digests and proactive chimes may use this. @Grim reply holds must not dump
+    this wholesale — use get_operator_channel_history_from_db, and only add
+    correlated_foreign_channel_context when the same user's ask clearly matches.
+    """
     try:
         conn = sqlite3.connect(CHAT_DB_FILE)
         rows = conn.execute("""
@@ -1426,6 +1648,10 @@ def get_server_history_from_db(guild_id: str, limit: int = 50):
     except Exception as e:
         print(f"[DB] Server history fetch error: {e}")
         return []
+
+def _research_scope_key(guild_id: str, channel_id: str, author_id: str) -> str:
+    """Fail-memory / research cache: one operator in one channel, never guild-wide."""
+    return f"{guild_id}:{channel_id}:{author_id}"
 
 def get_server_history_for_digest(guild_id: str, limit: int = 200):
     """Returns last N messages with timestamps for digest synthesis."""
@@ -2346,6 +2572,20 @@ _LIVE_CREATIVE_OR_OPINION = (
     "what do you think", "your opinion", "your take", "how are you", "how r u",
     "wyd", "hbu", "how is it going", "hows it going", "whats up", "what up",
 )
+_JUDGMENT_TAKE_PHRASES = (
+    "right or wrong",
+    "wrong or right",
+    "agree or disagree",
+    "yay or nay",
+    "yea or nay",
+    "thoughts on this",
+    "thoughts on that",
+    "your thoughts",
+    "hot take",
+    "rate this meme",
+    "rate my meme",
+    "shitpost",
+)
 _CASUAL_PHRASES = (
     "how are you", "how r u", "how is it going", "hows it going",
     "how you doing", "how you been", "whats up", "what up", "what is up",
@@ -2409,12 +2649,9 @@ def _strip_quote_lines(text: str) -> str:
     ]
     return "\n".join(kept)
 
-def _is_casual_or_personality(current_text: str) -> bool:
-    """Greetings, quotes of someone else's take, and vicarious chat are not news."""
-    folded = _output_match_text(_conversation_text(current_text))
-    if not folded:
-        return True
-    if (
+def _asks_strict_live_fact(folded: str, current_text: str) -> bool:
+    """True only for teaching, verify, method, weather, or concrete current facts."""
+    return bool(
         _contains_research_phrase(folded, _FACT_REQUEST_PHRASES)
         or _contains_research_phrase(folded, LIVE_RESEARCH_SIGNALS)
         or _contains_research_phrase(folded, LIVE_RESEARCH_REQUESTS)
@@ -2422,8 +2659,47 @@ def _is_casual_or_personality(current_text: str) -> bool:
         or _asks_causal_fact(folded)
         or _states_current_event(folded)
         or _asks_current_events_with_topic(folded)
-    ):
+        or _is_weather_ask(current_text)
+    )
+
+def _is_judgment_or_meme_take(current_text: str) -> bool:
+    """Meme judgment / right-or-wrong / take asks stay conversational — no live search.
+
+    Explicit fact-check, verify, news/now, weather, method, or causal teaching
+    still wins and is not treated as a casual take.
+    """
+    folded = _output_match_text(_conversation_text(current_text))
+    if not folded:
         return False
+    if _asks_strict_live_fact(folded, current_text):
+        return False
+    if _contains_research_phrase(folded, _JUDGMENT_TAKE_PHRASES):
+        return True
+    if _contains_research_phrase(folded, _LIVE_CREATIVE_OR_OPINION):
+        return True
+    tokens = folded.split()
+    if "right" in tokens and "wrong" in tokens:
+        leftover = [
+            token
+            for token in tokens
+            if token not in {"right", "wrong", "or"}
+            and token not in _OUTPUT_STOPWORDS
+            and token not in _CONVERSATION_SMALL_TALK
+            and token not in _CASUAL_VOCAB
+            and len(token) >= 2
+        ]
+        return not leftover
+    return False
+
+def _is_casual_or_personality(current_text: str) -> bool:
+    """Greetings, quotes of someone else's take, and vicarious chat are not news."""
+    folded = _output_match_text(_conversation_text(current_text))
+    if not folded:
+        return True
+    if _asks_strict_live_fact(folded, current_text):
+        return False
+    if _is_judgment_or_meme_take(current_text):
+        return True
     if _FIRST_PERSON.search(folded):
         return True
     if _contains_research_phrase(folded, _CASUAL_PHRASES) and not _noncasual_tokens(folded):
@@ -2528,16 +2804,18 @@ def _needs_live_sources(
     *,
     recent_failure: bool = False,
 ) -> bool:
-    """Live search for news/now/current facts, method, weather, and lookups.
+    """Live search only for strict teaching or a concrete fact-check ask.
 
-    Current-events asks ('news from X', 'what's going on with X') search.
-    Theology, riddles, and casual/political follow-ups that are not asking
-    for current facts stay on chat. Weather and forecasts are always live.
-    Internet/capability asks are bot state, not news. After one honest miss,
-    later pings stay on chat demeanor unless the member explicitly asks to
-    search again, says Recall / try again, or asks the weather. Those retry
-    lines re-run the last unanswered fact question instead of searching the
-    retry phrase. A leftover miss is not copied onto the next non-news turn.
+    News/now, weather, method, causal teaching, and explicit verify/fact-check
+    lines search. Casual takes, meme judgment, gas chat, and "right or wrong?"
+    on fiction or shitposts stay on conversation — prefer answering from this
+    turn without search when search would only add weight. Theology and
+    riddles stay on chat. Internet/capability asks are bot state, not news.
+    After one honest miss, later pings stay on chat demeanor unless the member
+    explicitly asks to search again, says Recall / try again, or asks the
+    weather. Those retry lines re-run the last unanswered fact question
+    instead of searching the retry phrase. A leftover miss is not copied onto
+    the next non-news turn.
     """
     own_text = _strip_quote_lines(current_text)
     if _is_self_capability_question(own_text):
@@ -2548,6 +2826,8 @@ def _needs_live_sources(
         and not _is_weather_ask(own_text)
         and not _contains_research_phrase(folded, LIVE_RESEARCH_REQUESTS)
     ):
+        return False
+    if _is_judgment_or_meme_take(own_text):
         return False
     if _is_casual_or_personality(own_text):
         return False
@@ -3400,11 +3680,14 @@ def _conversation_text(text: str | None) -> str:
 def mention_asks_for_facts(text: str | None) -> bool:
     """True when an @Grim mention asks for accuracy or information.
 
-    A compliment, reaction, greeting, quote of someone else, or follow-up is
-    conversation unless it asks a question with a concrete topic, or it uses a
-    verification, lookup, or trivia phrase. "Damn accurate" stays conversation.
-    "is this true" does not. "how is it going pal" does not.
+    A compliment, reaction, greeting, meme judgment, "right or wrong?", quote
+    of someone else, or follow-up is conversation unless it asks a question
+    with a concrete topic, or it uses a verification, lookup, or trivia phrase.
+    "Damn accurate" stays conversation. "is this true" does not.
+    "how is it going pal" does not.
     """
+    if _is_judgment_or_meme_take(text or ""):
+        return False
     if _is_casual_or_personality(text or ""):
         return False
     visible = _conversation_text(text)
@@ -5498,16 +5781,30 @@ async def generate_contextual_reply(message: discord.Message) -> ContextualReply
         else "This member is not identified as Grim's creator."
     )
 
-    # Pull server-wide history (all channels, not just current) — Grim sees the whole server
-    db_rows = get_server_history_from_db(guild_id, limit=50)
+    # One operator, one channel/thread. Never blend other people or other channels.
+    hold_key = _conversation_key(message)
+    ladder_ids = set(_conversation_ladders.get(hold_key, set())) if hold_key else set()
+    db_rows = get_operator_channel_history_from_db(
+        guild_id,
+        channel_id,
+        author_id=str(author.id),
+        author_name=getattr(author, "display_name", "") or "",
+        grim_message_ids=ladder_ids,
+        limit=50,
+    )
 
-    # If DB is sparse (fresh deploy), fall back to Discord's live channel history
     chat_messages = []
+    channel_label = f"#{getattr(channel, 'name', 'chat')}"
     if len(db_rows) < 10:
         try:
             discord_history = []
             async for msg in channel.history(limit=50, before=message):
                 if msg.author.bot and msg.author.id != bot.user.id:
+                    continue
+                if msg.author.id == bot.user.id:
+                    if not ladder_ids or str(msg.id) not in ladder_ids:
+                        continue
+                elif msg.author.id != author.id:
                     continue
                 discord_history.append(msg)
             discord_history.reverse()
@@ -5518,24 +5815,40 @@ async def generate_contextual_reply(message: discord.Message) -> ContextualReply
                 if msg.author.id == bot.user.id:
                     chat_messages.append({"role": "assistant", "content": text})
                 else:
-                    chat_messages.append({"role": "user", "content": f"[#{getattr(msg.channel, 'name', 'chat')}] {msg.author.display_name}: {text}"})
+                    chat_messages.append({
+                        "role": "user",
+                        "content": f"[{channel_label}] {msg.author.display_name}: {text}",
+                    })
         except Exception as e:
             print(f"[Grim] Discord history fallback error: {e}")
     else:
-        # Use persistent server-wide DB history, label each message with its channel
-        for author_name, content, is_grim_row, row_channel_id in db_rows:
+        for author_name, content, is_grim_row, _message_id in db_rows:
             content = content.replace(f"<@{bot.user.id}>", "@Grim").replace(f"<@!{bot.user.id}>", "@Grim").strip()
             if not content:
                 continue
             if is_grim_row:
                 chat_messages.append({"role": "assistant", "content": content})
             else:
-                ch_obj = bot.get_channel(int(row_channel_id)) if row_channel_id else None
-                ch_label = f"#{ch_obj.name}" if ch_obj else "#chat"
-                chat_messages.append({"role": "user", "content": f"[{ch_label}] {author_name}: {content}"})
+                chat_messages.append({
+                    "role": "user",
+                    "content": f"[{channel_label}] {author_name}: {content}",
+                })
 
     # Append the current message (clean of the @mention)
     current_text = message.content.replace(f"<@{bot.user.id}>", "").replace(f"<@!{bot.user.id}>", "").strip()
+
+    # Same user in another channel: only correlated lines, never a foreign dump.
+    # Different operators' holds never mix.
+    foreign_related = correlated_foreign_channel_context(
+        guild_id,
+        channel_id,
+        author_id=str(author.id),
+        author_name=getattr(author, "display_name", "") or "",
+        ask_text=current_text,
+        limit=4,
+    )
+    if foreign_related:
+        chat_messages.extend(foreign_related)
 
     # Collect image and video URLs from attachments, embeds, and referenced message
     image_urls = []
@@ -5635,21 +5948,24 @@ async def generate_contextual_reply(message: discord.Message) -> ContextualReply
     # Current date/time — always injected so Grim is grounded in today
     now_str = format_grim_current_time()
 
-    # Research receives only same-channel history, never Grim's server-wide
-    # conversational memory or inaccessible channel content.
-    channel_research_rows = get_channel_history_from_db(
+    # Research context: this operator's lines in this channel only.
+    # Foreign leftovers (other operators / other channels) never enter the ask.
+    channel_research_rows = get_operator_channel_history_from_db(
         guild_id,
         channel_id,
+        author_id=str(author.id),
+        author_name=getattr(author, "display_name", "") or "",
+        grim_message_ids=set(),
         limit=8,
     )
     research_context = [
-        f"{author_name}: {content[:350]}"
-        for author_name, content, _ in channel_research_rows[:-1]
-        if content and content.strip()
+        f"{row_author}: {content[:350]}"
+        for row_author, content, is_grim_row, _mid in channel_research_rows[:-1]
+        if content and content.strip() and not is_grim_row
     ]
     recent_channel_text = "\n".join(research_context)
     live_context_block = ""
-    research_scope = f"{guild_id}:{channel_id}"
+    research_scope = _research_scope_key(guild_id, channel_id, str(author.id))
     live_search_system = with_grim_voice(
         live_research_system_prompt(now_str, language_instruction)
     )
@@ -5778,6 +6094,16 @@ WHERE YOU ARE RIGHT NOW:
 - Server: {server_name} ({member_count} members)
 - Channel: #{channel_name}
 - Talking to: {author.display_name}
+
+CONVERSATION SCOPE (HARD RULE):
+Memory is strictly per user and per channel/thread. You are talking with {author.display_name}
+in #{channel_name} only. Never blend another operator's hold into this one.
+Do not treat another channel's topic as this channel's context by default.
+If a short block is labeled "related from #…, only because it correlates with this ask",
+you may use that limited material because this same person was active there and the ask matches.
+Never dump isolated or uncorrelated info from elsewhere. Never say "the X you mentioned"
+unless X is in this operator's own messages here, the replied-to message, or that correlated block.
+Server digest and remembered facts are ambient background only — not this operator's conversation.
 
 LANGUAGE FOR THIS REPLY:
 {language_instruction}
@@ -6038,7 +6364,8 @@ Be highly selective. Silence is better than noise. Most of the time should be PA
             if guild:
                 save_message_to_db(
                     guild_id, cid, str(sent.id),
-                    BOT_NAME, chunk, sent.created_at.timestamp(), is_grim=True
+                    BOT_NAME, chunk, sent.created_at.timestamp(), is_grim=True,
+                    author_id=str(bot.user.id) if bot.user else None,
                 )
         _channel_last_grim_post[cid] = time.time()
         print(f"[Proactive] Chimed in on #{channel_name}: {response[:60]}...")
@@ -11074,7 +11401,8 @@ async def _send_mention_reply(
         save_message_to_db(
             str(message.guild.id), str(message.channel.id),
             str(first_sent.id), BOT_NAME, first_visible,
-            first_sent.created_at.timestamp(), is_grim=True
+            first_sent.created_at.timestamp(), is_grim=True,
+            author_id=str(bot.user.id) if bot.user else None,
         )
 
     for chunk in reply_chunks[1:]:
@@ -11090,7 +11418,8 @@ async def _send_mention_reply(
             save_message_to_db(
                 str(message.guild.id), str(message.channel.id),
                 str(sent.id), BOT_NAME, chunk,
-                sent.created_at.timestamp(), is_grim=True
+                sent.created_at.timestamp(), is_grim=True,
+                author_id=str(bot.user.id) if bot.user else None,
             )
 
     grim_register_ladder_ids(
@@ -11125,7 +11454,8 @@ async def on_message(message):
         save_message_to_db(
             str(message.guild.id), str(message.channel.id),
             str(message.id), message.author.display_name,
-            message.content, message.created_at.timestamp(), is_grim=False
+            message.content, message.created_at.timestamp(), is_grim=False,
+            author_id=str(message.author.id),
         )
         await asyncio.to_thread(
             increment_member_message_count,
