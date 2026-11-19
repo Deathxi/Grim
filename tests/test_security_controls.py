@@ -646,103 +646,67 @@ class SecurityControlsTests(unittest.TestCase):
         self.assertEqual(main._deploy_card_file_names(mixed), mixed)
         self.assertNotIn("[REDACTED]", main._deploy_card_file_names(mixed))
 
-    def test_deploy_card_redacts_stealth_module_names(self):
-        names = main._deploy_card_file_names(
-            [
-                "main.py",
-                "delete_report.py",
-                "tests/test_delete_report.py",
-                "tests/test_name_call.py",
-                "substance.py",
-            ],
-            classified=True,
-        )
-        self.assertEqual(
-            names,
-            ["main.py", "tests/test_name_call.py", "substance.py", "[REDACTED]"],
-        )
-        self.assertNotIn("delete_report.py", names)
+    def test_classified_label_still_posts_real_names_and_notes(self):
+        files = [
+            "main.py",
+            "delete_report.py",
+            "tests/test_delete_report.py",
+            "docs/panopticon.md",
+            "docs/nightfall.md",
+            "tests/test_name_call.py",
+            "substance.py",
+        ]
+        names = main._deploy_card_file_names(files, classified=True)
+        self.assertEqual(names, files)
+        self.assertIn("delete_report.py", names)
+        self.assertIn("docs/panopticon.md", names)
+        self.assertIn("docs/nightfall.md", names)
+        self.assertNotIn("[REDACTED]", names)
         self.assertEqual(
             main._deploy_card_file_names(["delete_report.py"], classified=True),
-            ["[REDACTED]"],
+            ["delete_report.py"],
         )
-        self.assertEqual(
-            main._deploy_card_file_names(
-                ["main.py", "substance.py"], classified=True
-            ),
-            ["main.py", "substance.py"],
-        )
-        many = [f"public_{i}.py" for i in range(12)] + ["delete_report.py"]
+
+        many = ["delete_report.py"] + [f"public_{i}.py" for i in range(12)]
         trimmed = main._deploy_card_file_names(many, classified=True)
-        self.assertEqual(len(trimmed), 10)
-        self.assertEqual(trimmed[-1], "[REDACTED]")
-        self.assertNotIn("delete_report.py", trimmed)
+        self.assertEqual(trimmed, many[:10])
+        self.assertEqual(trimmed[0], "delete_report.py")
+        self.assertNotIn("[REDACTED]", trimmed)
 
-    def test_deploy_card_redacts_classified_command_copy(self):
-        ordinary = ["trivia scoring fix", "zork hud tweak"]
-        for command in main._DEPLOY_CARD_REDACT_COMMANDS:
-            names = main._deploy_card_file_names(
-                ["main.py", f"docs/{command}.md", "substance.py"],
-                classified=True,
-            )
-            joined_names = "\n".join(names).lower()
-            self.assertNotIn(command, joined_names)
-            self.assertEqual(names[-1], "[REDACTED]")
-            self.assertIn("main.py", names)
-            self.assertIn("substance.py", names)
-
-            notes = main._deploy_card_patch_notes(
-                ordinary + [f"/{command} founder toggle"],
-                classified=True,
-            )
-            joined_notes = "\n".join(notes).lower()
-            self.assertNotIn(command, joined_notes)
-            self.assertEqual(notes, ordinary + ["[REDACTED]"])
-            formatted = main._format_patch_notes(notes)
-            self.assertNotIn(command, formatted.lower())
-            self.assertIn("[REDACTED]", formatted)
-
-        self.assertEqual(main._deploy_card_patch_notes(ordinary), ordinary)
+        notes = [
+            "trivia scoring fix",
+            "/panopticon founder toggle",
+            "/nightfall stays founder-only",
+            "delete_report.py still DMs the founder",
+        ]
+        self.assertEqual(main._deploy_card_patch_notes(notes, classified=True), notes)
+        self.assertEqual(main._deploy_card_patch_notes(notes), notes)
         self.assertEqual(
-            main._deploy_card_patch_notes(ordinary, classified=False),
-            ordinary,
+            main._deploy_card_patch_notes(notes, classified=False),
+            notes,
         )
+        formatted = main._format_patch_notes(notes)
+        lowered = formatted.lower()
+        self.assertIn("panopticon", lowered)
+        self.assertIn("nightfall", lowered)
+        self.assertIn("delete_report.py", formatted)
+        self.assertNotIn("[REDACTED]", formatted)
 
-    def test_classified_label_requires_explicit_code_word(self):
-        self.assertTrue(
-            main._commits_are_classified(
-                [{"commit": {"message": "this is CLASSIFIED\n\nfounder-only watch"}}]
-            )
-        )
-        self.assertTrue(main._commits_are_classified(["This is CLASSIFIED."]))
-        self.assertTrue(main._commits_are_classified(["CLASSIFIED:\nredacted card"]))
-        self.assertTrue(main._commits_are_classified(["[CLASSIFIED] vanish"]))
-        self.assertFalse(
-            main._commits_are_classified(
-                [
-                    {
-                        "commit": {
-                            "message": "Reply to name-calls when the turn has an entrance."
-                        }
-                    }
-                ]
-            )
-        )
-        self.assertFalse(
-            main._commits_are_classified(
-                [
-                    "Voice, live-search miss wording, CLASSIFIED commands unchanged."
-                ]
-            )
-        )
-        self.assertFalse(
-            main._commits_are_classified(
-                ["Redact classified names on /grim_updates deploy cards."]
-            )
-        )
-        self.assertFalse(main._commits_are_classified([]))
         source = Path(main.__file__).read_text()
-        self.assertIn("_commits_are_classified(new_commits)", source)
+        post = source[
+            source.index("async def post_update_notification") : source.index(
+                "async def post_outage_after_report"
+            )
+        ]
+        self.assertNotIn("_commits_are_classified", source)
+        self.assertNotIn("_commits_are_classified", post)
+        self.assertNotIn("[REDACTED]", post)
+        self.assertNotIn("classified=", post)
+        self.assertIn("_deploy_card_patch_notes(patch_notes)", post)
+        self.assertIn("_deploy_card_file_names(changed_files)", post)
+        self.assertFalse(hasattr(main, "_commits_are_classified"))
+        self.assertFalse(hasattr(main, "_DEPLOY_CARD_REDACT_LABEL"))
+        self.assertFalse(hasattr(main, "_DEPLOY_CARD_REDACT_COMMANDS"))
 
     def test_changelog_feeds_name_call_patch_notes(self):
         changelog = Path(__file__).resolve().parents[1].joinpath("CHANGELOG.md").read_text()
@@ -753,6 +717,10 @@ class SecurityControlsTests(unittest.TestCase):
         self.assertIn("An @mention is not required", changelog)
         self.assertIn("Empty pings and drive-by name-drops get no reply", changelog)
         self.assertIn("real filenames on ordinary deploys", changelog)
+        self.assertIn(
+            "always post normal public patch notes with real filenames",
+            changelog,
+        )
         patch = """@@ -7,6 +7,8 @@
  ### Added
 +- Grim replies when someone names him with a real entrance or need: a question, a ping for his take, or a direct address. An @mention is not required. Empty pings and drive-by name-drops get no reply.
@@ -766,7 +734,9 @@ class SecurityControlsTests(unittest.TestCase):
         self.assertEqual(len(public), 2)
         self.assertIn("names him with a real entrance or need", public[0])
         self.assertNotIn("[REDACTED]", main._format_patch_notes(public))
-        self.assertIn("_commits_are_classified(new_commits)", Path(main.__file__).read_text())
+        source = Path(main.__file__).read_text()
+        self.assertNotIn("_commits_are_classified", source)
+        self.assertIn("_deploy_card_patch_notes(patch_notes)", source)
 
     def test_creator_saved_language_preference_is_honored(self):
         guild_id = "50"
