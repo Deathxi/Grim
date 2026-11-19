@@ -240,15 +240,24 @@ class SecurityControlsTests(unittest.TestCase):
         self.assertFalse(main._research_rate_limit_allows("50", "10"))
         self.assertTrue(main._research_rate_limit_allows("50", "11"))
 
-    def test_research_cache_is_scoped_by_guild_and_channel(self):
+    def test_research_cache_is_scoped_by_guild_channel_and_operator(self):
         prompt = "Current request: latest polling"
         result = {"status": "success", "text": "facts", "sources": []}
-        key = main._research_cache_key("50:777", prompt)
+        scope = main._research_scope_key("50", "777", "10")
+        key = main._research_cache_key(scope, prompt)
         main._AI_RESEARCH_CACHE[key] = (time.time(), result)
 
-        self.assertIsNotNone(main._get_cached_research("50:777", prompt))
-        self.assertIsNone(main._get_cached_research("50:888", prompt))
-        self.assertIsNone(main._get_cached_research("60:777", prompt))
+        self.assertEqual(scope, "50:777:10")
+        self.assertIsNotNone(main._get_cached_research(scope, prompt))
+        self.assertIsNone(
+            main._get_cached_research(main._research_scope_key("50", "888", "10"), prompt)
+        )
+        self.assertIsNone(
+            main._get_cached_research(main._research_scope_key("50", "777", "11"), prompt)
+        )
+        self.assertIsNone(
+            main._get_cached_research(main._research_scope_key("60", "777", "10"), prompt)
+        )
 
     def test_rate_limit_blocks_ninth_request(self):
         for _ in range(main.RATE_LIMIT_MAX_REQUESTS):
