@@ -13,7 +13,6 @@ import hashlib
 import re
 import threading
 import subprocess
-import sys
 import fcntl
 import discord
 from discord.ext import commands, tasks
@@ -84,18 +83,16 @@ def _format_version(count):
 
 def _read_version_count():
     """Read the persistent release counter without allowing old state to regress."""
-    for path in [VERSION_COUNT_FILE, "version.txt"]:
-        try:
-            with open(path, "r") as f:
-                value = f.read().strip()
-            if value.isdigit():
-                return max(int(value), VERSION_BASELINE_COUNT)
-        except:
-            pass
+    try:
+        with open(VERSION_COUNT_FILE, "r") as f:
+            value = f.read().strip()
+        if value.isdigit():
+            return max(int(value), VERSION_BASELINE_COUNT)
+    except OSError:
+        pass
     return VERSION_BASELINE_COUNT
 
 def _load_version():
-    # Persistent file survives redeploys; fall back to project-root version.txt for first boot
     return _format_version(_read_version_count())
 
 def get_current_version():
@@ -126,13 +123,8 @@ def _bump_version():
     try:
         with open(VERSION_COUNT_FILE, "r") as f:
             count = int(f.read().strip())
-    except:
-        # Seed from project-root version.txt if persistent file doesn't exist yet
-        try:
-            with open("version.txt", "r") as f:
-                count = int(f.read().strip())
-        except:
-            count = VERSION_BASELINE_COUNT - 1
+    except (OSError, ValueError):
+        count = VERSION_BASELINE_COUNT - 1
     # Version 2.0 is the new release floor. Existing 1.xx counters migrate
     # once without discarding runtime data, then future deploys increment normally.
     count = max(count, VERSION_BASELINE_COUNT - 1)
@@ -204,7 +196,6 @@ def _atomic_json_write(path: str, data):
         if os.path.exists(temporary_path):
             os.unlink(temporary_path)
 
-DISCORD_MESSAGE_CONTENT_LIMIT = 2000
 DISCORD_CONVERSATION_CHUNK_LIMIT = 1950
 
 def _split_discord_content(
@@ -1987,7 +1978,7 @@ def load_updates_data():
                 data = json.load(f)
                 if data:
                     save_updates_data(data)
-                    print(f"[Updates] Migrated updates_data.json to persistent disk")
+                    print("[Updates] Migrated updates_data.json to persistent disk")
                     return data
     except:
         pass
@@ -2646,9 +2637,6 @@ WEATHER_LEFTOVER_TURN_NOTE = (
     "or that you couldn't pull weather. Leftover weather live-search misses "
     "from this channel do not apply."
 )
-
-def _has_concrete_topic(text: str) -> bool:
-    return bool(_noncasual_tokens(text))
 
 def _noncasual_tokens(text: str) -> list[str]:
     skip = _OUTPUT_STOPWORDS | _CONVERSATION_SMALL_TALK | _CASUAL_VOCAB
@@ -3684,7 +3672,7 @@ _CONVERSATION_SMALL_TALK = frozenset({
     "really", "very", "super", "hella", "thanks", "thank", "appreciate",
     "love", "loved", "liked", "cool", "sick", "wild", "crazy", "insane",
     "please", "pls", "grim", "bot", "know", "think", "mean", "feel", "want",
-    "see", "hear", "believe", "kidding", "go", "continue", "more", "again",
+    "see", "hear", "believe", "go", "continue", "more", "again",
     "bestie", "bruh", "imo", "tbh", "idk", "so",
 })
 
@@ -5970,7 +5958,6 @@ async def generate_contextual_reply(message: discord.Message) -> ContextualReply
     # Injected auto-synthesized server digest (updated every 4 hours by Grok)
     digest_data = grim_digests.get(guild_id)
     if digest_data:
-        from datetime import datetime as _dt
         age_hours = (time.time() - digest_data.get("updated", 0)) / 3600
         digest_block = f"{digest_data['text']}\n\n(digest covers last {digest_data.get('messages_processed', '?')} messages, updated {age_hours:.1f}h ago)"
     else:
@@ -7063,7 +7050,7 @@ async def check_nftwatch():
                             embed.set_image(url=image_url)
                         
                         embed.add_field(name="\u200b", value=f"```{slug}```", inline=True)
-                        embed.add_field(name="\u200b", value=f"```NEW LISTING```", inline=True)
+                        embed.add_field(name="\u200b", value="```NEW LISTING```", inline=True)
                         embed.set_footer(text=xsi_footer("Grim NFT Watch"))
                         
                         await channel.send(embed=embed)
@@ -9436,7 +9423,7 @@ async def summarize(interaction: discord.Interaction, messages: int):
             if msg.content.strip():
                 history.append((name, msg.content.strip()))
         history.reverse()  # oldest first
-    except Exception as e:
+    except Exception:
         await interaction.followup.send("Couldn't fetch channel history.", ephemeral=True)
         return
 
@@ -9477,7 +9464,7 @@ Write it like a quick briefing — direct, no fluff. Natural prose, no bullet po
                     return
                 data = await r.json()
                 summary = data["choices"][0]["message"]["content"].strip()
-    except Exception as e:
+    except Exception:
         await interaction.followup.send("Something went wrong generating the summary.", ephemeral=True)
         return
 
@@ -9596,7 +9583,7 @@ async def ghostwritelive(interaction: discord.Interaction, interval: str, userna
         
         embed = discord.Embed(
             title="Disabled",
-            description=f"Stopped scheduled ghostwrites in this channel.",
+            description="Stopped scheduled ghostwrites in this channel.",
             color=discord.Color.from_rgb(18, 18, 18)
         )
         await interaction.followup.send(embed=embed)
@@ -9655,7 +9642,7 @@ async def ghostwritelive(interaction: discord.Interaction, interval: str, userna
     )
     
     embed = discord.Embed(
-        title=f"Ghostwrite Live Enabled",
+        title="Ghostwrite Live Enabled",
         description=f"```{draft}```",
         color=discord.Color.from_rgb(29, 161, 242)
     )
@@ -10341,7 +10328,7 @@ async def nftwatch(interaction: discord.Interaction, link: str):
     if image_url:
         embed.set_thumbnail(url=image_url)
     embed.add_field(name="\u200b", value=f"```{slug}```", inline=True)
-    embed.add_field(name="\u200b", value=f"```LIVE```", inline=True)
+    embed.add_field(name="\u200b", value="```LIVE```", inline=True)
     embed.set_footer(text=xsi_footer("Grim NFT Watch"))
     
     await interaction.followup.send(embed=embed)
@@ -10602,7 +10589,7 @@ async def mod_add(interaction: discord.Interaction, word: str):
     guild_id = str(interaction.guild_id)
     words = get_guild_banned_words(guild_id)
     if word in [w.lower() for w in words]:
-        await interaction.response.send_message(f"Already on the list.", ephemeral=True)
+        await interaction.response.send_message("Already on the list.", ephemeral=True)
         return
     
     words.append(word)
@@ -10629,7 +10616,7 @@ async def mod_remove(interaction: discord.Interaction, word: str):
     updated = [w for w in original if w.lower() != word]
     
     if len(updated) == len(original):
-        await interaction.response.send_message(f"That word wasn't on the list.", ephemeral=True)
+        await interaction.response.send_message("That word wasn't on the list.", ephemeral=True)
         return
     
     set_guild_banned_words(guild_id, updated)
@@ -11024,7 +11011,7 @@ async def livetweet(interaction: discord.Interaction, username: str):
         
     except Exception as e:
         print(f"Error setting up livetweet: {e}")
-        await interaction.followup.send(f"Error: Could not set up tracking. The X API may be rate limited or the username is invalid.")
+        await interaction.followup.send("Error: Could not set up tracking. The X API may be rate limited or the username is invalid.")
 
 @bot.tree.command(name="grim_updates", description="Toggle Grim operations logs in this channel")
 async def grim_updates(interaction: discord.Interaction):
@@ -11692,7 +11679,7 @@ async def help_grim(ctx):
         color=discord.Color.from_rgb(18, 18, 18)
     )
     embed.add_field(name="!ping", value="Latency", inline=True)
-    embed.add_field(name="!info", value="Bot info", inline=True)
+    embed.add_field(name="!server", value="Server info", inline=True)
     embed.add_field(name="!haiku", value="Haiku", inline=True)
     embed.add_field(name="/server", value="Server status", inline=True)
     embed.add_field(name="/howdie", value="Fate", inline=True)
@@ -11808,7 +11795,7 @@ async def grim_remember(interaction: discord.Interaction, memory: str):
     save_grim_memories()
     record_security_event(interaction, "memory_add", "success", {"memory_length": len(memory)})
     embed = discord.Embed(
-        description=f"got it. i'll remember that.",
+        description="got it. i'll remember that.",
         color=discord.Color.from_rgb(18, 18, 18)
     )
     embed.add_field(name="memory added", value=f"```{memory}```", inline=False)
@@ -11851,7 +11838,7 @@ async def grim_forget(interaction: discord.Interaction, number: int):
     save_grim_memories()
     record_security_event(interaction, "memory_remove", "success", {"memory_index": number})
     embed = discord.Embed(
-        description=f"forgotten.",
+        description="forgotten.",
         color=discord.Color.from_rgb(18, 18, 18)
     )
     embed.add_field(name="removed", value=f"```{removed}```", inline=False)

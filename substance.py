@@ -154,10 +154,6 @@ def _significant(words: list[str]) -> set[str]:
     return {w for w in words if w not in _STOPWORDS and len(w) >= 3}
 
 
-def _normalized(text: str) -> str:
-    return " ".join(_words(text))
-
-
 def classify_message(user_text: str | None) -> str:
     """One of: question, heavy, substantive, small_talk."""
     text = " ".join(str(user_text or "").split())

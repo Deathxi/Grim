@@ -53,8 +53,6 @@ AUDITOR_LINES = frozenset({
     BURST_LINE,
 })
 
-EVENT_FIELDS = ("at", "event", "kind", "duration", "count")
-
 _CONVERSATION: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "grim_auditor_conversation", default=None
 )
