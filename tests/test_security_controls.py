@@ -479,6 +479,8 @@ class SecurityControlsTests(unittest.TestCase):
         self.assertNotIn("info-members", slash_names)
         self.assertNotIn("grim_members", slash_names)
         self.assertNotIn("grim_memberlog", slash_names)
+        self.assertIn("vc_join", slash_names)
+        self.assertIn("vc_leave", slash_names)
         self.assertIn("server", prefix_names)
         self.assertNotIn("info", prefix_names)
         clear_command = next(
