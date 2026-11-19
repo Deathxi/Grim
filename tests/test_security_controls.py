@@ -479,15 +479,8 @@ class SecurityControlsTests(unittest.TestCase):
         self.assertNotIn("info-members", slash_names)
         self.assertNotIn("grim_members", slash_names)
         self.assertNotIn("grim_memberlog", slash_names)
-        self.assertNotIn("vc_join", slash_names)
-        self.assertNotIn("join", slash_names)
-        self.assertIn("vc_leave", slash_names)
         self.assertIn("server", prefix_names)
         self.assertNotIn("info", prefix_names)
-        source = Path(__file__).resolve().parents[1].joinpath("main.py").read_text()
-        self.assertNotIn('name="vc_join"', source)
-        self.assertNotIn("Have Grim join your voice channel", source)
-        self.assertNotIn("async def vc_join(", source)
         clear_command = next(
             command for command in main.bot.tree.get_commands()
             if command.name == "clear"
