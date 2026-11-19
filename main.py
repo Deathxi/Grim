@@ -11873,13 +11873,6 @@ async def _handle_language_preference(
         ephemeral=True,
     )
 
-@bot.tree.command(name="language", description="Set or view your preferred language for Grim replies")
-@discord.app_commands.describe(
-    preference="Language for Grim replies; use Auto to match each message"
-)
-async def language(interaction: discord.Interaction, preference: str | None = None):
-    await _handle_language_preference(interaction, preference)
-
 @bot.tree.command(name="grim_language", description="Set or view your preferred language for Grim replies")
 @discord.app_commands.describe(
     language="Common language name or ISO/BCP-47 code; use Auto to match each message"
