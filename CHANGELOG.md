@@ -32,6 +32,10 @@ All notable changes to this project are documented here, organized by month.
 - After a name-call, in-channel follow-ups from the original poster keep the conversation even when they are not Discord replies. A lone "Grim" ping still counts as "you there" while the conversation is open.
 - `/grim_updates` deploy cards keep normal patch notes and real filenames on ordinary deploys. Filename hiding applies only when that deploy is explicitly labeled CLASSIFIED.
 - Live-search replies still show blue source links, but Discord no longer unfurls those URLs into a stack of rich embeds under the message. Casual Grim messages still unfurl as usual.
+- `/vc_join` is back (`main.py`). Grim joins your voice channel again and still leaves on his own after an hour with no humans in it; `/vc_leave` works with it. Needs Move Members.
+- Grim's message sends block `@everyone`, `@here`, and role pings by default (`main.py`), so model-written text can never mass-ping a server. `/say` and `/announce` are unchanged: an administrator's typed mentions still ping.
+- `/8ball`, `/truth`, `/roast`, `/howdie`, `/summon`, `/inspire`, `!haiku`, ghostwrite, and X/livetweet lookups no longer freeze Grim while xAI or X answers (`main.py`). Those calls run off the bot's main loop with a 45s (xAI) or 30s (X) limit.
+- Pillow 13.0.0 (`requirements.txt`, `pyproject.toml`, `uv.lock`) for upstream image-decoding security fixes.
 
 ### Changed
 - `/panopticon` Discord command-picker description is `CLASSIFIED`. The Founder-only ID gate and on/off behavior are unchanged.
@@ -47,6 +51,8 @@ All notable changes to this project are documented here, organized by month.
 - Casual @Grim talk is exempt from that check. Compliments, reactions, and follow-ups that are not asking for facts are sent as written. A factual question, lookup, "is this true", or trivia-like mention is still checked locally, rewritten once if it fails, and kept as the original reply if the rewrite also fails.
 - A conversational @mention still gets the model reply when the shared external AI limit is full, and it never receives a failure line. A real miss on an accuracy ask says which miss it was: traffic, a crowded channel, or an empty model reply.
 - Before Grim speaks, the prompt asks what the moment entails and how to be useful. The answer can be empathy, a direct answer, humor, transparency, teaching, or presence. A restate is for teaching. The shape still varies, and it is not a checklist or an X-post cadence. That note is on chat, commands, trivia notes, news, ghostwritten tweets, and chimes. Relayed livetweets, Reddit, and NFT posts are unchanged.
+- `/language` is retired in favor of `/grim_language`, which does the same thing. Saved language preferences carry over.
+- `help_grim` lists `!server` instead of the retired `!info`. Removed unused code and the inert project-root `version.txt`; the version counter still lives under `~/.grim_data`.
 
 ---
 
