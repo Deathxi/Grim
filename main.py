@@ -497,6 +497,14 @@ def get_twitter_client():
         return tweepy.Client(bearer_token=bearer_token)
     return None
 
+X_API_TIMEOUT_SECONDS = 30
+
+async def _x_api_call(method, /, **kwargs):
+    # tweepy is blocking with no request timeout; keep it off the event loop.
+    return await asyncio.wait_for(
+        asyncio.to_thread(method, **kwargs), timeout=X_API_TIMEOUT_SECONDS
+    )
+
 # Storage for live tweet tracking: {channel_id: {"username": str, "user_id": str, "last_tweet_id": str}}
 LIVETWEET_FILE = _data_path("livetweet_data.json")
 
@@ -2349,6 +2357,8 @@ HAIKU_THEMES = [
     "dancing with uncertainty",
 ]
 
+XAI_ONESHOT_TIMEOUT_SECONDS = 45
+
 def get_grok_client():
     api_key = os.environ.get("XAI_API_KEY")
     if api_key:
@@ -4185,7 +4195,9 @@ async def generate_haiku():
     random_seed = random.randint(1, 99999)
     
     try:
-        response = client.chat.completions.create(
+        response = await asyncio.to_thread(
+            client.chat.completions.create,
+            timeout=XAI_ONESHOT_TIMEOUT_SECONDS,
             model="grok-3",
             messages=[
                 {
@@ -4218,7 +4230,9 @@ async def generate_death_scene(username: str):
     random_seed = random.randint(1, 99999)
     
     try:
-        response = client.chat.completions.create(
+        response = await asyncio.to_thread(
+            client.chat.completions.create,
+            timeout=XAI_ONESHOT_TIMEOUT_SECONDS,
             model="grok-3",
             messages=[
                 {
@@ -4252,7 +4266,9 @@ async def generate_8ball_response(question: str):
     random_seed = random.randint(1, 99999)
     
     try:
-        response = client.chat.completions.create(
+        response = await asyncio.to_thread(
+            client.chat.completions.create,
+            timeout=XAI_ONESHOT_TIMEOUT_SECONDS,
             model="grok-3",
             messages=[
                 {
@@ -4284,7 +4300,9 @@ async def generate_unfiltered_truth(question: str):
         return None
     
     try:
-        response = client.chat.completions.create(
+        response = await asyncio.to_thread(
+            client.chat.completions.create,
+            timeout=XAI_ONESHOT_TIMEOUT_SECONDS,
             model="grok-3",
             messages=[
                 {
@@ -4318,7 +4336,9 @@ async def generate_summon_message():
     random_seed = random.randint(1, 99999)
     
     try:
-        response = client.chat.completions.create(
+        response = await asyncio.to_thread(
+            client.chat.completions.create,
+            timeout=XAI_ONESHOT_TIMEOUT_SECONDS,
             model="grok-3",
             messages=[
                 {
@@ -4351,7 +4371,9 @@ async def generate_inspiration():
     random_seed = random.randint(1, 99999)
     
     try:
-        response = client.chat.completions.create(
+        response = await asyncio.to_thread(
+            client.chat.completions.create,
+            timeout=XAI_ONESHOT_TIMEOUT_SECONDS,
             model="grok-3",
             messages=[
                 {
@@ -4603,7 +4625,9 @@ async def generate_roast(username: str):
     roast_style = random.choice(ROAST_STYLES)
     
     try:
-        response = client.chat.completions.create(
+        response = await asyncio.to_thread(
+            client.chat.completions.create,
+            timeout=XAI_ONESHOT_TIMEOUT_SECONDS,
             model="grok-3",
             messages=[
                 {
@@ -6429,12 +6453,13 @@ async def fetch_user_tweets(username: str, count: int = 10):
         return None, "X API not configured"
     
     try:
-        user = twitter.get_user(username=clean_username, user_fields=['name', 'description'])
+        user = await _x_api_call(twitter.get_user, username=clean_username, user_fields=['name', 'description'])
         
         if not user.data:
             return None, f"Could not find X user @{clean_username}"
         
-        tweets = twitter.get_users_tweets(
+        tweets = await _x_api_call(
+            twitter.get_users_tweets,
             id=user.data.id,
             max_results=min(count, 100),
             tweet_fields=['text'],
@@ -6478,7 +6503,9 @@ async def generate_ghostwrite(username: str, topics: str, tweet_data: dict):
     user_info = tweet_data["user"]
     
     try:
-        response = client.chat.completions.create(
+        response = await asyncio.to_thread(
+            client.chat.completions.create,
+            timeout=XAI_ONESHOT_TIMEOUT_SECONDS,
             model="grok-3",
             messages=[
                 {
@@ -6716,7 +6743,8 @@ async def check_livetweets():
                 channels_to_remove.append(channel_id)
                 continue
             
-            tweets = twitter.get_users_tweets(
+            tweets = await _x_api_call(
+                twitter.get_users_tweets,
                 id=data["user_id"],
                 max_results=5,
                 since_id=data.get("last_tweet_id"),
@@ -10966,13 +10994,13 @@ async def livetweet(interaction: discord.Interaction, username: str):
         return
     
     try:
-        user = twitter.get_user(username=clean_username, user_fields=['profile_image_url', 'name'])
+        user = await _x_api_call(twitter.get_user, username=clean_username, user_fields=['profile_image_url', 'name'])
         
         if not user.data:
             await interaction.followup.send(f"Could not find X user **@{clean_username}**. Check the username and try again.")
             return
         
-        tweets = twitter.get_users_tweets(id=user.data.id, max_results=5)
+        tweets = await _x_api_call(twitter.get_users_tweets, id=user.data.id, max_results=5)
         last_tweet_id = str(tweets.data[0].id) if tweets.data else None
         
         livetweet_channels[channel_id] = {

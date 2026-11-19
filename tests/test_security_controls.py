@@ -1577,5 +1577,45 @@ class SecurityControlsTests(unittest.TestCase):
         self.assertNotIn("50", main.member_log_channels)
 
 
+class BlockingClientTests(unittest.TestCase):
+    def test_oneshot_xai_calls_run_off_the_event_loop_with_a_timeout(self):
+        seen = {}
+
+        def create(**kwargs):
+            seen["thread"] = threading.get_ident()
+            seen["timeout"] = kwargs.get("timeout")
+            message = SimpleNamespace(content="Outlook grim.")
+            return SimpleNamespace(choices=[SimpleNamespace(message=message)])
+
+        client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
+
+        async def run():
+            seen["loop_thread"] = threading.get_ident()
+            with patch.object(main, "get_grok_client", return_value=client), patch.object(
+                main, "screen_generated_output", AsyncMock(side_effect=lambda text, **_: text)
+            ):
+                return await main.generate_8ball_response("will it rain?")
+
+        self.assertEqual(asyncio.run(run()), "Outlook grim.")
+        self.assertNotEqual(seen["thread"], seen["loop_thread"])
+        self.assertEqual(seen["timeout"], main.XAI_ONESHOT_TIMEOUT_SECONDS)
+
+    def test_x_api_calls_time_out_instead_of_hanging(self):
+        release = threading.Event()
+
+        def hang(**_):
+            release.wait(5)
+
+        async def run():
+            try:
+                with patch.object(main, "X_API_TIMEOUT_SECONDS", 0.05):
+                    await main._x_api_call(hang, username="grim")
+            finally:
+                release.set()
+
+        with self.assertRaises(asyncio.TimeoutError):
+            asyncio.run(run())
+
+
 if __name__ == "__main__":
     unittest.main()
