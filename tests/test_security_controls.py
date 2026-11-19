@@ -464,6 +464,21 @@ class SecurityControlsTests(unittest.TestCase):
         self.assertFalse(main.is_private_member_log_channel(public_channel, guild))
         self.assertTrue(main.is_private_member_log_channel(private_channel, guild))
 
+    def test_bot_default_blocks_mass_and_role_pings(self):
+        default = main.bot.allowed_mentions
+        self.assertFalse(default.everyone)
+        self.assertFalse(default.roles)
+        self.assertTrue(default.users)
+
+    def test_admin_relay_typed_mentions_override_the_default(self):
+        default = main.bot.allowed_mentions
+        merged = default.merge(main.typed_mentions("@everyone heads up <@&123456789012345678>"))
+        self.assertTrue(merged.everyone)
+        self.assertEqual([role.id for role in merged.roles], [123456789012345678])
+        untyped = default.merge(main.typed_mentions("plain notice"))
+        self.assertFalse(untyped.everyone)
+        self.assertFalse(untyped.roles)
+
     def test_management_commands_use_the_new_names(self):
         slash_names = {command.name for command in main.bot.tree.get_commands()}
         prefix_names = {command.name for command in main.bot.commands}

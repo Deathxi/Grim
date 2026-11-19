@@ -164,7 +164,14 @@ intents.message_content = True
 intents.members = True
 intents.presences = True
 
-bot = commands.Bot(command_prefix="!", intents=intents, max_messages=10000)
+# Model-written text must never mass-ping. Admin relays (/say, /announce) pass
+# typed_mentions per message, which overrides this default for what they typed.
+bot = commands.Bot(
+    command_prefix="!",
+    intents=intents,
+    max_messages=10000,
+    allowed_mentions=discord.AllowedMentions(everyone=False, roles=False, users=True),
+)
 
 # Data directory outside git workspace — survives deployments without being overwritten by git pull
 DATA_DIR = os.path.expanduser("~/.grim_data")
