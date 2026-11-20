@@ -10309,12 +10309,12 @@ async def _send_mention_reply(
         message,
         [getattr(sent, "id", None) for sent in sent_messages],
     )
-    if sent_messages:
-        await _add_feedback_reactions(sent_messages[0])
+    if sent_messages and _reply_has_source_links(reply):
+        await _add_feedback_reactions(sent_messages[-1])
 
 
 async def _add_feedback_reactions(sent) -> None:
-    """👍 / 👎 on Grim's reply. Discord-only; no xAI."""
+    """👍 / 👎 on the last chunk of a sourced live-search reply. Discord-only; no xAI."""
     if sent is None:
         return
     add_reaction = getattr(sent, "add_reaction", None)

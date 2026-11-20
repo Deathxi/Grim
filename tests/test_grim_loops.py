@@ -311,6 +311,77 @@ class GrimLoopIntegrationTests(unittest.TestCase):
             main.get_member_memory_notes("50", "10"),
         )
 
+    def _send_mention_with_reactions(self, text):
+        sent = []
+
+        def make_sent(*_args, **_kwargs):
+            msg = SimpleNamespace(
+                id=len(sent) + 1,
+                created_at=SimpleNamespace(timestamp=lambda: float(len(sent) + 1)),
+                add_reaction=AsyncMock(),
+            )
+            sent.append(msg)
+            return msg
+
+        reply_fn = AsyncMock(side_effect=make_sent)
+        channel_send = AsyncMock(side_effect=make_sent)
+        message = SimpleNamespace(
+            content="<@999> what's jensen huang's position?",
+            channel=SimpleNamespace(id=9, send=channel_send),
+            guild=SimpleNamespace(id=50),
+            reply=reply_fn,
+        )
+        with patch.object(
+            main, "_maybe_build_gif_reaction", AsyncMock(return_value=None)
+        ), patch.object(main, "save_message_to_db"), patch.object(
+            main, "_complete_contextual_reply", AsyncMock()
+        ) as complete, patch.object(
+            main, "grok_research_query", AsyncMock()
+        ) as research:
+            asyncio.run(main._send_mention_reply(message, text))
+            self.assertEqual(complete.await_count, 0)
+            self.assertEqual(research.await_count, 0)
+        return sent
+
+    def test_thumbs_land_on_last_sourced_chunk_not_the_first(self):
+        sourced = main.format_sourced_reply(
+            ("as of nov 12, still ceo. " * 80) + "done.",
+            [{"title": "Reuters", "url": "https://www.reuters.com/tech/a"}],
+        )
+        self.assertGreater(len(sourced), main.DISCORD_CONVERSATION_CHUNK_LIMIT)
+        sent = self._send_mention_with_reactions(sourced)
+        self.assertGreater(len(sent), 1)
+        self.assertIn("-# sources:", sourced)
+        for earlier in sent[:-1]:
+            earlier.add_reaction.assert_not_awaited()
+        self.assertEqual(
+            [call.args[0] for call in sent[-1].add_reaction.await_args_list],
+            [grim_loops.FEEDBACK_UP, grim_loops.FEEDBACK_DOWN],
+        )
+
+    def test_thumbs_on_a_single_sourced_message_and_never_on_casual_chat(self):
+        sourced = main.format_sourced_reply(
+            "as of nov 12, reuters reports he is still ceo.",
+            [{"title": "Reuters", "url": "https://www.reuters.com/tech/a"}],
+        )
+        sent = self._send_mention_with_reactions(sourced)
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(
+            [call.args[0] for call in sent[0].add_reaction.await_args_list],
+            [grim_loops.FEEDBACK_UP, grim_loops.FEEDBACK_DOWN],
+        )
+
+        casual = self._send_mention_with_reactions("yeah, holding steady.")
+        self.assertEqual(len(casual), 1)
+        casual[0].add_reaction.assert_not_awaited()
+
+        long_casual = ("yeah, holding steady. " * 100) + "done."
+        self.assertGreater(len(long_casual), main.DISCORD_CONVERSATION_CHUNK_LIMIT)
+        split_casual = self._send_mention_with_reactions(long_casual)
+        self.assertGreater(len(split_casual), 1)
+        for msg in split_casual:
+            msg.add_reaction.assert_not_awaited()
+
     def test_thumbs_up_does_not_call_the_model_or_store_a_miss(self):
         main.save_message_to_db(
             "50", "9", "100", "Grim", "some reply", 1.0, True, author_id="999"
@@ -345,6 +416,12 @@ class GrimLoopIntegrationTests(unittest.TestCase):
         self.assertNotIn("newsfeed", Path(grim_loops.__file__).read_text())
         self.assertIn("on_raw_reaction_add", Path(main.__file__).read_text())
         self.assertIn("_add_feedback_reactions", Path(main.__file__).read_text())
+        self.assertIn("sent_messages[-1]", Path(main.__file__).read_text())
+        changelog = Path(__file__).resolve().parents[1].joinpath("CHANGELOG.md").read_text()
+        self.assertIn("only on grok-4.3 live-search replies", changelog)
+        self.assertIn("last Discord message of a split answer", changelog)
+        self.assertIn("Casual grok-3 chat never gets them", changelog)
+        self.assertNotIn("[REDACTED]", changelog.split("grok-4.3 live-search replies")[1][:400])
 
 
 if __name__ == "__main__":

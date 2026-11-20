@@ -32,6 +32,7 @@ All notable changes to this project are documented here, organized by month.
 - `/trivia subject` — a private, dismissible ten-question quiz. Grim writes the round through the existing xAI path, shows one four-choice question at a time, and scores the invoking member out of 10. A bad subject or a failed generation stops the round instead of posting a partial quiz.
 
 ### Fixed
+- 👍/👎 sit only on grok-4.3 live-search replies (`main.py`), on the last Discord message of a split answer. Sources stay on that last chunk. Casual grok-3 chat never gets them. No extra model calls.
 - Calling pings (a real @ plus a question, or a message tailored for Grim) get a contextual reply instead of staying silent. A bare `@Grim` / name with nothing to answer gets a rotating human greeting (`What's up?`, `How's it going?`, `You called?`). Drive-by noun mentions stay quiet unless he can actually help that conversation (`main.py`).
 - `/grim_updates` deploy cards list the changelog bullets from the merge that just shipped, including when GitHub commit metadata is missing. A long note list is split so Discord can post it. Real filenames stay on the card. Stealth logs stay off.
 - `/grim_updates` deploy cards (`main.py`) always post normal public patch notes with real filenames. Stealth logs, `[REDACTED]` cards, and vanished or skip-changelog paths stay off, including when a commit message is labeled CLASSIFIED.
