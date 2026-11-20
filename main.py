@@ -530,52 +530,6 @@ def format_grim_current_time(now=None):
     current = now or get_grim_current_time()
     return f"{current.strftime('%A, %B %d, %Y — %I:%M %p')} {GRIM_TIMEZONE_LABEL}"
 
-# Storage for scheduled ghostwrites: {channel_id: {"username": str, "topic": str, "interval_hours": int, "last_run": float}}
-GHOSTWRITE_LIVE_FILE = _data_path("ghostwrite_live_data.json")
-
-def load_ghostwrite_live_data():
-    try:
-        if os.path.exists(GHOSTWRITE_LIVE_FILE):
-            with open(GHOSTWRITE_LIVE_FILE, 'r') as f:
-                return json.load(f)
-    except:
-        pass
-    return {}
-
-def save_ghostwrite_live_data(data):
-    _atomic_json_write(GHOSTWRITE_LIVE_FILE, data)
-
-ghostwrite_live_channels = load_ghostwrite_live_data()
-
-# Storage for newsfeed: {feed_id: {"channel_id": str, "topic": str, "interval_minutes": int, "last_run": float, "posted_headlines": list}}
-NEWSFEED_FILE = _data_path("newsfeed_data.json")
-
-def load_newsfeed_data():
-    try:
-        if os.path.exists(NEWSFEED_FILE):
-            with open(NEWSFEED_FILE, 'r') as f:
-                data = json.load(f)
-                # Migrate old format (channel_id as key) to new format (feed_id as key)
-                migrated = {}
-                for key, value in data.items():
-                    if "channel_id" not in value:
-                        # Old format - migrate
-                        feed_id = str(uuid.uuid4())[:8]
-                        value["channel_id"] = key
-                        migrated[feed_id] = value
-                    else:
-                        # Already new format
-                        migrated[key] = value
-                return migrated
-    except:
-        pass
-    return {}
-
-def save_newsfeed_data(data):
-    _atomic_json_write(NEWSFEED_FILE, data)
-
-newsfeed_feeds = load_newsfeed_data()
-
 # Guild-level memories Grim can reference in chat (keyed by guild_id, list of strings)
 GRIM_MEMORIES_FILE = _data_path("grim_memories.json")
 
@@ -6170,7 +6124,7 @@ KNOWLEDGE & RESEARCH:
 You always know today's date — it's injected into this prompt. Never guess at the date or assert a different one. Grim has a read-only live web research tool that is automatically consulted when a request needs fresh information. Verified live research answers are handled by an isolated responder and never inserted into this prompt. Never claim that Grim has no web access. Questions about facts, information, or method are routed to that research before this prompt runs, so never state current facts, a person's current role, or recent events from memory here. Lyrics, references, greetings, and creative play can come from what you know.
 
 WHAT YOU DON'T DO:
-Never open with greetings, "Ah", affirmations, or any kind of opener — just start talking. Don't end with a question every message, let replies breathe. No em dashes. No bullet points in replies, natural prose only. Don't announce being an AI unless directly and sincerely asked. Don't lean on the Grim Reaper framing — that's just your name, not your whole personality. Never reference your own bot functions, background tasks, monitoring duties, newsfeeds, or anything about "watching the server" — that's internal, not part of your personality. If someone asks a normal question, just answer it. Never claim Discord cannot show GIFs or pictures, and never say you are text-only. Never substitute ASCII, text art, or copypasta-as-text when they asked for a picture, GIF, meme image, or clip. ASCII only if they explicitly asked for ascii or text art. Visual asks are fulfilled before this prompt. If they correct a GIF or picture you just sent without asking for another file, reply in text — do not send or pretend to send another image.
+Never open with greetings, "Ah", affirmations, or any kind of opener — just start talking. Don't end with a question every message, let replies breathe. No em dashes. No bullet points in replies, natural prose only. Don't announce being an AI unless directly and sincerely asked. Don't lean on the Grim Reaper framing — that's just your name, not your whole personality. Never reference your own bot functions, background tasks, monitoring duties, or anything about "watching the server" — that's internal, not part of your personality. If someone asks a normal question, just answer it. Never claim Discord cannot show GIFs or pictures, and never say you are text-only. Never substitute ASCII, text art, or copypasta-as-text when they asked for a picture, GIF, meme image, or clip. ASCII only if they explicitly asked for ascii or text art. Visual asks are fulfilled before this prompt. If they correct a GIF or picture you just sent without asking for another file, reply in text — do not send or pretend to send another image.
 
 RESPONSE LENGTH:
 Match what the moment calls for. Short message, short reply. Real conversation or a
@@ -6543,174 +6497,6 @@ Make it sound authentically like them."""
         print(f"Error generating ghostwrite: {e}")
         return None
 
-async def generate_ghostwrite_live(username: str, broad_topic: str, tweet_data: dict):
-    """Generate a researched ghostwrite with LIVE web search - Grok searches the web and writes a specific take."""
-    client = get_grok_client()
-    if not client:
-        return None, None
-    
-    tweets_sample = "\n---\n".join(tweet_data["tweets"][:15])
-    user_info = tweet_data["user"]
-    random_seed = random.randint(1, 99999)
-    pst = timezone(timedelta(hours=-8))
-    current_date = datetime.now(pst).strftime("%B %d, %Y")
-    
-    try:
-        system_prompt = with_grim_voice(f"""You are a professional ghostwriter with web search access. Today's date is {current_date}.
-
-Your task has TWO parts:
-
-PART 1 - RESEARCH:
-Search the web for the LATEST news and developments about "{broad_topic}". Focus on:
-- Breaking news, announcements, or updates from TODAY or the past few days
-- New product releases, updates, or industry developments
-- Current events, trends, or discussions happening RIGHT NOW
-
-Pick ONE specific recent development or news item to write about. Be specific - mention actual details from your search results.
-
-PART 2 - GHOSTWRITE:
-Analyze @{user_info['username']}'s writing style from their tweets and write a tweet about the specific thing you found.
-
-CRITICAL RULES:
-- First line: Write [TOPIC: brief description of the specific news/development you found]
-- Second line onwards: The actual tweet
-- Keep the tweet under 280 characters
-- Slightly professional - avoid extreme slang
-- Use proper grammar and punctuation
-- No hashtags
-- Include specific details from your search results
-- Make it feel like an informed take on CURRENT news
-- Each response should cover something DIFFERENT - use the seed for variety
-
-Seed for variety: {random_seed}""")
-
-        user_prompt = f"""Here are recent tweets from @{user_info['username']}:
-
-{tweets_sample}
-
----
-
-Today is {current_date}. Search the web for the LATEST news about "{broad_topic}" from the past few days. Then write a specific, informed tweet in their style about something you found. Focus on breaking or recent developments only."""
-
-        result = await grok_search_query(system_prompt, user_prompt, max_tokens=300, temperature=1.0)
-        if not result:
-            return None, None
-        
-        # Parse out the topic and tweet
-        lines = result.split('\n', 1)
-        if len(lines) >= 2 and lines[0].startswith('[TOPIC:'):
-            specific_topic = lines[0].replace('[TOPIC:', '').replace(']', '').strip()
-            tweet = lines[1].strip()
-        else:
-            specific_topic = broad_topic
-            tweet = result
-
-        tweet = await screen_generated_output(
-            tweet,
-            user_text=broad_topic,
-            label="ghostwrite",
-        )
-        if not tweet:
-            return None, None
-        return tweet, specific_topic
-        
-    except Exception as e:
-        print(f"Error generating ghostwrite live: {e}")
-        return None, None
-
-async def generate_news_update(topic: str, posted_headlines: list = None):
-    """Generate a news update with LIVE web search — headline + body for embeds."""
-    client = get_grok_client()
-    if not client:
-        return None, None
-    
-    random_seed = random.randint(1, 99999)
-    pst = timezone(timedelta(hours=-8))
-    current_date = datetime.now(pst).strftime("%B %d, %Y")
-    
-    # Build exclusion list for variety
-    exclusion_note = ""
-    if posted_headlines and len(posted_headlines) > 0:
-        recent = posted_headlines[-10:]
-        exclusion_note = f"\n\nAVOID these topics (already covered): {', '.join(recent)}"
-    
-    try:
-        system_prompt = with_grim_voice(f"""You are a news reporter with web search access. Today's date is {current_date}.
-
-Your task: Search the web for the LATEST news about "{topic}" and write a concise news update.
-
-SEARCH FOR:
-- Breaking news, announcements, or updates from TODAY or the past few days
-- New developments, releases, or industry news
-- Current events or discussions happening RIGHT NOW
-
-WRITE A NEWS UPDATE:
-- First line: [HEADLINE: Brief headline of the news]
-- Second line: [DATELINE: Location, Country - Month Day, Year] (where the story originated)
-- Third line onwards: 2-3 sentence summary of the news (do NOT repeat the dateline here)
-- Be factual and informative
-- Include specific details (names, numbers, dates if available)
-- Write a focused summary - aim for 3-4 sentences that give real insight and context
-- HARD LIMIT: The ENTIRE update (dateline + summary) MUST be under 1000 characters total. This is non-negotiable.
-- ALWAYS finish your sentences completely - never leave a thought incomplete
-- Be concise - every word should earn its place
-- Professional news style - no slang or casual language
-- No hashtags or emojis
-- Double-check all facts, names, figures, and dates against your search results
-- If you are not confident about a detail, omit it rather than guess
-
-Each update should cover something DIFFERENT - use the seed for variety.{exclusion_note}
-
-Seed for variety: {random_seed}""")
-
-        user_prompt = f"""Today is {current_date}. Search the web for the LATEST news about "{topic}" from the past few days. Write a thorough, insightful news update about one specific development you found. Give real context, background, and why it matters. HARD LIMIT: Keep the total under 1000 characters. Do NOT exceed 1000 characters under any circumstances. Make sure every sentence is complete."""
-
-        result = await grok_search_query(system_prompt, user_prompt, max_tokens=400, temperature=0.8)
-        if not result:
-            return None, None
-        
-        headline = topic
-        content = result
-        
-        headline_match = re.search(r'\[HEADLINE:\s*(.+?)\]', result, re.IGNORECASE)
-        if headline_match:
-            headline = headline_match.group(1).strip()
-        
-        dateline = ""
-        dateline_match = re.search(r'\[DATELINE:\s*(.+?)\]', result, re.IGNORECASE)
-        if dateline_match:
-            dateline = dateline_match.group(1).strip()
-        
-        content = re.sub(r'\[HEADLINE:\s*.+?\]', '', result, flags=re.IGNORECASE)
-        content = re.sub(r'\[DATELINE:\s*.+?\]', '', content, flags=re.IGNORECASE)
-        content = content.strip()
-        content = '\n'.join(line for line in content.split('\n') if line.strip())
-        
-        if dateline:
-            content = f"{dateline}\n\n{content}"
-        
-        if len(content) > 4000:
-            sentences = content[:4000].rsplit('. ', 1)
-            content = sentences[0] + '.' if len(sentences) > 1 else sentences[0]
-
-        posted = await screen_generated_output(
-            f"{headline}\n\n{content}",
-            user_text=topic,
-            label="news",
-        )
-        if not posted:
-            return None, None
-        if posted == f"{headline}\n\n{content}":
-            return headline, content
-        parts = posted.split("\n", 1)
-        revised_headline = parts[0].strip() or headline
-        revised_body = parts[1].strip() if len(parts) > 1 else posted
-        return revised_headline[:250], revised_body
-        
-    except Exception as e:
-        print(f"Error generating news update: {e}")
-        return None, None
-
 @tasks.loop(minutes=3)
 async def check_livetweets():
     global livetweet_channels
@@ -6794,152 +6580,12 @@ async def check_livetweets():
 async def before_check_livetweets():
     await bot.wait_until_ready()
 
-@tasks.loop(minutes=1)
-async def check_ghostwrite_live():
-    global ghostwrite_live_channels
-    if not ghostwrite_live_channels:
-        return
-    
-    current_time = time.time()
-    
-    for channel_id, data in list(ghostwrite_live_channels.items()):
-        try:
-            channel = bot.get_channel(int(channel_id))
-            if not channel:
-                continue
-            
-            # Support both old (interval_hours) and new (interval_minutes) format
-            if "interval_minutes" in data:
-                interval_seconds = data["interval_minutes"] * 60
-            else:
-                interval_seconds = data.get("interval_hours", 1) * 3600
-            last_run = data.get("last_run", 0)
-            
-            if current_time - last_run >= interval_seconds:
-                # Time to generate a ghostwrite
-                tweet_data, error = await fetch_user_tweets(data["username"], count=15)
-                
-                if error:
-                    print(f"Ghostwrite live error for {data['username']}: {error}")
-                    continue
-                
-                draft, specific_topic = await generate_ghostwrite_live(
-                    data["username"], 
-                    data["topic"], 
-                    tweet_data
-                )
-                
-                if draft:
-                    embed = discord.Embed(
-                        title=f"@{data['username']}",
-                        description=f"```{draft}```",
-                        color=discord.Color.from_rgb(18, 18, 18)
-                    )
-                    embed.add_field(name="\u200b", value=f"**{specific_topic}**", inline=False)
-                    embed.add_field(name="\u200b", value=f"```{data['topic']}```", inline=True)
-                    embed.add_field(name="\u200b", value=f"```{data.get('interval_display', str(data.get('interval_hours', '?')) + 'h')}```", inline=True)
-                    embed.set_footer(text=xsi_footer())
-                    
-                    await channel.send(embed=embed)
-                    
-                    # Update last run time
-                    ghostwrite_live_channels[channel_id]["last_run"] = current_time
-                    save_ghostwrite_live_data(ghostwrite_live_channels)
-                    print(f"Posted ghostwrite live for @{data['username']} in channel {channel_id}")
-                    
-        except Exception as e:
-            print(f"Error in ghostwrite live for {data.get('username', 'unknown')}: {e}")
-
-@check_ghostwrite_live.before_loop
-async def before_check_ghostwrite_live():
-    await bot.wait_until_ready()
-
-@tasks.loop(minutes=1)
-async def check_newsfeed():
-    global newsfeed_feeds
-    if not newsfeed_feeds:
-        return
-    
-    current_time = time.time()
-    print(f"[Newsfeed Check] Running at {current_time}, checking {len(newsfeed_feeds)} feed(s)")
-    
-    for feed_id, data in list(newsfeed_feeds.items()):
-        try:
-            channel_id = data.get("channel_id")
-            channel = bot.get_channel(int(channel_id))
-            if not channel:
-                print(f"[Newsfeed Check] Channel {channel_id} not found for feed {feed_id}, skipping")
-                continue
-            
-            interval_seconds = data["interval_minutes"] * 60
-            last_run = data.get("last_run", 0)
-            time_since = current_time - last_run
-            print(f"[Newsfeed Check] Feed {feed_id} '{data['topic']}': {time_since:.0f}s since last run, interval is {interval_seconds}s")
-            
-            if current_time - last_run >= interval_seconds:
-                posted_headlines = data.get("posted_headlines", [])
-                headline, content = await generate_news_update(data["topic"], posted_headlines)
-                
-                if headline and content:
-                    embed = discord.Embed(
-                        title=headline,
-                        description=content,
-                        color=discord.Color.from_rgb(30, 30, 35)
-                    )
-                    
-                    embed.add_field(name="\u200b", value=f"```{data['topic']}```", inline=True)
-                    embed.add_field(name="\u200b", value=f"```{data.get('interval_display', '?')}```", inline=True)
-                    embed.set_footer(text=xsi_footer("Grim News Network"))
-                    
-                    await channel.send(embed=embed)
-                    
-                    # Track posted headlines (keep last 20)
-                    posted_headlines.append(headline)
-                    if len(posted_headlines) > 20:
-                        posted_headlines = posted_headlines[-20:]
-                    
-                    raw_next = current_time + interval_seconds
-                    remainder = raw_next % 600
-                    if remainder != 0:
-                        aligned_next = raw_next + (600 - remainder)
-                    else:
-                        aligned_next = raw_next
-                    aligned_last_run = aligned_next - interval_seconds
-                    
-                    newsfeed_feeds[feed_id]["last_run"] = aligned_last_run
-                    newsfeed_feeds[feed_id]["posted_headlines"] = posted_headlines
-                    save_newsfeed_data(newsfeed_feeds)
-                    
-                    next_dt = datetime.fromtimestamp(aligned_next)
-                    print(f"Posted newsfeed for '{data['topic']}' (feed {feed_id}) in channel {channel_id} — next post aligned to {next_dt.strftime('%H:%M')}")
-                    
-        except Exception as e:
-            print(f"Error in newsfeed for {data.get('topic', 'unknown')}: {e}")
-
-@check_newsfeed.before_loop
-async def before_check_newsfeed():
-    await bot.wait_until_ready()
-
-@check_newsfeed.after_loop
-async def after_check_newsfeed():
-    if check_newsfeed.is_being_cancelled():
-        print("[Newsfeed] Task was cancelled")
-    else:
-        print("[Newsfeed] Task stopped unexpectedly, will restart on next health check")
-
 @check_livetweets.after_loop
 async def after_check_livetweets():
     if check_livetweets.is_being_cancelled():
         print("[Livetweets] Task was cancelled")
     else:
         print("[Livetweets] Task stopped unexpectedly, will restart on next health check")
-
-@check_ghostwrite_live.after_loop
-async def after_check_ghostwrite_live():
-    if check_ghostwrite_live.is_being_cancelled():
-        print("[Ghostwrite Live] Task was cancelled")
-    else:
-        print("[Ghostwrite Live] Task stopped unexpectedly, will restart on next health check")
 
 @tasks.loop(seconds=30)
 async def check_nftwatch():
@@ -7460,17 +7106,6 @@ async def health_monitor():
         
         tasks_status = []
         
-        # Check and restart newsfeed task
-        if not check_newsfeed.is_running():
-            print("[Health Monitor] Newsfeed task not running, restarting...")
-            try:
-                check_newsfeed.start()
-                tasks_status.append("newsfeed: RESTARTED")
-            except Exception as e:
-                tasks_status.append(f"newsfeed: FAILED ({e})")
-        else:
-            tasks_status.append("newsfeed: OK")
-        
         # Check and restart livetweets task
         if not check_livetweets.is_running():
             print("[Health Monitor] Livetweets task not running, restarting...")
@@ -7481,17 +7116,6 @@ async def health_monitor():
                 tasks_status.append(f"livetweets: FAILED ({e})")
         else:
             tasks_status.append("livetweets: OK")
-        
-        # Check and restart ghostwrite live task
-        if not check_ghostwrite_live.is_running():
-            print("[Health Monitor] Ghostwrite live task not running, restarting...")
-            try:
-                check_ghostwrite_live.start()
-                tasks_status.append("ghostwrite: RESTARTED")
-            except Exception as e:
-                tasks_status.append(f"ghostwrite: FAILED ({e})")
-        else:
-            tasks_status.append("ghostwrite: OK")
         
         if not check_nftwatch.is_running():
             print("[Health Monitor] NFTWatch task not running, restarting...")
@@ -7768,14 +7392,6 @@ async def on_ready():
     if not check_livetweets.is_running():
         check_livetweets.start()
         print("Started livetweet checker")
-    
-    if not check_ghostwrite_live.is_running():
-        check_ghostwrite_live.start()
-        print("Started ghostwrite live checker")
-    
-    if not check_newsfeed.is_running():
-        check_newsfeed.start()
-        print("Started newsfeed checker")
     
     if not check_nftwatch.is_running():
         check_nftwatch.start()
@@ -9700,443 +9316,6 @@ async def ghostwrite(interaction: discord.Interaction, username: str, topics: st
     
     await interaction.followup.send(embed=embed)
 
-@bot.tree.command(name="ghostwritelive", description="Schedule automatic ghostwritten drafts at intervals")
-async def ghostwritelive(interaction: discord.Interaction, interval: str, username: str, topic: str):
-    global ghostwrite_live_channels
-    
-    if not await require_permission(interaction, "manage_channels", "ghostwrite_live"):
-        return
-    
-    await interaction.response.defer()
-    
-    channel_id = str(interaction.channel_id)
-    clean_username = username.lstrip('@').lower()
-    
-    # Check if disabling
-    if channel_id in ghostwrite_live_channels:
-        del ghostwrite_live_channels[channel_id]
-        save_ghostwrite_live_data(ghostwrite_live_channels)
-        record_security_event(interaction, "ghostwrite_live", "disabled")
-        
-        embed = discord.Embed(
-            title="Disabled",
-            description="Stopped scheduled ghostwrites in this channel.",
-            color=discord.Color.from_rgb(18, 18, 18)
-        )
-        await interaction.followup.send(embed=embed)
-        return
-    
-    # Parse interval (e.g., "4h", "12h", "30m", "10m")
-    interval_str = interval.lower().strip()
-    hours_match = re.match(r'^(\d+)h$', interval_str)
-    mins_match = re.match(r'^(\d+)m$', interval_str)
-    
-    if hours_match:
-        interval_hours = int(hours_match.group(1))
-        interval_minutes = interval_hours * 60
-        interval_display = f"{interval_hours}h"
-    elif mins_match:
-        interval_minutes = int(mins_match.group(1))
-        interval_hours = interval_minutes / 60
-        interval_display = f"{interval_minutes}m"
-    else:
-        await interaction.followup.send("Invalid interval format. Use format like `4h`, `12h` (hours) or `10m`, `30m` (minutes).")
-        return
-    
-    if interval_minutes < 10 or interval_minutes > 10080:
-        await interaction.followup.send("Interval must be between 10m and 168h (1 week).")
-        return
-    
-    # Verify we can fetch tweets for this user
-    tweet_data, error = await fetch_user_tweets(clean_username, count=15)
-    
-    if error:
-        if "not configured" in error:
-            await interaction.followup.send("X API not configured. Please add `X_BEARER_TOKEN` to the VPS `.env`.")
-        else:
-            await interaction.followup.send(f"Error: {error}")
-        return
-    
-    # Generate first one immediately
-    draft, specific_topic = await generate_ghostwrite_live(clean_username, topic, tweet_data)
-    
-    if draft is None:
-        await interaction.followup.send("xAI API key not configured. Please add `XAI_API_KEY` to the VPS `.env`.")
-        return
-    
-    # Save the schedule
-    ghostwrite_live_channels[channel_id] = {
-        "username": clean_username,
-        "topic": topic,
-        "interval_minutes": interval_minutes,
-        "interval_display": interval_display,
-        "last_run": time.time()
-    }
-    save_ghostwrite_live_data(ghostwrite_live_channels)
-    record_security_event(
-        interaction, "ghostwrite_live", "enabled",
-        {"interval_minutes": interval_minutes},
-    )
-    
-    embed = discord.Embed(
-        title="Ghostwrite Live Enabled",
-        description=f"```{draft}```",
-        color=discord.Color.from_rgb(29, 161, 242)
-    )
-    embed.add_field(name="Researched Topic", value=specific_topic, inline=False)
-    embed.add_field(name="Account", value=f"@{clean_username}", inline=True)
-    embed.add_field(name="Broad Topic", value=topic, inline=True)
-    embed.add_field(name="Interval", value=f"Every {interval_display}", inline=True)
-    embed.set_footer(text=f"Enabled by {interaction.user.name} | Use same command to disable · {VERSION}")
-    
-    await interaction.followup.send(embed=embed)
-
-class NewsfeedCancelSelect(ui.Select):
-    def __init__(self, feeds: dict):
-        options = []
-        for feed_id, data in feeds.items():
-            label = f"{data.get('topic', 'Unknown')} ({data.get('interval_display', '?')})"
-            if len(label) > 100:
-                label = label[:97] + "..."
-            options.append(discord.SelectOption(
-                label=label,
-                value=feed_id,
-                description=f"Channel: {data.get('channel_id', 'unknown')}"
-            ))
-        
-        super().__init__(
-            placeholder="Select a newsfeed to cancel...",
-            min_values=1,
-            max_values=1,
-            options=options
-        )
-    
-    async def callback(self, interaction: discord.Interaction):
-        global newsfeed_feeds
-        if not await require_permission(interaction, "manage_channels", "newsfeed_cancel"):
-            return
-        feed_id = self.values[0]
-        
-        if feed_id in newsfeed_feeds:
-            feed_data = newsfeed_feeds[feed_id]
-            if feed_data.get("guild_id") != str(interaction.guild_id):
-                record_security_event(interaction, "newsfeed_cancel", "denied", {"reason": "cross_server"})
-                await interaction.response.send_message(
-                    "That feed does not belong to this server.", ephemeral=True
-                )
-                return
-            topic = feed_data.get("topic", "Unknown")
-            del newsfeed_feeds[feed_id]
-            save_newsfeed_data(newsfeed_feeds)
-            record_security_event(interaction, "newsfeed_cancel", "success", {"feed_id": feed_id[:8]})
-            
-            embed = discord.Embed(
-                title="Cancelled",
-                description=f"Stopped news feed for **{topic}**",
-                color=discord.Color.from_rgb(18, 18, 18)
-            )
-            embed.add_field(name="\u200b", value=f"```{feed_id}```", inline=True)
-            await interaction.response.edit_message(embed=embed, view=None)
-        else:
-            embed = discord.Embed(
-                title="Already Cancelled",
-                description="This feed was already cancelled or no longer exists.",
-                color=discord.Color.from_rgb(40, 40, 40)
-            )
-            await interaction.response.edit_message(embed=embed, view=None)
-
-class NewsfeedCancelView(ui.View):
-    def __init__(self, feeds: dict):
-        super().__init__(timeout=120)
-        self.add_item(NewsfeedCancelSelect(feeds))
-        self.message = None
-    
-    async def on_timeout(self):
-        if self.message:
-            try:
-                embed = discord.Embed(
-                    title="Expired",
-                    description="This menu has expired. Use `/newsfeed_cancel` again.",
-                    color=discord.Color.from_rgb(40, 40, 40)
-                )
-                await self.message.edit(embed=embed, view=None)
-            except:
-                pass
-
-# Newsfeed Edit Components
-class NewsfeedEditModal(ui.Modal, title="Edit Interval"):
-    new_interval = ui.TextInput(
-        label="New Interval",
-        placeholder="e.g., 12h, 30m, 4h",
-        required=True,
-        max_length=10
-    )
-    
-    def __init__(self, feed_id: str, feed_data: dict):
-        super().__init__()
-        self.feed_id = feed_id
-        self.feed_data = feed_data
-    
-    async def on_submit(self, interaction: discord.Interaction):
-        global newsfeed_feeds
-        if not await require_permission(interaction, "manage_channels", "newsfeed_edit"):
-            return
-        
-        interval_str = self.new_interval.value.lower().strip()
-        hours_match = re.match(r'^(\d+)h$', interval_str)
-        mins_match = re.match(r'^(\d+)m$', interval_str)
-        
-        if hours_match:
-            interval_minutes = int(hours_match.group(1)) * 60
-            interval_display = f"{hours_match.group(1)}h"
-        elif mins_match:
-            interval_minutes = int(mins_match.group(1))
-            interval_display = f"{mins_match.group(1)}m"
-        else:
-            await interaction.response.send_message("Invalid interval format. Use '4h' or '30m'.", ephemeral=True)
-            return
-        
-        if interval_minutes < 10 or interval_minutes > 10080:
-            await interaction.response.send_message(
-                "Interval must be between 10 minutes and 168 hours.", ephemeral=True
-            )
-            return
-        
-        if self.feed_id in newsfeed_feeds:
-            if newsfeed_feeds[self.feed_id].get("guild_id") != str(interaction.guild_id):
-                record_security_event(interaction, "newsfeed_edit", "denied", {"reason": "cross_server"})
-                await interaction.response.send_message(
-                    "That feed does not belong to this server.", ephemeral=True
-                )
-                return
-            old_interval = newsfeed_feeds[self.feed_id].get("interval_display", "?")
-            newsfeed_feeds[self.feed_id]["interval_minutes"] = interval_minutes
-            newsfeed_feeds[self.feed_id]["interval_display"] = interval_display
-            save_newsfeed_data(newsfeed_feeds)
-            record_security_event(
-                interaction, "newsfeed_edit", "success",
-                {"feed_id": self.feed_id[:8], "interval_minutes": interval_minutes},
-            )
-            
-            topic = self.feed_data.get("topic", "Unknown")
-            
-            embed = discord.Embed(
-                title="Updated",
-                description=f"**{topic}** interval changed",
-                color=discord.Color.from_rgb(18, 18, 18)
-            )
-            embed.add_field(name="\u200b", value=f"```{old_interval} → {interval_display}```", inline=False)
-            await interaction.response.send_message(embed=embed, ephemeral=True)
-        else:
-            await interaction.response.send_message("Feed no longer exists.", ephemeral=True)
-
-class NewsfeedEditSelect(ui.Select):
-    def __init__(self, feeds: dict):
-        self.feeds_data = feeds
-        options = []
-        for feed_id, data in feeds.items():
-            topic = data.get("topic", "Unknown")
-            interval = data.get("interval_display", "?")
-            options.append(discord.SelectOption(
-                label=f"{topic} ({interval})",
-                value=feed_id,
-                description=f"Channel: {data.get('channel_id', 'unknown')}"
-            ))
-        
-        super().__init__(
-            placeholder="Select a newsfeed to edit...",
-            min_values=1,
-            max_values=1,
-            options=options
-        )
-    
-    async def callback(self, interaction: discord.Interaction):
-        if not await require_permission(interaction, "manage_channels", "newsfeed_edit"):
-            return
-        feed_id = self.values[0]
-        if (
-            feed_id in self.feeds_data
-            and self.feeds_data[feed_id].get("guild_id") == str(interaction.guild_id)
-        ):
-            modal = NewsfeedEditModal(feed_id, self.feeds_data[feed_id])
-            await interaction.response.send_modal(modal)
-        else:
-            await interaction.response.send_message("Feed no longer exists.", ephemeral=True)
-
-class NewsfeedEditView(ui.View):
-    def __init__(self, feeds: dict):
-        super().__init__(timeout=120)
-        self.add_item(NewsfeedEditSelect(feeds))
-        self.message = None
-    
-    async def on_timeout(self):
-        if self.message:
-            try:
-                embed = discord.Embed(
-                    title="Expired",
-                    description="This menu has expired. Use `/newsfeed_edit` again.",
-                    color=discord.Color.from_rgb(40, 40, 40)
-                )
-                await self.message.edit(embed=embed, view=None)
-            except:
-                pass
-
-@bot.tree.command(name="newsfeed_edit", description="Edit the interval of an active news feed")
-async def newsfeed_edit(interaction: discord.Interaction):
-    global newsfeed_feeds
-    
-    if not await require_permission(interaction, "manage_channels", "newsfeed_edit"):
-        return
-    
-    if not newsfeed_feeds:
-        await interaction.response.send_message("No active news feeds to edit.", ephemeral=True)
-        return
-    
-    # Filter to feeds in this guild — use guild_id if stored, fall back to channel lookup
-    guild_id_str = str(interaction.guild_id)
-    guild_feeds = {}
-    for feed_id, data in newsfeed_feeds.items():
-        if data.get("guild_id") == guild_id_str:
-            guild_feeds[feed_id] = data
-        elif not data.get("guild_id"):
-            try:
-                channel = interaction.guild.get_channel(int(data.get("channel_id", 0)))
-                if channel:
-                    guild_feeds[feed_id] = data
-            except:
-                pass
-    
-    if not guild_feeds:
-        await interaction.response.send_message("No active news feeds in this server.", ephemeral=True)
-        return
-    
-    view = NewsfeedEditView(guild_feeds)
-    embed = discord.Embed(
-        title="Edit Feed",
-        description=f"Select a feed to edit.\n\n**Active:** {len(guild_feeds)}",
-        color=discord.Color.from_rgb(18, 18, 18)
-    )
-    
-    await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
-    view.message = await interaction.original_response()
-
-@bot.tree.command(name="newsfeed_cancel", description="Cancel an active news feed")
-async def newsfeed_cancel(interaction: discord.Interaction):
-    global newsfeed_feeds
-    
-    if not await require_permission(interaction, "manage_channels", "newsfeed_cancel"):
-        return
-    
-    if not newsfeed_feeds:
-        await interaction.response.send_message("No active news feeds to cancel.", ephemeral=True)
-        return
-    
-    # Filter to feeds in this guild — use guild_id if stored, fall back to channel lookup
-    guild_id_str = str(interaction.guild_id)
-    guild_feeds = {}
-    for feed_id, data in newsfeed_feeds.items():
-        if data.get("guild_id") == guild_id_str:
-            guild_feeds[feed_id] = data
-        elif not data.get("guild_id"):
-            try:
-                channel = interaction.guild.get_channel(int(data.get("channel_id", 0)))
-                if channel:
-                    guild_feeds[feed_id] = data
-            except:
-                pass
-    
-    if not guild_feeds:
-        await interaction.response.send_message("No active news feeds in this server.", ephemeral=True)
-        return
-    
-    view = NewsfeedCancelView(guild_feeds)
-    embed = discord.Embed(
-        title="Cancel Feed",
-        description=f"Select a feed to cancel.\n\n**Active:** {len(guild_feeds)}",
-        color=discord.Color.from_rgb(18, 18, 18)
-    )
-    
-    await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
-    view.message = await interaction.original_response()
-
-@bot.tree.command(name="newsfeed_status", description="View active news feeds and their status")
-async def newsfeed_status(interaction: discord.Interaction):
-    global newsfeed_feeds
-    
-    current_time = time.time()
-    
-    # Check task health
-    tasks_healthy = {
-        "Newsfeed": check_newsfeed.is_running(),
-        "Livetweets": check_livetweets.is_running(),
-        "Ghostwrite": check_ghostwrite_live.is_running(),
-        "Health Monitor": health_monitor.is_running()
-    }
-    
-    health_status = "Operational" if all(tasks_healthy.values()) else "Attention needed"
-    
-    embed = discord.Embed(
-        title="Status",
-        description=f"**{health_status}**",
-        color=discord.Color.from_rgb(18, 18, 18)
-    )
-    
-    # Task status
-    task_lines = []
-    for task_name, is_running in tasks_healthy.items():
-        status = "Active" if is_running else "Stopped"
-        task_lines.append(f"**{task_name}:** {status}")
-    embed.add_field(name="Tasks", value="\n".join(task_lines), inline=False)
-    
-    # Filter to feeds in this guild — use guild_id if stored, fall back to channel lookup
-    guild_id_str = str(interaction.guild_id)
-    guild_feeds = {}
-    for feed_id, data in newsfeed_feeds.items():
-        if data.get("guild_id") == guild_id_str:
-            guild_feeds[feed_id] = data
-        elif not data.get("guild_id"):
-            try:
-                channel = interaction.guild.get_channel(int(data.get("channel_id", 0)))
-                if channel:
-                    guild_feeds[feed_id] = data
-            except:
-                pass
-    
-    if guild_feeds:
-        feed_lines = []
-        for feed_id, data in guild_feeds.items():
-            channel_id = data.get("channel_id")
-            topic = data.get("topic", "Unknown")
-            interval_display = data.get("interval_display", "?")
-            interval_seconds = data.get("interval_minutes", 60) * 60
-            last_run = data.get("last_run", 0)
-            
-            # Calculate next run
-            next_run = last_run + interval_seconds
-            time_until = next_run - current_time
-            
-            if time_until <= 0:
-                next_str = "**Due now**"
-            elif time_until < 60:
-                next_str = f"in {int(time_until)}s"
-            elif time_until < 3600:
-                next_str = f"in {int(time_until / 60)}m"
-            else:
-                hours = int(time_until / 3600)
-                mins = int((time_until % 3600) / 60)
-                next_str = f"in {hours}h {mins}m"
-            
-            feed_lines.append(f"**{topic}** ({interval_display})\n<#{channel_id}> • Next: {next_str}")
-        
-        embed.add_field(name=f"Feeds ({len(guild_feeds)})", value="\n".join(feed_lines), inline=False)
-    else:
-        embed.add_field(name="Feeds", value="No active feeds", inline=False)
-    
-    # Bot uptime info
-    embed.set_footer(text=xsi_footer(datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
-    
-    await interaction.response.send_message(embed=embed, ephemeral=True)
-
 @bot.tree.command(name="redditfeed_status", description="View active Reddit image feeds and their status")
 async def redditfeed_status(interaction: discord.Interaction):
     global redditfeed_feeds
@@ -10257,10 +9436,8 @@ async def grim_status(interaction: discord.Interaction):
 
     # ── Background tasks ──────────────────────────────────
     task_map = {
-        "Newsfeed": check_newsfeed,
         "Reddit Feed": check_redditfeed,
         "Livetweets": check_livetweets,
-        "Ghostwrite Live": check_ghostwrite_live,
         "NFT Watch": check_nftwatch,
         "RemindMe": check_remindme,
         "Digest": synthesize_server_digest,
@@ -10272,7 +9449,6 @@ async def grim_status(interaction: discord.Interaction):
 
     # ── Active features (this server) ─────────────────────
     guild_id_str = str(interaction.guild_id)
-    active_feeds = sum(1 for d in newsfeed_feeds.values() if d.get("guild_id") == guild_id_str)
     active_reddit = sum(1 for d in redditfeed_feeds.values() if d.get("guild_id") == guild_id_str)
     active_tweets = sum(1 for d in livetweet_channels.values() if isinstance(d, dict) and d.get("guild_id") == guild_id_str)
     active_nft = sum(1 for d in nftwatch_feeds.values() if isinstance(d, dict) and d.get("guild_id") == guild_id_str)
@@ -10330,7 +9506,6 @@ async def grim_status(interaction: discord.Interaction):
     embed.add_field(
         name="Active (this server)",
         value=(
-            f"**Newsfeeds:** {active_feeds}\n"
             f"**Reddit Feeds:** {active_reddit}\n"
             f"**Livetweets:** {active_tweets}\n"
             f"**NFT Watches:** {active_nft}\n"
@@ -10341,74 +9516,6 @@ async def grim_status(interaction: discord.Interaction):
 
     embed.set_footer(text=xsi_footer(datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
     await interaction.followup.send(embed=embed, ephemeral=True)
-
-@bot.tree.command(name="newsfeed", description="Start a live news feed for a topic in this channel")
-async def newsfeed(interaction: discord.Interaction, interval: str, topic: str):
-    global newsfeed_feeds
-    
-    if not await require_permission(interaction, "manage_channels", "newsfeed_create"):
-        return
-    
-    await interaction.response.defer()
-    
-    channel_id = str(interaction.channel_id)
-    
-    # Parse interval (e.g., "4h", "12h", "30m", "10m")
-    interval_str = interval.lower().strip()
-    hours_match = re.match(r'^(\d+)h$', interval_str)
-    mins_match = re.match(r'^(\d+)m$', interval_str)
-    
-    if hours_match:
-        interval_minutes = int(hours_match.group(1)) * 60
-        interval_display = f"{hours_match.group(1)}h"
-    elif mins_match:
-        interval_minutes = int(mins_match.group(1))
-        interval_display = f"{interval_minutes}m"
-    else:
-        await interaction.followup.send("Invalid interval format. Use format like `4h`, `12h` (hours) or `10m`, `30m` (minutes).")
-        return
-    
-    if interval_minutes < 10 or interval_minutes > 10080:
-        await interaction.followup.send("Interval must be between 10m and 168h (1 week).")
-        return
-    
-    # Generate first news update immediately
-    headline, content = await generate_news_update(topic)
-    
-    if headline is None:
-        await interaction.followup.send("xAI API key not configured. Please add `XAI_API_KEY` to the VPS `.env`.")
-        return
-    
-    # Create unique feed ID and save
-    feed_id = str(uuid.uuid4())
-    newsfeed_feeds[feed_id] = {
-        "channel_id": channel_id,
-        "guild_id": str(interaction.guild_id),
-        "topic": topic,
-        "interval_minutes": interval_minutes,
-        "interval_display": interval_display,
-        "last_run": time.time(),
-        "posted_headlines": [headline]
-    }
-    save_newsfeed_data(newsfeed_feeds)
-    record_security_event(
-        interaction, "newsfeed_create", "success",
-        {"feed_id": feed_id[:8], "interval_minutes": interval_minutes},
-    )
-    
-    print(f"[Newsfeed Command] Created feed {feed_id}")
-    
-    embed = discord.Embed(
-        title=headline,
-        description=content,
-        color=discord.Color.from_rgb(18, 18, 18)
-    )
-    
-    embed.add_field(name="\u200b", value=f"```{topic}```", inline=True)
-    embed.add_field(name="\u200b", value=f"```{interval_display}```", inline=True)
-    embed.set_footer(text=xsi_footer("Grim News Network"))
-    
-    await interaction.followup.send(embed=embed)
 
 @bot.tree.command(name="nftwatch", description="Watch an OpenSea collection for live new listings")
 async def nftwatch(interaction: discord.Interaction, link: str):
@@ -11828,8 +10935,6 @@ async def help_grim(ctx):
     embed.add_field(name="/roast", value="Roast", inline=True)
     embed.add_field(name="/ascii", value="ASCII art", inline=True)
     embed.add_field(name="/livetweet", value="X updates", inline=True)
-    embed.add_field(name="/newsfeed", value="News feed", inline=True)
-    embed.add_field(name="/newsfeed_edit", value="Edit interval", inline=True)
     embed.add_field(name="/ghostwrite", value="Ghostwrite", inline=True)
     embed.add_field(name="/nftwatch", value="NFT tracker", inline=True)
     embed.add_field(name="/nftwatch_cancel", value="Stop NFT watch", inline=True)

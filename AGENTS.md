@@ -36,7 +36,7 @@ with xAI's Grok API integration. Live runtime is the VPS deploy path
 When adding new time-based or scheduled commands:
 1. Wire the task into `health_monitor()` so it can auto-restart if it crashes
 2. Add an `after_loop` handler to log unexpected stops
-3. Update `/newsfeed_status` (or the relevant status surface) to show the new task
+3. Add the task to the `/status` background task list (or the relevant status surface)
 
 Public `/grim_updates` cards and CHANGELOG are always normal: real filenames
 and real patch notes. The deploy card reads those notes from the checkout's

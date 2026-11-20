@@ -342,7 +342,7 @@ class SecurityControlsTests(unittest.TestCase):
     def test_regular_member_cannot_manage_channels(self):
         event = interaction()
         allowed = asyncio.run(
-            main.require_permission(event, "manage_channels", "newsfeed_create")
+            main.require_permission(event, "manage_channels", "nftwatch_create")
         )
         self.assertFalse(allowed)
         self.assertTrue(event.response.messages)
@@ -364,7 +364,7 @@ class SecurityControlsTests(unittest.TestCase):
         moderator = interaction(manage_channels=True)
         self.assertTrue(
             asyncio.run(
-                main.require_permission(moderator, "manage_channels", "newsfeed_create")
+                main.require_permission(moderator, "manage_channels", "nftwatch_create")
             )
         )
         self.assertFalse(
