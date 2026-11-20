@@ -7,6 +7,7 @@ All notable changes to this project are documented here, organized by month.
 ## November 2026
 
 ### Removed
+- Removed the `!server` prefix command. `/server` still shows the same server info (`main.py`).
 - Removed `/newsfeed`, `/newsfeed_edit`, `/newsfeed_cancel`, `/newsfeed_status`, and `/ghostwritelive`, plus the every-minute Newsfeed and Ghostwrite Live loops behind them, which ran paid live searches with no one talking. `/status` still lists every background task that remains. Old `newsfeed_data.json` and `ghostwrite_live_data.json` files in `~/.grim_data` are no longer read. `/ghostwrite` stays (`main.py`).
 
 ### Changed
