@@ -464,6 +464,21 @@ class SecurityControlsTests(unittest.TestCase):
         self.assertFalse(main.is_private_member_log_channel(public_channel, guild))
         self.assertTrue(main.is_private_member_log_channel(private_channel, guild))
 
+    def test_bot_default_blocks_mass_and_role_pings(self):
+        default = main.bot.allowed_mentions
+        self.assertFalse(default.everyone)
+        self.assertFalse(default.roles)
+        self.assertTrue(default.users)
+
+    def test_admin_relay_typed_mentions_override_the_default(self):
+        default = main.bot.allowed_mentions
+        merged = default.merge(main.typed_mentions("@everyone heads up <@&123456789012345678>"))
+        self.assertTrue(merged.everyone)
+        self.assertEqual([role.id for role in merged.roles], [123456789012345678])
+        untyped = default.merge(main.typed_mentions("plain notice"))
+        self.assertFalse(untyped.everyone)
+        self.assertFalse(untyped.roles)
+
     def test_management_commands_use_the_new_names(self):
         slash_names = {command.name for command in main.bot.tree.get_commands()}
         prefix_names = {command.name for command in main.bot.commands}
@@ -471,7 +486,7 @@ class SecurityControlsTests(unittest.TestCase):
         self.assertIn("clear", slash_names)
         self.assertIn("members", slash_names)
         self.assertIn("memberlog", slash_names)
-        self.assertIn("language", slash_names)
+        self.assertNotIn("language", slash_names)
         self.assertIn("grim_language", slash_names)
         self.assertIn("quote", prefix_names)
         self.assertNotIn("info", slash_names)
@@ -479,15 +494,10 @@ class SecurityControlsTests(unittest.TestCase):
         self.assertNotIn("info-members", slash_names)
         self.assertNotIn("grim_members", slash_names)
         self.assertNotIn("grim_memberlog", slash_names)
-        self.assertNotIn("vc_join", slash_names)
-        self.assertNotIn("join", slash_names)
+        self.assertIn("vc_join", slash_names)
         self.assertIn("vc_leave", slash_names)
         self.assertIn("server", prefix_names)
         self.assertNotIn("info", prefix_names)
-        source = Path(__file__).resolve().parents[1].joinpath("main.py").read_text()
-        self.assertNotIn('name="vc_join"', source)
-        self.assertNotIn("Have Grim join your voice channel", source)
-        self.assertNotIn("async def vc_join(", source)
         clear_command = next(
             command for command in main.bot.tree.get_commands()
             if command.name == "clear"
@@ -1535,6 +1545,46 @@ class SecurityControlsTests(unittest.TestCase):
 
         self.assertEqual(sent_embeds, [])
         self.assertNotIn("50", main.member_log_channels)
+
+
+class BlockingClientTests(unittest.TestCase):
+    def test_oneshot_xai_calls_run_off_the_event_loop_with_a_timeout(self):
+        seen = {}
+
+        def create(**kwargs):
+            seen["thread"] = threading.get_ident()
+            seen["timeout"] = kwargs.get("timeout")
+            message = SimpleNamespace(content="Outlook grim.")
+            return SimpleNamespace(choices=[SimpleNamespace(message=message)])
+
+        client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
+
+        async def run():
+            seen["loop_thread"] = threading.get_ident()
+            with patch.object(main, "get_grok_client", return_value=client), patch.object(
+                main, "screen_generated_output", AsyncMock(side_effect=lambda text, **_: text)
+            ):
+                return await main.generate_8ball_response("will it rain?")
+
+        self.assertEqual(asyncio.run(run()), "Outlook grim.")
+        self.assertNotEqual(seen["thread"], seen["loop_thread"])
+        self.assertEqual(seen["timeout"], main.XAI_ONESHOT_TIMEOUT_SECONDS)
+
+    def test_x_api_calls_time_out_instead_of_hanging(self):
+        release = threading.Event()
+
+        def hang(**_):
+            release.wait(5)
+
+        async def run():
+            try:
+                with patch.object(main, "X_API_TIMEOUT_SECONDS", 0.05):
+                    await main._x_api_call(hang, username="grim")
+            finally:
+                release.set()
+
+        with self.assertRaises(asyncio.TimeoutError):
+            asyncio.run(run())
 
 
 if __name__ == "__main__":

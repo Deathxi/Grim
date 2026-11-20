@@ -1,7 +1,6 @@
 import asyncio
 import tempfile
 import unittest
-from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, PropertyMock, patch

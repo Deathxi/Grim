@@ -6,7 +6,6 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
-import discord
 
 import main
 import reply_auditor
