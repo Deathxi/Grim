@@ -7978,46 +7978,40 @@ async def server_info(interaction: discord.Interaction):
     await interaction.followup.send(embed=embed)
 
 SECLUDE_INVITE_URL = "https://discord.com/invite/KFcpDGtckz"
-# Matte near-black. No blurple or other bright accent.
-SECLUDE_EMBED_COLOR = discord.Color.from_rgb(26, 26, 26)
+# Matte concrete gray. Near-black disappears on Discord dark mode.
+SECLUDE_EMBED_COLOR = discord.Color.from_rgb(110, 110, 110)
+SECLUDE_DIVIDER = "─" * 8
 
 def build_seclude_embed() -> discord.Embed:
-    """Static Seclude card. Copy stays exact; the invite is a link, not a ping."""
-    embed = discord.Embed(
-        title="Seclude",
-        color=SECLUDE_EMBED_COLOR,
-    )
-    embed.add_field(
-        name="The Visuals",
-        value=(
+    """Static Seclude card. Copy stays exact. Enter is a button, not body text."""
+    sections = (
+        (
+            "The Visuals",
             "Darkwear, tech-brutalism, and matte greys/blacks visually mirror the feeling "
             "of isolation and stepping back from a loud, overwhelming world. It feels like "
-            "a quiet, reinforced concrete bunker away from mainstream noise."
+            "a quiet, reinforced concrete bunker away from mainstream noise.",
         ),
-        inline=False,
-    )
-    embed.add_field(
-        name="The Purpose",
-        value=(
+        (
+            "The Purpose",
             "Instead of letting that isolation turn into stagnation, the Japanese philosophy "
             "of Kaizen—focusing on tiny, disciplined, 1% daily improvements—gives members "
-            "a concrete, stoic framework to rebuild and sharpen themselves quietly."
+            "a concrete, stoic framework to rebuild and sharpen themselves quietly.",
         ),
-        inline=False,
-    )
-    embed.add_field(
-        name="The Outlet",
-        value=(
+        (
+            "The Outlet",
             "Having a dedicated space for dense geopolitical and retrospective discussions "
             "naturally attracts people who feel alienated by surface-level small talk elsewhere, "
-            "giving their exulansis an actual, grounded place to land."
+            "giving their exulansis an actual, grounded place to land.",
         ),
-        inline=False,
     )
-    embed.add_field(
-        name="Enter",
-        value=f"[{SECLUDE_INVITE_URL}]({SECLUDE_INVITE_URL})",
-        inline=False,
+    description = f"\n\n{SECLUDE_DIVIDER}\n\n".join(
+        f"**{label}**\n{paragraph}" for label, paragraph in sections
+    )
+    embed = discord.Embed(
+        title="SECLUDE",
+        url=SECLUDE_INVITE_URL,
+        description=description,
+        color=SECLUDE_EMBED_COLOR,
     )
     embed.set_footer(
         text=(
@@ -8027,10 +8021,23 @@ def build_seclude_embed() -> discord.Embed:
     )
     return embed
 
+def build_seclude_view() -> ui.View:
+    """Enter is a link button. Discord does not render markdown links in embeds."""
+    view = ui.View(timeout=None)
+    view.add_item(
+        ui.Button(
+            label="Enter",
+            style=discord.ButtonStyle.link,
+            url=SECLUDE_INVITE_URL,
+        )
+    )
+    return view
+
 @bot.tree.command(name="seclude", description="What Seclude is")
 async def seclude(interaction: discord.Interaction):
     await interaction.response.send_message(
         embed=build_seclude_embed(),
+        view=build_seclude_view(),
         allowed_mentions=discord.AllowedMentions.none(),
     )
 

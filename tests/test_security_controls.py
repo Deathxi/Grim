@@ -10,6 +10,8 @@ from unittest.mock import AsyncMock, patch
 from pathlib import Path
 from types import SimpleNamespace
 
+import discord
+
 import main
 
 
@@ -1858,31 +1860,51 @@ class SecurityControlsTests(unittest.TestCase):
             "think-tank or a modern dojo."
         )
         invite = "https://discord.com/invite/KFcpDGtckz"
+        divider = "\u2500" * 8
 
         embed = main.build_seclude_embed()
-        fields = {field.name: field for field in embed.fields}
+        description = embed.description or ""
+        expected = f"\n\n{divider}\n\n".join((
+            f"**The Visuals**\n{visuals}",
+            f"**The Purpose**\n{purpose}",
+            f"**The Outlet**\n{outlet}",
+        ))
 
-        self.assertEqual(embed.title, "Seclude")
-        self.assertEqual(embed.color.value, 0x1A1A1A)
+        self.assertEqual(embed.title, "SECLUDE")
+        self.assertEqual(embed.url, invite)
+        self.assertEqual(embed.color.value, 0x6E6E6E)
+        self.assertNotEqual(embed.color.value, 0x1A1A1A)
+        self.assertNotEqual(embed.color.value, 0x121212)
         self.assertNotEqual(embed.color.value, 0x5865F2)
-        self.assertEqual(
-            [field.name for field in embed.fields],
-            ["The Visuals", "The Purpose", "The Outlet", "Enter"],
-        )
-        self.assertTrue(all(field.inline is False for field in embed.fields))
-        self.assertEqual(fields["The Visuals"].value, visuals)
-        self.assertEqual(fields["The Purpose"].value, purpose)
-        self.assertIn("Kaizen\u2014focusing", purpose)
-        self.assertIn("improvements\u2014gives", purpose)
-        self.assertEqual(fields["The Outlet"].value, outlet)
-        self.assertEqual(fields["Enter"].value, f"[{invite}]({invite})")
-        self.assertNotIn("<@", fields["Enter"].value)
+        self.assertEqual(len(embed.fields), 0)
+        self.assertEqual(main.SECLUDE_DIVIDER, divider)
+        self.assertEqual(description, expected)
+        self.assertIn("Kaizen\u2014focusing", description)
+        self.assertIn("improvements\u2014gives", description)
+        self.assertIn("exulansis", description)
+        self.assertNotIn(closing, description)
+        self.assertNotIn(invite, description)
+        self.assertNotIn(invite, embed.title)
+        self.assertNotIn(invite, embed.footer.text)
+        self.assertNotIn("](", description)
+        self.assertNotIn("Enter", description)
         self.assertEqual(embed.footer.text, closing)
-        self.assertLessEqual(len(embed.description or ""), 4096)
-        for field in embed.fields:
-            self.assertLessEqual(len(field.name), 256)
-            self.assertLessEqual(len(field.value), 1024)
+        self.assertLessEqual(len(embed.title), 256)
+        self.assertLessEqual(len(description), 4096)
         self.assertLessEqual(len(embed.footer.text), 2048)
+        self.assertLessEqual(
+            len(embed.title) + len(description) + len(embed.footer.text),
+            6000,
+        )
+
+        view = main.build_seclude_view()
+        buttons = [child for child in view.children if isinstance(child, discord.ui.Button)]
+        self.assertEqual(len(buttons), 1)
+        self.assertEqual(buttons[0].label, "Enter")
+        self.assertEqual(buttons[0].url, invite)
+        self.assertEqual(buttons[0].style, discord.ButtonStyle.link)
+        self.assertLessEqual(len(buttons[0].label), 80)
+        self.assertLessEqual(len(buttons[0].url), 512)
 
         async def run():
             event = slash_interaction()
@@ -1893,7 +1915,18 @@ class SecurityControlsTests(unittest.TestCase):
             args, kwargs = event.response.sent[0]
             self.assertEqual(args, ())
             self.assertFalse(kwargs.get("ephemeral", False))
-            self.assertEqual(kwargs["embed"].title, "Seclude")
+            self.assertIsNone(kwargs.get("content"))
+            sent = kwargs["embed"]
+            self.assertEqual(sent.title, "SECLUDE")
+            self.assertEqual(sent.url, invite)
+            self.assertEqual(sent.description, expected)
+            self.assertEqual(len(sent.fields), 0)
+            self.assertNotIn(invite, sent.description)
+            sent_buttons = [
+                child for child in kwargs["view"].children
+                if isinstance(child, discord.ui.Button)
+            ]
+            self.assertEqual([(button.label, button.url) for button in sent_buttons], [("Enter", invite)])
             self.assertEqual(kwargs["allowed_mentions"].to_dict(), {"parse": []})
             self.assertFalse(kwargs["allowed_mentions"].everyone)
             self.assertFalse(kwargs["allowed_mentions"].users)
