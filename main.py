@@ -7537,11 +7537,17 @@ async def server_info(interaction: discord.Interaction):
     await interaction.followup.send(embed=embed)
 
 SECLUDE_INVITE_URL = "https://discord.com/invite/KFcpDGtckz"
-# Matte concrete gray. Near-black disappears on Discord dark mode.
-SECLUDE_EMBED_COLOR = discord.Color.from_rgb(110, 110, 110)
-SECLUDE_DIVIDER = "─" * 8
+# Same glyph + blackletter as /server on Seclude. Never SECLUDE or spaced S E C L U D E.
+SECLUDE_TITLE = "𖦏 𝕾𝖊𝖈𝖑𝖚𝖉𝖊"
+# Same sidebar as /server. Mid-grays plus embed.url turn the title into a Discord-blue link.
+SECLUDE_EMBED_COLOR = discord.Color.from_rgb(27, 26, 30)
+SECLUDE_CLOSER = (
+    "It feels less like a standard chat room and more like an underground "
+    "think-tank or a modern dojo."
+)
 
-def build_seclude_embed() -> discord.Embed:
+
+def build_seclude_embed(interaction: discord.Interaction | None = None) -> discord.Embed:
     """Static Seclude card. Copy stays exact. Enter is a button, not body text."""
     sections = (
         (
@@ -7563,21 +7569,29 @@ def build_seclude_embed() -> discord.Embed:
             "giving their exulansis an actual, grounded place to land.",
         ),
     )
-    description = f"\n\n{SECLUDE_DIVIDER}\n\n".join(
+    description = "\n\n".join(
         f"**{label}**\n{paragraph}" for label, paragraph in sections
     )
+    description = f"{description}\n\n*{SECLUDE_CLOSER}*"
     embed = discord.Embed(
-        title="SECLUDE",
-        url=SECLUDE_INVITE_URL,
+        title=SECLUDE_TITLE,
         description=description,
         color=SECLUDE_EMBED_COLOR,
     )
-    embed.set_footer(
-        text=(
-            "It feels less like a standard chat room and more like an underground "
-            "think-tank or a modern dojo."
-        )
-    )
+    guild = getattr(interaction, "guild", None)
+    icon = getattr(guild, "icon", None)
+    thumbnail = getattr(icon, "url", None)
+    client = getattr(interaction, "client", None)
+    grim_user = getattr(client, "user", None)
+    grim_avatar = getattr(getattr(grim_user, "display_avatar", None), "url", None)
+    if not thumbnail:
+        thumbnail = grim_avatar
+    if thumbnail:
+        embed.set_thumbnail(url=thumbnail)
+    if grim_avatar:
+        embed.set_footer(text=xsi_footer(), icon_url=grim_avatar)
+    else:
+        embed.set_footer(text=xsi_footer())
     return embed
 
 def build_seclude_view() -> ui.View:
@@ -7595,7 +7609,7 @@ def build_seclude_view() -> ui.View:
 @bot.tree.command(name="seclude", description="What Seclude is")
 async def seclude(interaction: discord.Interaction):
     await interaction.response.send_message(
-        embed=build_seclude_embed(),
+        embed=build_seclude_embed(interaction),
         view=build_seclude_view(),
         allowed_mentions=discord.AllowedMentions.none(),
     )

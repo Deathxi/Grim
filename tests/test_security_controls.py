@@ -1908,35 +1908,59 @@ class SecurityControlsTests(unittest.TestCase):
             "think-tank or a modern dojo."
         )
         invite = "https://discord.com/invite/KFcpDGtckz"
-        divider = "\u2500" * 8
-
-        embed = main.build_seclude_embed()
-        description = embed.description or ""
-        expected = f"\n\n{divider}\n\n".join((
+        guild_icon = "https://cdn.example/guild.png"
+        grim_avatar = "https://cdn.example/grim.png"
+        expected = "\n\n".join((
             f"**The Visuals**\n{visuals}",
             f"**The Purpose**\n{purpose}",
             f"**The Outlet**\n{outlet}",
+            f"*{closing}*",
         ))
 
-        self.assertEqual(embed.title, "SECLUDE")
-        self.assertEqual(embed.url, invite)
-        self.assertEqual(embed.color.value, 0x6E6E6E)
+        event = slash_interaction()
+        event.guild.icon = SimpleNamespace(url=guild_icon)
+        event.client = SimpleNamespace(
+            user=SimpleNamespace(display_avatar=SimpleNamespace(url=grim_avatar))
+        )
+        embed = main.build_seclude_embed(event)
+        description = embed.description or ""
+        payload = embed.to_dict()
+
+        self.assertEqual(embed.title, "𖦏 𝕾𝖊𝖈𝖑𝖚𝖉𝖊")
+        self.assertEqual(embed.title, main.SECLUDE_TITLE)
+        self.assertNotEqual(embed.title, "SECLUDE")
+        self.assertNotEqual(embed.title, "S E C L U D E")
+        self.assertNotIn("SECLUDE", embed.title)
+        self.assertNotIn("S E C L U D E", embed.title)
+        self.assertIsNone(embed.url)
+        self.assertNotIn("url", payload)
+        self.assertEqual(embed.color.value, discord.Color.from_rgb(27, 26, 30).value)
+        self.assertEqual(embed.color.value, 0x1B1A1E)
+        self.assertNotEqual(embed.color.value, 0x6E6E6E)
         self.assertNotEqual(embed.color.value, 0x1A1A1A)
         self.assertNotEqual(embed.color.value, 0x121212)
         self.assertNotEqual(embed.color.value, 0x5865F2)
         self.assertEqual(len(embed.fields), 0)
-        self.assertEqual(main.SECLUDE_DIVIDER, divider)
+        self.assertFalse(hasattr(main, "SECLUDE_DIVIDER"))
+        self.assertNotIn("\u2500", description)
+        self.assertNotIn("----------", description)
         self.assertEqual(description, expected)
+        self.assertTrue(description.endswith(f"*{closing}*"))
         self.assertIn("Kaizen\u2014focusing", description)
         self.assertIn("improvements\u2014gives", description)
         self.assertIn("exulansis", description)
-        self.assertNotIn(closing, description)
+        self.assertEqual(description.count(closing), 1)
         self.assertNotIn(invite, description)
         self.assertNotIn(invite, embed.title)
         self.assertNotIn(invite, embed.footer.text)
         self.assertNotIn("](", description)
         self.assertNotIn("Enter", description)
-        self.assertEqual(embed.footer.text, closing)
+        self.assertEqual(embed.footer.text, main.xsi_footer())
+        self.assertTrue(embed.footer.text.startswith("Powered by XSI"))
+        self.assertIn(main.VERSION, embed.footer.text)
+        self.assertNotIn(closing, embed.footer.text)
+        self.assertEqual(embed.thumbnail.url, guild_icon)
+        self.assertEqual(embed.footer.icon_url, grim_avatar)
         self.assertLessEqual(len(embed.title), 256)
         self.assertLessEqual(len(description), 4096)
         self.assertLessEqual(len(embed.footer.text), 2048)
@@ -1955,7 +1979,6 @@ class SecurityControlsTests(unittest.TestCase):
         self.assertLessEqual(len(buttons[0].url), 512)
 
         async def run():
-            event = slash_interaction()
             await main.seclude.callback(event)
             self.assertEqual(event.response.deferred, [])
             self.assertEqual(event.followup.sent, [])
@@ -1965,10 +1988,16 @@ class SecurityControlsTests(unittest.TestCase):
             self.assertFalse(kwargs.get("ephemeral", False))
             self.assertIsNone(kwargs.get("content"))
             sent = kwargs["embed"]
-            self.assertEqual(sent.title, "SECLUDE")
-            self.assertEqual(sent.url, invite)
+            self.assertEqual(sent.title, "𖦏 𝕾𝖊𝖈𝖑𝖚𝖉𝖊")
+            self.assertEqual(sent.title, main.SECLUDE_TITLE)
+            self.assertIsNone(sent.url)
+            self.assertNotIn("url", sent.to_dict())
             self.assertEqual(sent.description, expected)
             self.assertEqual(len(sent.fields), 0)
+            self.assertEqual(sent.color.value, 0x1B1A1E)
+            self.assertEqual(sent.thumbnail.url, guild_icon)
+            self.assertEqual(sent.footer.text, main.xsi_footer())
+            self.assertEqual(sent.footer.icon_url, grim_avatar)
             self.assertNotIn(invite, sent.description)
             sent_buttons = [
                 child for child in kwargs["view"].children
@@ -1988,6 +2017,21 @@ class SecurityControlsTests(unittest.TestCase):
         self.assertIn("`/seclude`", help_embed.description)
         help_fields = {field.name: field.value for field in help_embed.fields}
         self.assertEqual(help_fields["/server"], "Server status")
+
+    def test_seclude_thumbnail_falls_back_to_grim_avatar(self):
+        grim_avatar = "https://cdn.example/grim.png"
+        grim = SimpleNamespace(
+            user=SimpleNamespace(display_avatar=SimpleNamespace(url=grim_avatar))
+        )
+        no_icon = SimpleNamespace(guild=SimpleNamespace(icon=None), client=grim)
+        dm = SimpleNamespace(guild=None, client=grim)
+
+        for event in (no_icon, dm):
+            embed = main.build_seclude_embed(event)
+            self.assertEqual(embed.title, "𖦏 𝕾𝖊𝖈𝖑𝖚𝖉𝖊")
+            self.assertEqual(embed.thumbnail.url, grim_avatar)
+            self.assertEqual(embed.footer.icon_url, grim_avatar)
+            self.assertEqual(embed.footer.text, main.xsi_footer())
 
     def test_server_dossier_refreshes_a_missing_description(self):
         class FakeBot:
