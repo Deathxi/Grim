@@ -30,6 +30,51 @@ class FakeContext:
         self.messages.append(message if message is not None else kwargs)
 
 
+class SlashResponse:
+    def __init__(self):
+        self.sent = []
+        self.deferred = []
+
+    def is_done(self):
+        return bool(self.sent or self.deferred)
+
+    async def send_message(self, *args, **kwargs):
+        self.sent.append((args, kwargs))
+
+    async def defer(self, **kwargs):
+        self.deferred.append(kwargs)
+
+
+class SlashFollowup:
+    def __init__(self):
+        self.sent = []
+
+    async def send(self, *args, **kwargs):
+        self.sent.append((args, kwargs))
+
+
+def slash_interaction(
+    *,
+    user_id=10,
+    owner_id=1,
+    administrator=False,
+    manage_channels=False,
+):
+    permissions = SimpleNamespace(
+        administrator=administrator,
+        manage_channels=manage_channels,
+        manage_messages=False,
+    )
+    return SimpleNamespace(
+        guild_id=50,
+        channel_id=77,
+        guild=SimpleNamespace(owner_id=owner_id, id=50),
+        user=SimpleNamespace(id=user_id, guild_permissions=permissions),
+        response=SlashResponse(),
+        followup=SlashFollowup(),
+    )
+
+
 def interaction(
     *,
     user_id=10,
@@ -510,6 +555,141 @@ class SecurityControlsTests(unittest.TestCase):
         self.assertEqual(number_parameter.min_value, 1)
         self.assertEqual(number_parameter.max_value, 100)
         self.assertTrue(clear_command.default_permissions.manage_messages)
+
+    def test_help_names_admin_commands_and_leaves_language_open(self):
+        ctx = FakeContext()
+        asyncio.run(main.help_grim.callback(ctx))
+        embed = ctx.messages[0]["embed"]
+        for name in (
+            "/grim_updates",
+            "/grim_auditor",
+            "/grim_remember",
+            "/grim_memories",
+            "/grim_forget",
+        ):
+            self.assertIn(name, embed.description)
+        self.assertIn("Server administrators", embed.description)
+        fields = {field.name: field.value for field in embed.fields}
+        self.assertEqual(fields["/grim_language"], "Language preference")
+        self.assertEqual(fields["/grim_translate"], "Translate text")
+        self.assertNotIn("admin", fields["/grim_language"].lower())
+        self.assertNotIn("admin", fields["/grim_translate"].lower())
+
+    def test_admin_slash_commands_use_the_say_gate(self):
+        admin_commands = (
+            main.grim_updates,
+            main.grim_auditor,
+            main.grim_forget,
+            main.grim_memories_cmd,
+            main.grim_remember,
+        )
+        for command in admin_commands:
+            self.assertTrue(command.guild_only, command.name)
+            self.assertTrue(command.default_permissions.administrator, command.name)
+            self.assertIn("admin only", command.description)
+
+        for command in (main.grim_language, main.grim_translate):
+            permissions = command.default_permissions
+            self.assertTrue(permissions is None or not permissions.administrator, command.name)
+            self.assertNotIn("admin only", command.description)
+
+    def test_non_admin_is_refused_and_state_stays_put(self):
+        async def run():
+            for kwargs in (
+                {},
+                {"manage_channels": True},
+                {"user_id": 1, "owner_id": 1},
+            ):
+                with patch.dict(main.updates_channels, {"50": {"channel_id": "9"}}, clear=True), patch.dict(
+                    main.grim_memories, {"50": ["keep this"]}, clear=True
+                ), patch.object(main, "save_updates_data") as save_updates, patch.object(
+                    main, "save_grim_memories"
+                ) as save_memories, patch.object(
+                    main.reply_auditor, "saved_events", side_effect=AssertionError("auditor ran")
+                ):
+                    updates = slash_interaction(**kwargs)
+                    await main.grim_updates.callback(updates)
+                    remember = slash_interaction(**kwargs)
+                    await main.grim_remember.callback(remember, "a new fact")
+                    memories = slash_interaction(**kwargs)
+                    await main.grim_memories_cmd.callback(memories)
+                    forget = slash_interaction(**kwargs)
+                    await main.grim_forget.callback(forget, 1)
+                    auditor = slash_interaction(**kwargs)
+                    await main.grim_auditor.callback(auditor)
+
+                    for event, command in (
+                        (updates, "grim_updates"),
+                        (remember, "grim_remember"),
+                        (memories, "grim_memories"),
+                        (forget, "grim_forget"),
+                        (auditor, "grim_auditor"),
+                    ):
+                        text = event.response.sent[0][0][0]
+                        self.assertEqual(text, f"Only server administrators can use /{command}.")
+                        self.assertTrue(event.response.sent[0][1]["ephemeral"])
+                        self.assertEqual(event.response.deferred, [])
+                        self.assertEqual(event.followup.sent, [])
+                    save_updates.assert_not_called()
+                    save_memories.assert_not_called()
+                    self.assertEqual(main.updates_channels, {"50": {"channel_id": "9"}})
+                    self.assertEqual(main.grim_memories, {"50": ["keep this"]})
+                    self.assertNotIn("keep this", updates.response.sent[0][0][0])
+                    self.assertNotIn("keep this", memories.response.sent[0][0][0])
+
+        asyncio.run(run())
+
+    def test_admin_can_still_run_the_gated_commands(self):
+        async def run():
+            with patch.dict(main.updates_channels, {}, clear=True), patch.dict(
+                main.grim_memories, {}, clear=True
+            ), patch.object(main, "save_updates_data") as save_updates, patch.object(
+                main, "save_updates_sha"
+            ), patch.object(main, "save_grim_memories") as save_memories, patch.object(
+                main, "_load_pending_outage_reports", return_value=[]
+            ), patch.object(
+                main.reply_auditor,
+                "saved_events",
+                return_value=[{"at": 1, "event": "timeout", "kind": "reply", "duration": 45}],
+            ):
+                updates = slash_interaction(administrator=True)
+                await main.grim_updates.callback(updates)
+                remember = slash_interaction(administrator=True)
+                await main.grim_remember.callback(remember, "the kettle is loud")
+                memories = slash_interaction(administrator=True)
+                await main.grim_memories_cmd.callback(memories)
+                forget = slash_interaction(administrator=True)
+                await main.grim_forget.callback(forget, 1)
+                auditor = slash_interaction(administrator=True)
+                await main.grim_auditor.callback(auditor)
+
+                self.assertEqual(main.updates_channels["50"], {"channel_id": "77"})
+                save_updates.assert_called()
+                self.assertEqual(updates.followup.sent[0][1]["embed"].title, "Grim Operations Log Enabled")
+                self.assertEqual(remember.response.sent[0][1]["embed"].description, "got it. i'll remember that.")
+                self.assertIn("the kettle is loud", memories.response.sent[0][1]["embed"].description)
+                self.assertEqual(forget.response.sent[0][1]["embed"].description, "forgotten.")
+                self.assertEqual(main.grim_memories["50"], [])
+                save_memories.assert_called()
+                self.assertEqual(auditor.response.sent[0][1]["embed"].title, "Auditor Log")
+                self.assertIn("timeout (reply)", auditor.response.sent[0][1]["embed"].description)
+                self.assertTrue(auditor.response.sent[0][1]["ephemeral"])
+
+        asyncio.run(run())
+
+    def test_language_and_translate_stay_open_to_members(self):
+        async def run():
+            event = slash_interaction()
+            await main.grim_language.callback(event, None)
+            self.assertIn("Auto", event.response.sent[0][0][0])
+            self.assertNotIn("Only server administrators", event.response.sent[0][0][0])
+
+            event = slash_interaction(manage_channels=True)
+            await main.grim_translate.callback(event, "spanish", "   ")
+            self.assertIn("give me some text to translate", event.response.sent[0][0][0])
+            self.assertNotIn("Only server administrators", event.response.sent[0][0][0])
+
+        asyncio.run(run())
 
     def test_quote_card_uses_regular_24px_text_and_png_output(self):
         created = main.datetime(2026, 8, 27, tzinfo=main.timezone.utc)

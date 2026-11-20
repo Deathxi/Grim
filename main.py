@@ -10174,9 +10174,14 @@ async def livetweet(interaction: discord.Interaction, username: str):
         print(f"Error setting up livetweet: {e}")
         await interaction.followup.send("Error: Could not set up tracking. The X API may be rate limited or the username is invalid.")
 
-@bot.tree.command(name="grim_updates", description="Toggle Grim operations logs in this channel")
+@bot.tree.command(
+    name="grim_updates",
+    description="Toggle Grim operations logs in this channel (admin only)",
+)
+@discord.app_commands.default_permissions(administrator=True)
+@discord.app_commands.guild_only()
 async def grim_updates(interaction: discord.Interaction):
-    if not await require_permission(interaction, "manage_channels", "grim_updates_manage"):
+    if not await require_administrator(interaction, "grim_updates"):
         return
     await interaction.response.defer()
     guild_id = str(interaction.guild_id)
@@ -10835,7 +10840,10 @@ async def help_grim(ctx):
             "`/zork` — Zork I, II, or III on a private panel. Starts on TERMINAL\n"
             "`/zork-ui` — switch your panel between HUD and TERMINAL\n"
             "`/zork-map` — rooms you have walked\n"
-            "`/trivia` — ten private questions on a subject, scored out of 10"
+            "`/trivia` — ten private questions on a subject, scored out of 10\n"
+            "Server administrators: `/grim_updates`, `/grim_auditor`, "
+            "`/grim_remember`, `/grim_memories`, `/grim_forget`.\n"
+            "`/grim_language` sets your reply language. `/grim_translate` translates text."
         ),
         color=discord.Color.from_rgb(18, 18, 18)
     )
@@ -10933,10 +10941,15 @@ async def grim_github_test(interaction: discord.Interaction):
         record_security_event(interaction, "github_diagnostic", "failed", {"reason": "request_failed"})
         await interaction.followup.send("❌ GitHub diagnostic request failed.", ephemeral=True)
 
-@bot.tree.command(name="grim_remember", description="Give Grim a permanent memory about this server")
+@bot.tree.command(
+    name="grim_remember",
+    description="Give Grim a permanent memory about this server (admin only)",
+)
+@discord.app_commands.default_permissions(administrator=True)
+@discord.app_commands.guild_only()
 @discord.app_commands.describe(memory="The fact or detail you want Grim to remember")
 async def grim_remember(interaction: discord.Interaction, memory: str):
-    if not await require_permission(interaction, "administrator", "memory_add", administrator=True):
+    if not await require_administrator(interaction, "grim_remember"):
         return
     guild_id = str(interaction.guild_id)
     memory = memory.strip()
@@ -10961,9 +10974,14 @@ async def grim_remember(interaction: discord.Interaction, memory: str):
     embed.set_footer(text=f"Grim · {VERSION}")
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
-@bot.tree.command(name="grim_memories", description="View everything Grim has been told to remember about this server")
+@bot.tree.command(
+    name="grim_memories",
+    description="View everything Grim has been told to remember about this server (admin only)",
+)
+@discord.app_commands.default_permissions(administrator=True)
+@discord.app_commands.guild_only()
 async def grim_memories_cmd(interaction: discord.Interaction):
-    if not await require_permission(interaction, "administrator", "memory_list", administrator=True):
+    if not await require_administrator(interaction, "grim_memories"):
         return
     guild_id = str(interaction.guild_id)
     memories = grim_memories.get(guild_id, [])
@@ -10979,10 +10997,15 @@ async def grim_memories_cmd(interaction: discord.Interaction):
         embed.set_footer(text=f"{len(memories)} memor{'y' if len(memories) == 1 else 'ies'} · Grim · {VERSION}")
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
-@bot.tree.command(name="grim_forget", description="Remove a memory Grim has about this server")
+@bot.tree.command(
+    name="grim_forget",
+    description="Remove a memory Grim has about this server (admin only)",
+)
+@discord.app_commands.default_permissions(administrator=True)
+@discord.app_commands.guild_only()
 @discord.app_commands.describe(number="The memory number from /grim_memories")
 async def grim_forget(interaction: discord.Interaction, number: int):
-    if not await require_permission(interaction, "administrator", "memory_remove", administrator=True):
+    if not await require_administrator(interaction, "grim_forget"):
         return
     guild_id = str(interaction.guild_id)
     memories = grim_memories.get(guild_id, [])
@@ -11852,7 +11875,7 @@ async def grim_opsec(interaction: discord.Interaction):
 @discord.app_commands.guild_only()
 @discord.app_commands.default_permissions(administrator=True)
 async def grim_auditor(interaction: discord.Interaction):
-    if not await require_opsec(interaction, "auditor_view"):
+    if not await require_administrator(interaction, "grim_auditor"):
         return
     embed = discord.Embed(
         title="Auditor Log",

@@ -10,12 +10,16 @@ contain credentials or recovery keys.
 | --- | --- |
 | Regular member | Use normal conversation, language, reminder, and public utility commands. |
 | Moderator with the relevant Discord permission | Manage feeds, welcome messages, live updates, member history, departure logs, and voice actions when Discord grants the required permission. |
-| Server owner or Discord administrator | All moderator actions plus moderation word lists, server memories, and the GitHub diagnostic. |
+| Server owner or Discord administrator | All moderator actions plus moderation word lists, server memories (`/grim_remember`, `/grim_memories`, `/grim_forget`), `/grim_updates`, `/grim_auditor`, and the GitHub diagnostic. |
 | Creator | Receives creator-aware conversational context, but does **not** bypass Discord permissions, platform rules, safety, or privacy boundaries. |
 
 Management commands must be run inside a server. They fail closed in DMs and
 record denied attempts in the audit database without recording message content.
 Never elevate someone solely because a display name resembles the creator.
+
+`/grim_updates`, `/grim_auditor`, `/grim_remember`, `/grim_memories`, and
+`/grim_forget` use the same administrator gate as `/say` and `/announce`.
+`/grim_language` and `/grim_translate` stay available to members.
 
 ## 2. Routine server setup
 
@@ -32,10 +36,11 @@ Never elevate someone solely because a display name resembles the creator.
    message-language matching.
 5. Test a normal member path and an administrator path after setup. Do not
    test with secrets or private conversation text.
-6. Configure `/grim_updates` in the operations channel to receive deployment
-   patch notes and after-reports for unexpected process or Discord connection
-   outages. Normal update restarts are excluded. Outage times are approximate
-   because an abrupt crash may occur between 30-second heartbeats.
+6. A server administrator configures `/grim_updates` in the operations channel
+   to receive deployment patch notes and after-reports for unexpected process
+   or Discord connection outages. Normal update restarts are excluded. Outage
+   times are approximate because an abrupt crash may occur between 30-second
+   heartbeats.
    Process outages require a vanished online heartbeat on the same source
    revision; a revision change is treated as a normal code deployment.
 
