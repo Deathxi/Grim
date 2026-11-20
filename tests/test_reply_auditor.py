@@ -506,7 +506,7 @@ class AdminCommandTests(unittest.IsolatedAsyncioTestCase):
     async def test_auditor_command_is_admin_only(self):
         response = SimpleNamespace(send_message=AsyncMock())
         interaction = SimpleNamespace(response=response)
-        with patch.object(main, "require_permission", AsyncMock(return_value=False)):
+        with patch.object(main, "require_administrator", AsyncMock(return_value=False)):
             await main.grim_auditor.callback(interaction)
         response.send_message.assert_not_awaited()
 
@@ -516,7 +516,7 @@ class AdminCommandTests(unittest.IsolatedAsyncioTestCase):
         response = SimpleNamespace(send_message=AsyncMock())
         interaction = SimpleNamespace(response=response, guild_id=1, channel_id=55)
         with patch.object(main, "reply_auditor", auditor), patch.object(
-            main, "require_permission", AsyncMock(return_value=True)
+            main, "require_administrator", AsyncMock(return_value=True)
         ), patch.object(main, "_health_security_rows", return_value=[]), patch.dict(
             main.updates_channels, {"1": {"channel_id": "55"}}, clear=True
         ):
