@@ -65,8 +65,6 @@ echo "  (Contents: Read on Deathxi/Grim for /grim_updates patch notes)."
 echo "  Do NOT use a token that can push source, and never reuse the backup token."
 read -r -s -p "  GITHUB_PERSONAL_ACCESS_TOKEN (optional): " GITHUB_PAT
 echo ""
-read -r -s -p "  OPENSEA_API_KEY (optional, press Enter to skip): " OPENSEA_KEY
-echo ""
 echo "  FOUNDER_DISCORD_ID is optional. It is the Discord user ID that receives"
 echo "  private deleted-message DMs. Grim does not post those reports in a channel."
 read -r -s -p "  FOUNDER_DISCORD_ID (optional): " FOUNDER_DISCORD_ID
@@ -82,10 +80,6 @@ if [ -n "${GITHUB_PAT}" ]; then
     printf 'GITHUB_PERSONAL_ACCESS_TOKEN=%s\n' "${GITHUB_PAT}" >> /root/grim/.env
 fi
 
-if [ -n "${OPENSEA_KEY}" ]; then
-    printf 'OPENSEA_API_KEY=%s\n' "${OPENSEA_KEY}" >> /root/grim/.env
-fi
-
 if [ -n "${FOUNDER_DISCORD_ID}" ]; then
     if [[ "${FOUNDER_DISCORD_ID}" =~ ^[0-9]{17,20}$ ]]; then
         printf 'FOUNDER_DISCORD_ID=%s\n' "${FOUNDER_DISCORD_ID}" >> /root/grim/.env
@@ -95,7 +89,7 @@ if [ -n "${FOUNDER_DISCORD_ID}" ]; then
 fi
 
 chmod 600 /root/grim/.env
-unset DISCORD_TOKEN XAI_API_KEY X_BEARER_TOKEN GITHUB_PAT OPENSEA_KEY FOUNDER_DISCORD_ID
+unset DISCORD_TOKEN XAI_API_KEY X_BEARER_TOKEN GITHUB_PAT FOUNDER_DISCORD_ID
 echo "  Secrets saved to /root/grim/.env (mode 0600)"
 
 # ── Weekly encrypted backup configuration ───────────────

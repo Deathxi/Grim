@@ -158,7 +158,7 @@ class ClassifyTests(unittest.TestCase):
             ("ai_web_research", "rate_limited", 5, 42.0),
             ("external_ai", "rate_limited", 4, 43.0),
             ("image_strip", "failed", 2, 50.0),
-            ("nftwatch_create", "failed", 1, 60.0),
+            ("ghostwrite", "failed", 1, 60.0),
             ("say", "posted", 7, 70.0),
             ("say", "previewed", 7, 71.0),
             ("bad row",),
