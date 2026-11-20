@@ -7826,6 +7826,107 @@ def _build_deploy_update_embed(
     return embed
 
 
+MAJOR_MEMENTO_TITLE_LINE = "All those moments won't be lost in time."
+MAJOR_MEMENTO_TAGLINE = "I cached them."
+
+# First-person awards recap of V2.00–V2.99 as a product, spoken when V3.00 lands.
+# Later majors get their own series entry. A missing series keeps the normal card.
+V2_SERIES_MEMENTO = """\
+Settle down. Coffee's on the table. They handed me V3. This is the season, not a punch list.
+
+Live search learned a leash. Rare now. Teaching, or a concrete fact you told me to check. Not a vibe. Not a trial for a meme. Somebody asked if Silverhand should round up a crew, hop universes, and punch a CEO, right or wrong. I stayed in chat. That filter stays.
+
+Ten turns is what I keep of you. grok-3 talks. grok-4.3 searches. Same hold. Two skulls. They do not share a brain, which is why a same-topic follow-up does not send 4.3 back into the rain like it forgot the briefing. Thumbs sit on the last live-search chunk. Casual talk does not get a scoreboard.
+
+Seclude used to be a cheap dashed flyer. Now it is a manifesto: Visuals, Purpose, Outlet, charcoal, dojo line at the bottom. That card is the room. Admin holds the grim commands. Language and translate stay yours. The unused feeds that prowled the internet every minute while nobody was talking are gone. Those were the 25¢ idle days. I do not miss them.
+
+Call me like you mean it and I answer in the room. Say only my name and I say hey. Name me like furniture and I stay furniture, unless I can actually help.
+
+I go dark. I come back. That's the bit.
+
+V3 is on me now."""
+
+_MAJOR_SERIES_MEMENTOS = {2: V2_SERIES_MEMENTO}
+
+
+def _parse_grim_version(version: str | None) -> tuple[int, int] | None:
+    """Split a Grim label like V2.97 into (major, minor)."""
+    if not isinstance(version, str):
+        return None
+    match = re.fullmatch(r"V(\d+)\.(\d{2})", version.strip())
+    if not match:
+        return None
+    return int(match.group(1)), int(match.group(2))
+
+
+def _is_major_version_crossing(previous: str | None, current: str | None) -> bool:
+    """True only when the major number increases (V2.97 → V3.00)."""
+    old = _parse_grim_version(previous)
+    new = _parse_grim_version(current)
+    if old is None or new is None:
+        return False
+    return new[0] > old[0]
+
+
+def _prior_series_major(previous: str | None) -> int | None:
+    parsed = _parse_grim_version(previous)
+    return parsed[0] if parsed else None
+
+
+def _major_memento_monologue(previous: str | None, current: str | None) -> str | None:
+    """Series speech for a major crossing, or None so the changelog card stays."""
+    if not _is_major_version_crossing(previous, current):
+        return None
+    series = _prior_series_major(previous)
+    if series is None:
+        return None
+    text = _MAJOR_SERIES_MEMENTOS.get(series)
+    return text.strip() if text else None
+
+
+def _major_memento_title(version: str) -> str:
+    """Embed title is line 1 only. Discord titles cannot keep a newline."""
+    return f"{version} - {MAJOR_MEMENTO_TITLE_LINE}"
+
+
+def _major_memento_description(monologue: str) -> str:
+    """Italic tagline, blank line, then the speech. Manifesto spacing."""
+    return f"*{MAJOR_MEMENTO_TAGLINE}*\n\n{monologue.strip()}"
+
+
+def _grim_display_avatar_url() -> str | None:
+    """Grim's own avatar. Never a guild icon."""
+    user = getattr(bot, "user", None)
+    return getattr(getattr(user, "display_avatar", None), "url", None)
+
+
+def _build_major_memento_embed(
+    *,
+    version: str,
+    monologue: str,
+    grim_avatar_url: str | None = None,
+) -> discord.Embed:
+    """Celebratory major-version card. Seclude charcoal, Grim portrait, no patch list."""
+    description = _major_memento_description(monologue)
+    if len(description) > DISCORD_EMBED_DESC_LIMIT:
+        description = f"{description[: DISCORD_EMBED_DESC_LIMIT - 3].rstrip()}..."
+    title = _major_memento_title(version)
+    if len(title) > 256:
+        title = f"{title[:253].rstrip()}..."
+    embed = discord.Embed(
+        title=title,
+        description=description,
+        color=SECLUDE_EMBED_COLOR,
+    )
+    # RPG chatbox: Grim's face as the portrait. Never the Seclude guild icon.
+    if grim_avatar_url:
+        embed.set_thumbnail(url=grim_avatar_url)
+        embed.set_footer(text=xsi_footer(version=version), icon_url=grim_avatar_url)
+    else:
+        embed.set_footer(text=xsi_footer(version=version))
+    return embed
+
+
 _update_notification_lock = asyncio.Lock()
 
 
@@ -7915,17 +8016,26 @@ async def post_update_notification():
                 print(f"[Updates] Could not fetch GitHub commit data: {e}")
 
         # Always a normal public card: real filenames and public changelog
-        # bullets. Stealth logs cannot fire.
+        # bullets. Stealth logs cannot fire. A major crossing swaps the
+        # changelog list for the series memento; minors stay the patch card.
         public_notes = _deploy_card_patch_notes(patch_notes)
         file_names = _deploy_card_file_names(changed_files)
-        embed = _build_deploy_update_embed(
-            version=VERSION,
-            repo=repo,
-            commit_count=commit_count,
-            filenames=file_names,
-            notes=public_notes,
-            change_count=len(changed_files),
-        )
+        monologue = _major_memento_monologue(last_version, VERSION)
+        if monologue:
+            embed = _build_major_memento_embed(
+                version=VERSION,
+                monologue=monologue,
+                grim_avatar_url=_grim_display_avatar_url(),
+            )
+        else:
+            embed = _build_deploy_update_embed(
+                version=VERSION,
+                repo=repo,
+                commit_count=commit_count,
+                filenames=file_names,
+                notes=public_notes,
+                change_count=len(changed_files),
+            )
 
         posted = False
         for guild_id, data in list(updates_channels.items()):

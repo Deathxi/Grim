@@ -996,6 +996,7 @@ class TriviaTests(unittest.TestCase):
             "async def ghostwrite(",
             "def build_server_info_embed(",
             "def build_seclude_embed(",
+            "def _build_major_memento_embed(",
             "def _build_clear_log_embeds(",
             "def _build_outage_report_embed(",
             "async def grim_status(",
