@@ -5658,6 +5658,10 @@ class ContextualReply(NamedTuple):
     media_filename: str | None = None
     media_url: str | None = None
 
+# Prior turns resent with each reply so the model can follow the thread.
+# The chat log, digests, and per-user retrieval stay at their own limits.
+MODEL_REPLY_HISTORY_MESSAGES = 10
+
 def grim_chime_system(server_name: str) -> str:
     """System line for a proactive chime. Same reply rule as an @mention."""
     return (
@@ -5711,7 +5715,8 @@ async def generate_contextual_reply(message: discord.Message) -> ContextualReply
 
     chat_messages = []
     channel_label = f"#{getattr(channel, 'name', 'chat')}"
-    if len(db_rows) < 10:
+    current_message_id = str(getattr(message, "id", "") or "")
+    if len(db_rows) < MODEL_REPLY_HISTORY_MESSAGES:
         try:
             discord_history = []
             async for msg in channel.history(limit=50, before=message):
@@ -5738,7 +5743,9 @@ async def generate_contextual_reply(message: discord.Message) -> ContextualReply
         except Exception as e:
             print(f"[Grim] Discord history fallback error: {e}")
     else:
-        for author_name, content, is_grim_row, _message_id in db_rows:
+        for author_name, content, is_grim_row, row_message_id in db_rows:
+            if current_message_id and str(row_message_id or "") == current_message_id:
+                continue
             content = content.replace(f"<@{bot.user.id}>", "@Grim").replace(f"<@!{bot.user.id}>", "@Grim").strip()
             if not content:
                 continue
@@ -5749,6 +5756,8 @@ async def generate_contextual_reply(message: discord.Message) -> ContextualReply
                     "role": "user",
                     "content": f"[{channel_label}] {author_name}: {content}",
                 })
+    if len(chat_messages) > MODEL_REPLY_HISTORY_MESSAGES:
+        chat_messages = chat_messages[-MODEL_REPLY_HISTORY_MESSAGES:]
 
     # Append the current message (clean of the @mention)
     current_text = message.content.replace(f"<@{bot.user.id}>", "").replace(f"<@!{bot.user.id}>", "").strip()
