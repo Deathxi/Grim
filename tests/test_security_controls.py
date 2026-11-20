@@ -1826,6 +1826,88 @@ class SecurityControlsTests(unittest.TestCase):
         self.assertIn("server info", embed.footer.text)
         self.assertTrue(embed.footer.text.startswith("Powered by XSI"))
 
+    def test_seclude_command_is_public_and_cannot_ping(self):
+        names = {command.name for command in main.bot.tree.get_commands()}
+        self.assertIn("seclude", names)
+        self.assertIn("server", names)
+        self.assertIn("vc_join", names)
+        self.assertIn("vc_leave", names)
+
+        command = main.seclude
+        self.assertIsNone(command.default_permissions)
+        self.assertNotIn("admin", command.description.lower())
+        self.assertFalse(command.guild_only)
+
+        visuals = (
+            "Darkwear, tech-brutalism, and matte greys/blacks visually mirror the feeling "
+            "of isolation and stepping back from a loud, overwhelming world. It feels like "
+            "a quiet, reinforced concrete bunker away from mainstream noise."
+        )
+        purpose = (
+            "Instead of letting that isolation turn into stagnation, the Japanese philosophy "
+            "of Kaizen—focusing on tiny, disciplined, 1% daily improvements—gives members "
+            "a concrete, stoic framework to rebuild and sharpen themselves quietly."
+        )
+        outlet = (
+            "Having a dedicated space for dense geopolitical and retrospective discussions "
+            "naturally attracts people who feel alienated by surface-level small talk elsewhere, "
+            "giving their exulansis an actual, grounded place to land."
+        )
+        closing = (
+            "It feels less like a standard chat room and more like an underground "
+            "think-tank or a modern dojo."
+        )
+        invite = "https://discord.com/invite/KFcpDGtckz"
+
+        embed = main.build_seclude_embed()
+        fields = {field.name: field for field in embed.fields}
+
+        self.assertEqual(embed.title, "Seclude")
+        self.assertEqual(embed.color.value, 0x1A1A1A)
+        self.assertNotEqual(embed.color.value, 0x5865F2)
+        self.assertEqual(
+            [field.name for field in embed.fields],
+            ["The Visuals", "The Purpose", "The Outlet", "Enter"],
+        )
+        self.assertTrue(all(field.inline is False for field in embed.fields))
+        self.assertEqual(fields["The Visuals"].value, visuals)
+        self.assertEqual(fields["The Purpose"].value, purpose)
+        self.assertIn("Kaizen\u2014focusing", purpose)
+        self.assertIn("improvements\u2014gives", purpose)
+        self.assertEqual(fields["The Outlet"].value, outlet)
+        self.assertEqual(fields["Enter"].value, f"[{invite}]({invite})")
+        self.assertNotIn("<@", fields["Enter"].value)
+        self.assertEqual(embed.footer.text, closing)
+        self.assertLessEqual(len(embed.description or ""), 4096)
+        for field in embed.fields:
+            self.assertLessEqual(len(field.name), 256)
+            self.assertLessEqual(len(field.value), 1024)
+        self.assertLessEqual(len(embed.footer.text), 2048)
+
+        async def run():
+            event = slash_interaction()
+            await main.seclude.callback(event)
+            self.assertEqual(event.response.deferred, [])
+            self.assertEqual(event.followup.sent, [])
+            self.assertEqual(len(event.response.sent), 1)
+            args, kwargs = event.response.sent[0]
+            self.assertEqual(args, ())
+            self.assertFalse(kwargs.get("ephemeral", False))
+            self.assertEqual(kwargs["embed"].title, "Seclude")
+            self.assertEqual(kwargs["allowed_mentions"].to_dict(), {"parse": []})
+            self.assertFalse(kwargs["allowed_mentions"].everyone)
+            self.assertFalse(kwargs["allowed_mentions"].users)
+            self.assertFalse(kwargs["allowed_mentions"].roles)
+
+        asyncio.run(run())
+
+        ctx = FakeContext()
+        asyncio.run(main.help_grim.callback(ctx))
+        help_embed = ctx.messages[0]["embed"]
+        self.assertIn("`/seclude`", help_embed.description)
+        help_fields = {field.name: field.value for field in help_embed.fields}
+        self.assertEqual(help_fields["/server"], "Server status")
+
     def test_server_dossier_refreshes_a_missing_description(self):
         class FakeBot:
             async def fetch_guild(self, guild_id, with_counts=True):
