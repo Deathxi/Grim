@@ -339,7 +339,7 @@ class LiveSourcesTests(unittest.TestCase):
             main._needs_live_sources("check again", "", recent_failure=True)
         )
         for text in WEATHER_ASKS:
-            self.assertTrue(
+            self.assertFalse(
                 main._needs_live_sources(text, "", recent_failure=True),
                 text,
             )
@@ -611,7 +611,7 @@ class LiveSourcesTests(unittest.TestCase):
             research,
             model_reply=VITAMIN_RISK,
         )
-        self.assertEqual(research.await_count, 4)
+        self.assertEqual(research.await_count, 3)
         self.assertEqual(research.await_args_list[2].args[1], VITAMIN_ASK)
         self.assert_zero_info_miss(replies[0], main.LIVE_SEARCH_MISS_WRAP_FALLBACK)
         self.assert_zero_info_miss(replies[1], main.LIVE_SEARCH_MISS_WRAP_FALLBACK)
@@ -640,6 +640,57 @@ class LiveSourcesTests(unittest.TestCase):
         self.assert_zero_info_miss(replies[1], MISS_WRAP)
         self.assertNotEqual(replies[1].text, main.LIVE_SOURCE_FAILURE_LINES["timeout"])
         self.assertNotIn(VITAMIN_RISK, replies[1].text)
+
+    def test_recall_reruns_a_failed_ask_only_once(self):
+        research = AsyncMock(return_value={"status": "timeout"})
+        replies, model = self.converse(
+            [VITAMIN_ASK, "Recall", "Recall", "try again"],
+            research,
+            model_reply=MISS_WRAP,
+        )
+        self.assertEqual(research.await_count, 3)
+        self.assertIsNone(main._PENDING_LIVE_ASKS.get(("9", "10")))
+        for reply in replies[2:]:
+            self.assertNotIn(main.LIVE_SEARCH_ZERO_INFO, reply.text or "")
+
+    def test_repeat_weather_after_a_miss_does_not_search_again(self):
+        research = AsyncMock(return_value={"status": "timeout"})
+        replies, model = self.converse(
+            ["what's the weather tomorrow", "what's the weather tomorrow"],
+            research,
+            model_reply=[MISS_WRAP, "no fresh forecast from me."],
+        )
+        self.assertEqual(research.await_count, 2)
+        self.assert_zero_info_miss(replies[0], MISS_WRAP)
+        self.assertEqual(replies[1].text, "no fresh forecast from me.")
+        self.assertFalse(main._recent_live_failure("50:9:10"))
+
+    def test_time_words_do_not_turn_takes_or_personal_lines_into_searches(self):
+        for text in (
+            "right or wrong? i stayed up late tonight",
+            "hot take on the meme going around today",
+            "i'm so tired right now",
+            "rate this meme, what's the score",
+            "the weather today sucks",
+            "temperature in here is wild lol",
+        ):
+            self.assertFalse(main._needs_live_sources(text, ""), text)
+        for text in (
+            "what's nvidia's stock price today",
+            "latest news on the election",
+            "who won the game tonight",
+        ):
+            self.assertTrue(main._needs_live_sources(text, ""), text)
+
+    def test_casual_follow_up_after_time_words_does_not_search(self):
+        for followup in ("go ahead", "do that", "right now"):
+            self.assertFalse(
+                main._should_use_live_research(followup, "Noct: long day today lol"),
+                followup,
+            )
+        self.assertTrue(main._should_use_live_research(
+            "go ahead", "Noct: fact check the nvidia claim",
+        ))
 
     def test_recall_without_a_prior_fact_ask_is_normal_chat(self):
         research = AsyncMock(return_value=SUCCESS)
@@ -775,47 +826,20 @@ class LiveSourcesTests(unittest.TestCase):
         self.assertEqual(quote_reply.text, "yeah. priorities are a mess.")
         self.assertNotIn("where it stands", quote_reply.text)
 
-    def test_capability_question_uses_a_successful_search(self):
-        research = AsyncMock(return_value=SUCCESS)
-        ping = "let me try here but do you have any live search capability?"
-        (reply,), model = self.converse([ping], research)
-        self.assertEqual(research.await_count, 1)
-        model.assert_not_awaited()
-        self.assertNotEqual(reply.text, main.LIVE_SOURCE_FAILURE_LINES["empty"])
-        self.assertNotIn("where it stands", reply.text)
-        self.assertTrue(reply.text.startswith(main.CAPABILITY_PROOF_PREFIX))
-        self.assertIn(SUCCESS["text"], reply.text)
-        self.assertIn(
-            "-# sources: [reuters.com](<https://www.reuters.com/tech/a>)",
-            reply.text,
-        )
-        self.assertEqual(research.await_args.args[1], main.LIVE_SEARCH_PROOF_QUERY)
-        self.assertNotIn("capability", research.await_args.args[1].casefold())
-        self.assertEqual(
-            tuple(research.await_args.kwargs.get("tools") or ()),
-            main.XAI_WEB_SEARCH_TOOLS,
-        )
-
-    def test_capability_empty_or_fail_stays_honest_not_a_news_miss(self):
-        ping = "do you have any live search capability?"
-        research = AsyncMock(return_value={"status": "empty"})
-        (reply,), model = self.converse([ping], research)
-        model.assert_not_awaited()
-        self.assertEqual(reply.text, main.LIVE_SOURCE_CAPABILITY_LINES["empty"])
-        self.assertNotEqual(reply.text, main.LIVE_SOURCE_FAILURE_LINES["empty"])
-        folded = reply.text.casefold()
-        self.assertIn("wired", folded)
-        self.assertTrue("memory" in folded or "won't guess" in folded)
-        for claim in TRAINING_CLAIMS:
-            self.assertNotIn(claim, folded)
-
-        main._LIVE_RESEARCH_FAILURES.clear()
-        (reply,), model = self.converse(
-            [ping], AsyncMock(return_value={"status": "provider_error"})
-        )
-        model.assert_not_awaited()
-        self.assertEqual(reply.text, main.LIVE_SOURCE_CAPABILITY_LINES["error"])
-        self.assertNotIn("where it stands", reply.text)
+    def test_capability_question_answers_without_a_proof_search(self):
+        for ping in (
+            "let me try here but do you have any live search capability?",
+            "do you have any live search capability?",
+            "it doesn't need to be from memory. Do you have access to the Internet?",
+        ):
+            main._LIVE_RESEARCH_FAILURES.clear()
+            research = AsyncMock(side_effect=AssertionError("capability asks must not search"))
+            (reply,), model = self.converse([ping], research)
+            research.assert_not_awaited()
+            model.assert_not_awaited()
+            self.assertEqual(reply.text, main.LIVE_SEARCH_CAPABILITY_REPLY, ping)
+            self.assertNotIn(main.LIVE_SEARCH_ZERO_INFO, reply.text)
+            self.assertNotIn("sources:", reply.text)
 
     def test_capability_question_ignores_channel_failure_memory(self):
         research = AsyncMock(return_value=SUCCESS)
@@ -824,10 +848,9 @@ class LiveSourcesTests(unittest.TestCase):
             ["let me try here but do you have any live search capability?"],
             research,
         )
+        research.assert_not_awaited()
         model.assert_not_awaited()
-        self.assertTrue(reply.text.startswith(main.CAPABILITY_PROOF_PREFIX))
-        self.assertIn("sources:", reply.text)
-        self.assertNotIn("where it stands", reply.text)
+        self.assertEqual(reply.text, main.LIVE_SEARCH_CAPABILITY_REPLY)
 
     def test_web_only_search_retries_once_without_tool_choice(self):
         calls = []
@@ -932,17 +955,6 @@ class LiveSourcesTests(unittest.TestCase):
         self.assertIn("never from training", system_prompt)
         self.assertIn("causal", system_prompt)
 
-    def test_internet_access_ask_is_capability_not_a_news_miss(self):
-        research = AsyncMock(return_value=SUCCESS)
-        ping = "it doesn't need to be from memory. Do you have access to the Internet?"
-        (reply,), model = self.converse([ping], research)
-        self.assertEqual(research.await_count, 1)
-        model.assert_not_awaited()
-        self.assertTrue(reply.text.startswith(main.CAPABILITY_PROOF_PREFIX))
-        self.assertNotIn("where it stands", reply.text)
-        self.assertNotEqual(reply.text, main.LIVE_SOURCE_FAILURE_LINES["empty"])
-        self.assertEqual(research.await_args.args[1], main.LIVE_SEARCH_PROOF_QUERY)
-
     def test_miss_reply_formatter_is_two_lines(self):
         self.assertEqual(
             main.format_live_search_miss_reply("yeah, holding steady."),
@@ -1015,13 +1027,10 @@ class LiveSourcesTests(unittest.TestCase):
             research,
             model_reply=MISS_WRAP,
         )
-        self.assertEqual(research.await_count, 2)
+        self.assertEqual(research.await_count, 1)
         self.assert_zero_info_miss(replies[0], MISS_WRAP)
-        self.assertEqual(replies[1].text, main.LIVE_SOURCE_CAPABILITY_LINES["empty"])
-        self.assertNotEqual(replies[1].text, main.LIVE_SOURCE_FAILURE_LINES["empty"])
+        self.assertEqual(replies[1].text, main.LIVE_SEARCH_CAPABILITY_REPLY)
         self.assertNotIn("Live Search has zero info on this", replies[1].text)
-        self.assertNotIn("where it stands", replies[1].text)
-        self.assertEqual(research.await_args.args[1], main.LIVE_SEARCH_PROOF_QUERY)
 
     def test_leftover_topic_after_failure_does_not_block_chat(self):
         research = AsyncMock(return_value={"status": "empty"})
@@ -1039,7 +1048,6 @@ class LiveSourcesTests(unittest.TestCase):
 
     def test_sourced_reply_keeps_blue_links_and_suppresses_unfurls(self):
         sourced = main.format_sourced_reply(SUCCESS["text"], SUCCESS["sources"])
-        proof = main.format_capability_proof_reply(SUCCESS["text"], SUCCESS["sources"])
         self.assertIn(
             "-# sources: [reuters.com](<https://www.reuters.com/tech/a>)"
             " · [x.com](<https://x.com/someone/status/1>)",
@@ -1048,13 +1056,8 @@ class LiveSourcesTests(unittest.TestCase):
         self.assertIn("https://www.reuters.com/tech/a", sourced)
         self.assertIn("https://x.com/someone/status/1", sourced)
         self.assertTrue(main._reply_has_source_links(sourced))
-        self.assertTrue(main._reply_has_source_links(proof))
         self.assertEqual(
             main._source_unfurl_kwargs(sourced),
-            {"suppress_embeds": True},
-        )
-        self.assertEqual(
-            main._source_unfurl_kwargs(proof),
             {"suppress_embeds": True},
         )
 
@@ -1062,7 +1065,7 @@ class LiveSourcesTests(unittest.TestCase):
         for text in (
             "yeah, holding steady.",
             main.format_live_search_miss_reply(MISS_WRAP),
-            main.LIVE_SOURCE_CAPABILITY_LINES["empty"],
+            main.LIVE_SEARCH_CAPABILITY_REPLY,
             main.LIVE_SOURCE_FAILURE_LINES["timeout"],
             "saw this https://example.com/post and it's wild",
             main.format_sourced_reply("no citations this time.", []),

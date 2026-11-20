@@ -6,6 +6,12 @@ All notable changes to this project are documented here, organized by month.
 
 ## November 2026
 
+### Removed
+- Removed `/newsfeed`, `/newsfeed_edit`, `/newsfeed_cancel`, `/newsfeed_status`, and `/ghostwritelive`, plus the every-minute Newsfeed and Ghostwrite Live loops behind them, which ran paid live searches with no one talking. `/status` still lists every background task that remains. Old `newsfeed_data.json` and `ghostwrite_live_data.json` files in `~/.grim_data` are no longer read. `/ghostwrite` stays (`main.py`).
+
+### Changed
+- Live search now runs only for teaching or for checking a concrete fact. "Do you have internet / live search?" gets a fixed answer with no proof search, and current-events GIF or picture asks no longer search first. Weather complaints and lines that only mention today, tonight, or right now stay on chat, and so do follow-ups like "go ahead" unless an explicit lookup was asked. After a weather miss, asking the same weather again in that channel does not search again for 30 minutes. `Recall` / `try again` re-runs a missed ask once, with no extra quiet retry. "Live Search has zero info on this" and the one quiet retry on a normal ask are unchanged (`main.py`).
+
 ### Added
 - When someone asks Grim for a GIF, picture, meme image, or copypasta image in chat, he fetches a real file and posts it (metadata stripped on reupload, or a Discord-unfurlable image URL). Current-events asks go through live search for a real topic first. He never claims Discord is text-only, never says GIFs cannot be shown, and never substitutes ASCII unless they asked for text art.
 - After a name-call (`Grim` with or without @), Grim stays with that original poster in the same channel. Follow-ups get a reply even without naming him again and without a Discord reply-arrow; Discord reply-ladder messages still continue, and weather or fact questions still live-search. The conversation ends after 5 minutes of silence from the original poster, or as soon as they mention or address someone else. Other people's side talk does not keep him in.

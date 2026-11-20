@@ -399,42 +399,19 @@ class ChatMediaTests(unittest.TestCase):
         self.assertNotIn(REFUSAL, (result.text or "").casefold())
         self.assertFalse(result.media_filename.startswith("koshin"))
 
-    def test_current_events_gif_does_not_use_the_old_refusal(self):
-        research = AsyncMock(return_value={
-            "status": "success",
-            "used_search": True,
-            "text": "as of nov 14, a ceasefire deal is the lead story.",
-            "sources": [{"title": "Reuters", "url": "https://www.reuters.com/world/a"}],
-        })
+    def test_current_events_gif_does_not_live_search(self):
+        research = AsyncMock(side_effect=AssertionError("media asks must not live-search"))
         result, model, search = self.reply(GIF_ASK, research=research)
         model.assert_not_awaited()
+        research.assert_not_awaited()
         self.assertIsNotNone(result.media)
         folded = (result.text or "").casefold()
         self.assertNotIn(REFUSAL, folded)
         self.assertNotIn("just text", folded)
         self.assertNotIn("ascii", folded)
+        self.assertNotIn(main.LIVE_SEARCH_ZERO_INFO.casefold(), folded)
         search.assert_awaited()
-        query = search.await_args.args[2]
-        self.assertTrue(query)
-        self.assertNotEqual(query, "current events going on in the world today")
-
-    def test_current_events_empty_search_uses_miss_line_not_refusal(self):
-        result, model, search = self.reply(
-            GIF_ASK,
-            research=AsyncMock(return_value={"status": "empty"}),
-            candidates=[],
-        )
-        model.assert_not_awaited()
-        search.assert_not_awaited()
-        self.assertIsNone(result.media)
-        self.assertIsNone(result.media_url)
-        first, sep, rest = (result.text or "").partition("\n")
-        self.assertEqual(first, main.LIVE_SEARCH_ZERO_INFO)
-        self.assertEqual(sep, "\n")
-        folded = (result.text or "").casefold()
-        self.assertNotIn(REFUSAL, folded)
-        self.assertNotIn("just text", folded)
-        self.assertNotIn("no way to show", folded)
+        self.assertEqual(search.await_args.args[2], "news")
 
     def test_empty_provider_does_not_claim_gifs_cannot_be_shown(self):
         result, model, search = self.reply(
