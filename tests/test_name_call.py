@@ -1,7 +1,8 @@
+import asyncio
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import PropertyMock, patch
+from unittest.mock import AsyncMock, PropertyMock, patch
 
 import main
 
@@ -16,6 +17,32 @@ def chat_message(content, *, mentions=None):
     )
 
 
+def _reply_message(content, *, mentions=None, mid=1):
+    class Channel:
+        id = 9
+        name = "STAFF"
+
+        def history(self, limit=50, before=None):
+            async def _gen():
+                if False:
+                    yield None
+            return _gen()
+
+    return SimpleNamespace(
+        id=mid,
+        content=content,
+        mentions=list(mentions or []),
+        author=SimpleNamespace(id=10, display_name="Kōshin", bot=False),
+        channel=Channel(),
+        attachments=[],
+        embeds=[],
+        reference=None,
+        guild=SimpleNamespace(
+            id=50, name="Seclude", member_count=3, members=[],
+        ),
+    )
+
+
 class NameCallReplyTests(unittest.TestCase):
     def setUp(self):
         self.user_patch = patch.object(
@@ -25,6 +52,7 @@ class NameCallReplyTests(unittest.TestCase):
             return_value=GRIM,
         )
         self.user_patch.start()
+        main._bare_ping_greet_at = 0
 
     def tearDown(self):
         self.user_patch.stop()
@@ -100,7 +128,7 @@ class NameCallReplyTests(unittest.TestCase):
                     main.grim_turn_needs_reply(text, mentioned=mentioned)
                 )
 
-    def test_empty_ping_skips(self):
+    def test_empty_ping_is_a_bare_greet(self):
         empty = (
             "Grim",
             "grim",
@@ -110,18 +138,27 @@ class NameCallReplyTests(unittest.TestCase):
             "<@999>",
             "<@!999>",
             "  <@999>  ",
+            "what's up Grim",
+            "whats up grim",
+            "hey grim",
+            "yo grim",
         )
         for text in empty:
             with self.subTest(text=text):
                 mentioned = "<@" in text
-                self.assertFalse(
-                    main.grim_turn_needs_reply(text, mentioned=mentioned)
+                self.assertEqual(
+                    main.grim_name_call_kind(text, mentioned=mentioned),
+                    main.NAME_CALL_BARE,
+                    text,
                 )
+                self.assertTrue(main.grim_turn_needs_reply(text, mentioned=mentioned), text)
+                self.assertTrue(main.grim_name_call_is_bare(text, mentioned=mentioned), text)
                 mentions = [GRIM] if mentioned else []
-                self.assertFalse(
+                self.assertTrue(
                     main.grim_should_reply_to_message(
                         chat_message(text, mentions=mentions)
-                    )
+                    ),
+                    text,
                 )
 
     def test_nicknames_and_direct_address_reply_without_hardcoded_line(self):
@@ -174,9 +211,124 @@ class NameCallReplyTests(unittest.TestCase):
             )
             named = chat_message("grim what do you think?")
             self.assertTrue(main.grim_should_reply_to_message(ping))
-            self.assertFalse(main.grim_should_reply_to_message(empty))
+            self.assertTrue(main.grim_should_reply_to_message(empty))
+            self.assertEqual(
+                main.grim_name_call_kind("<@999>", mentioned=True),
+                main.NAME_CALL_BARE,
+            )
             self.assertFalse(main.grim_should_reply_to_message(passing))
             self.assertTrue(main.grim_should_reply_to_message(named))
+
+    def test_calling_ping_answers_deftones_and_baseball_bat(self):
+        calling = (
+            "they're the Bay Area's Deftones @Grim fax or na",
+            "they're the Bay Area's Deftones <@999> fax or na",
+            "Hey I got a new baseball bat and I want to paint it, Grim do you have any thoughts?",
+            "grim do you have any thoughts?",
+        )
+        for text in calling:
+            with self.subTest(text=text):
+                mentioned = "<@" in text or "@Grim" in text or "@grim" in text
+                self.assertEqual(
+                    main.grim_name_call_kind(text, mentioned="<@" in text),
+                    main.NAME_CALL_CALLING,
+                    text,
+                )
+                self.assertTrue(
+                    main.grim_turn_needs_reply(text, mentioned="<@" in text),
+                    text,
+                )
+                self.assertFalse(
+                    main.grim_name_call_is_bare(text, mentioned="<@" in text),
+                    text,
+                )
+                self.assertFalse(main._needs_live_sources(text, ""), text)
+                mentions = [GRIM] if "<@" in text else []
+                self.assertTrue(
+                    main.grim_should_reply_to_message(
+                        chat_message(text, mentions=mentions)
+                    ),
+                    text,
+                )
+
+    def test_drive_by_noun_stays_quiet_unless_he_can_help(self):
+        silent = (
+            "... yeah I was looking at the files and saw Grim did something there. I'll fix it later bro",
+            "I was talking to grim yesterday about the deploy",
+            "grim is down again",
+            "did you see what grim said in #ops",
+            "credit grim for the cleanup",
+        )
+        for text in silent:
+            with self.subTest(text=text):
+                self.assertIsNone(main.grim_name_call_kind(text), text)
+                self.assertFalse(main.grim_turn_needs_reply(text), text)
+        helpful = (
+            "can grim look at this deploy?",
+            "why did grim delete those files?",
+            "need grim to check the logs",
+        )
+        for text in helpful:
+            with self.subTest(text=text):
+                self.assertEqual(
+                    main.grim_name_call_kind(text),
+                    main.NAME_CALL_CALLING,
+                    text,
+                )
+                self.assertTrue(main.grim_turn_needs_reply(text), text)
+                self.assertFalse(main.grim_name_call_is_bare(text), text)
+
+    def test_bare_ping_greets_rotate_and_skip_the_model(self):
+        main._bare_ping_greet_at = 0
+        greets = [main.grim_bare_ping_greet() for _ in range(len(main.BARE_PING_GREETS) + 1)]
+        self.assertEqual(greets[0], "What's up?")
+        self.assertEqual(greets[1], "How's it going?")
+        self.assertEqual(greets[2], "You called?")
+        self.assertEqual(greets[3], "What's up?")
+        self.assertEqual(
+            set(main.BARE_PING_GREETS),
+            {"What's up?", "How's it going?", "You called?"},
+        )
+
+        captured = {}
+
+        async def complete(*args, **kwargs):
+            captured["called"] = True
+            return "model should not run on a bare ping"
+
+        message = _reply_message("<@999>", mentions=[GRIM])
+        main._bare_ping_greet_at = 0
+        reply = asyncio.run(self._run_reply(message, complete))
+        self.assertEqual(reply.text, "What's up?")
+        self.assertNotIn("called", captured)
+
+    def test_calling_ping_uses_the_model_not_a_greet(self):
+        captured = {}
+
+        async def complete(
+            session, headers, system_prompt, chat_messages, text_fallback, has_images
+        ):
+            captured["messages"] = [dict(item) for item in chat_messages]
+            return "nah, that's a stretch, but the bay fog fits."
+
+        text = "they're the Bay Area's Deftones <@999> fax or na"
+        message = _reply_message(text, mentions=[GRIM], mid=7)
+        main._bare_ping_greet_at = 0
+        reply = asyncio.run(self._run_reply(message, complete))
+        self.assertTrue(reply.text)
+        self.assertNotIn(reply.text, main.BARE_PING_GREETS)
+        self.assertIn("fax or na", captured["messages"][-1]["content"])
+        self.assertFalse(main._needs_live_sources(text, ""))
+
+    async def _run_reply(self, message, complete, research=None):
+        if research is None:
+            research = AsyncMock()
+        with patch.dict(main.os.environ, {"XAI_API_KEY": "test-key"}), \
+                patch.object(main, "_complete_contextual_reply", complete), \
+                patch.object(main, "get_operator_channel_history_from_db", return_value=[]), \
+                patch.object(main, "correlated_foreign_channel_context", return_value=[]), \
+                patch.object(main, "grok_research_query", research):
+            return await main.generate_contextual_reply(message)
 
 
 if __name__ == "__main__":

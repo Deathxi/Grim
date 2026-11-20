@@ -2482,6 +2482,15 @@ _JUDGMENT_TAKE_PHRASES = (
     "agree or disagree",
     "yay or nay",
     "yea or nay",
+    "fax or na",
+    "fax or nah",
+    "facts or na",
+    "facts or nah",
+    "fact or na",
+    "fact or nah",
+    "true or na",
+    "true or nah",
+    "any thoughts",
     "thoughts on this",
     "thoughts on that",
     "your thoughts",
@@ -3675,11 +3684,97 @@ _NAME_CALL_QUESTION_CONTINUERS = frozenset({
     "this", "that", "it", "there", "he", "she", "we", "they", "i", "you",
     "u", "ya",
 })
+_NAME_CALL_ASK_PHRASES = (
+    "fax or na",
+    "fax or nah",
+    "facts or na",
+    "facts or nah",
+    "fact or na",
+    "fact or nah",
+    "true or na",
+    "true or nah",
+    "true or false",
+    "yes or no",
+    "yea or na",
+    "yay or nay",
+    "agree or nah",
+    "agree or na",
+    "agree or disagree",
+    "right or wrong",
+    "any thoughts",
+    "your thoughts",
+    "your take",
+    "do you",
+    "can you",
+    "could you",
+    "would you",
+    "wdyt",
+)
+_NAME_CALL_AFTER_ASK = frozenset({
+    "fax", "nah", "na", "thoughts", "thought", "take", "opinion",
+    "right", "wrong", "true", "false", "agree", "disagree",
+    "do", "please", "what", "why", "how", "when", "where", "who",
+    "which", "any", "your", "wdyt",
+})
+_BARE_PING_TOKENS = frozenset({
+    "what", "whats", "up", "wsp", "wassup", "sup", "there", "here",
+    "you", "u", "ya", "good", "wyd", "hbu", "in", "around", "awake",
+    "alive", "called", "rang", "ping", "pinged", "hello", "hey", "hi",
+    "yo", "howdy", "how", "hows", "howzit", "it", "its", "going",
+    "doing", "been", "bro", "bruh", "dude", "man", "fam", "pal",
+    "homie", "bestie", "just", "only", "still", "even", "now", "rn",
+    "wya", "online", "a", "the", "my", "me", "please", "pls", "we",
+    "boss",
+})
+_DRIVE_BY_HELP_PHRASES = (
+    "ask grim",
+    "can grim",
+    "could grim",
+    "grim can",
+    "need grim",
+    "grim should",
+    "grim look",
+    "grim check",
+    "grim help",
+    "help grim",
+    "get grim",
+    "why did grim",
+    "why is grim",
+    "what did grim",
+    "grim why",
+    "have grim",
+    "let grim",
+)
+_DRIVE_BY_GOSSIP = (
+    "did you see",
+    "have you seen",
+    "you see what",
+    "you saw what",
+    "tell him",
+    "tell her",
+    "i ll fix",
+    "i will fix",
+    "i ll handle",
+    "i will handle",
+)
+NAME_CALL_CALLING = "calling"
+NAME_CALL_BARE = "bare"
+BARE_PING_GREETS = (
+    "What's up?",
+    "How's it going?",
+    "You called?",
+)
+_bare_ping_greet_at = 0
 
 
 def _name_call_source(text: str | None, *, mentioned: bool) -> str:
     raw = _strip_quote_lines(str(text or ""))
-    raw = _MENTION_MARK.sub(" grim " if mentioned else " ", raw)
+    bot_id = getattr(getattr(bot, "user", None), "id", None)
+    if bot_id is not None:
+        raw = re.sub(rf"<@!?{re.escape(str(bot_id))}>", " grim ", raw)
+        raw = _MENTION_MARK.sub(" ", raw)
+    else:
+        raw = _MENTION_MARK.sub(" grim " if mentioned else " ", raw)
     return re.sub(r"(?<!\w)@grim\b", " grim ", raw, flags=re.IGNORECASE)
 
 
@@ -3710,7 +3805,9 @@ def _tokens_without_name_calls(
     return [token for idx, token in enumerate(tokens) if idx not in skip]
 
 
-def _name_call_is_vocative(tokens: list[str], start: int, end: int) -> bool:
+def _name_call_is_vocative(
+    tokens: list[str], start: int, end: int, *, mentioned: bool = False
+) -> bool:
     before = tokens[start - 1] if start else None
     after = tokens[end] if end < len(tokens) else None
     if before in _NAME_CALL_PREP_BEFORE or before in _NAME_CALL_OBJECT_BEFORE:
@@ -3718,6 +3815,10 @@ def _name_call_is_vocative(tokens: list[str], start: int, end: int) -> bool:
     if after in _NAME_CALL_THIRD_PERSON_VERBS:
         nxt = tokens[end + 1] if end + 1 < len(tokens) else None
         return nxt in _NAME_CALL_QUESTION_CONTINUERS or after in _NAME_CALL_SECOND_PERSON
+    if after in _NAME_CALL_AFTER_ASK:
+        return True
+    if mentioned:
+        return True
     if start == 0 or before in _NAME_CALL_GREETINGS:
         return True
     if end == len(tokens):
@@ -3732,6 +3833,8 @@ def _asks_grim_for_take(tokens: list[str], spans: list[tuple[int, int]]) -> bool
     joined = " ".join(tokens)
     if "what about you" in joined or "how about you" in joined or "and you" in joined:
         return True
+    if any(phrase in joined for phrase in _NAME_CALL_ASK_PHRASES):
+        return True
     for start, end in spans:
         nearby = tokens[max(0, start - 3):min(len(tokens), end + 4)]
         if any(token in _NAME_CALL_TAKE for token in nearby):
@@ -3741,12 +3844,46 @@ def _asks_grim_for_take(tokens: list[str], spans: list[tuple[int, int]]) -> bool
     return False
 
 
-def grim_turn_needs_reply(text: str | None, *, mentioned: bool = False) -> bool:
-    """True when this turn names Grim and has an entrance.
+def _leftover_is_bare_ping(leftover: list[str]) -> bool:
+    content = [token for token in leftover if token not in _NAME_CALL_GREETINGS]
+    if not content:
+        return True
+    return all(
+        token in _BARE_PING_TOKENS or token in _NAME_CALL_GREETINGS
+        for token in leftover
+    )
 
-    A Discord @mention or a plain-text name-call both count as naming him.
-    Reply on a question, a ping for his take, or a direct address. Skip empty
-    pings and third-person drive-bys with no ask.
+
+def _drive_by_could_help(tokens: list[str], text: str | None) -> bool:
+    """True when Grim is a noun in someone else's talk, but he can actually help."""
+    joined = " ".join(tokens)
+    if any(phrase in joined for phrase in _DRIVE_BY_GOSSIP):
+        return False
+    if any(phrase in joined for phrase in _DRIVE_BY_HELP_PHRASES):
+        return True
+    return "?" in str(text or "")
+
+
+def _message_mentions_grim(message) -> bool:
+    user = getattr(bot, "user", None)
+    if user is None:
+        return False
+    if user in getattr(message, "mentions", []):
+        return True
+    uid = getattr(user, "id", None)
+    if uid is None:
+        return False
+    content = getattr(message, "content", "") or ""
+    return bool(re.search(rf"<@!?{re.escape(str(uid))}>", content))
+
+
+def grim_name_call_kind(text: str | None, *, mentioned: bool = False) -> str | None:
+    """calling, bare, or None (stay silent).
+
+    Calling: a message tailored for Grim, or a real @ plus a question/ask.
+    Bare: @Grim or his name with nothing else to answer — human greeting.
+    Silent: drive-by noun mention with nothing useful to add.
+    A drive-by may still be calling when he can actually help that conversation.
     """
     source = _name_call_source(text, mentioned=mentioned)
     tokens = _output_match_text(source).split()
@@ -3754,22 +3891,44 @@ def grim_turn_needs_reply(text: str | None, *, mentioned: bool = False) -> bool:
         tokens = ["grim", *tokens]
     spans = _name_call_spans(tokens)
     if not spans:
-        return False
+        return None
     leftover = _tokens_without_name_calls(tokens, spans)
-    greeting = any(token in _NAME_CALL_GREETINGS for token in leftover) or any(
-        start and tokens[start - 1] in _NAME_CALL_GREETINGS for start, _ in spans
-    )
-    content = [token for token in leftover if token not in _NAME_CALL_GREETINGS]
-    has_question = "?" in str(text or "")
-    take = _asks_grim_for_take(tokens, spans)
     vocative = any(
-        _name_call_is_vocative(tokens, start, end) for start, end in spans
+        _name_call_is_vocative(tokens, start, end, mentioned=mentioned)
+        for start, end in spans
     )
-    if not content and not has_question and not take:
-        return bool(greeting)
-    if take or vocative:
-        return True
-    return False
+    take = _asks_grim_for_take(tokens, spans)
+    bare_leftover = _leftover_is_bare_ping(leftover)
+    if take or (vocative and not bare_leftover):
+        return NAME_CALL_CALLING
+    if vocative and bare_leftover:
+        return NAME_CALL_BARE
+    if _drive_by_could_help(tokens, text):
+        return NAME_CALL_CALLING
+    return None
+
+
+def grim_turn_needs_reply(text: str | None, *, mentioned: bool = False) -> bool:
+    """True when this turn names Grim and should get a reply.
+
+    A Discord @mention or a plain-text name-call both count as naming him.
+    Calling pings and bare name-calls reply. Third-person drive-bys stay
+    quiet unless he can actually help.
+    """
+    return grim_name_call_kind(text, mentioned=mentioned) is not None
+
+
+def grim_name_call_is_bare(text: str | None, *, mentioned: bool = False) -> bool:
+    """True when the ping is only a name-call / check-in with nothing to answer."""
+    return grim_name_call_kind(text, mentioned=mentioned) == NAME_CALL_BARE
+
+
+def grim_bare_ping_greet() -> str:
+    """Rotate natural human greets. Not one canned line."""
+    global _bare_ping_greet_at
+    greet = BARE_PING_GREETS[_bare_ping_greet_at % len(BARE_PING_GREETS)]
+    _bare_ping_greet_at += 1
+    return greet
 
 
 def grim_should_reply_to_message(message) -> bool:
@@ -3777,8 +3936,7 @@ def grim_should_reply_to_message(message) -> bool:
     content = getattr(message, "content", "") or ""
     if content.lstrip().startswith("!"):
         return False
-    user = getattr(bot, "user", None)
-    mentioned = user is not None and user in getattr(message, "mentions", [])
+    mentioned = _message_mentions_grim(message)
     return grim_turn_needs_reply(content, mentioned=mentioned)
 
 
@@ -4016,14 +4174,15 @@ def _follow_up_in_reply_ladder(message) -> bool:
 def grim_chat_turn_action(message, *, now: float | None = None) -> bool:
     """True when Grim should produce a contextual reply for this turn.
 
-    Naming Grim (@ or plain) with an entrance starts a conversation with
-    that original poster. Later turns from that OP in the same channel keep
+    Naming Grim (@ or plain) starts a conversation with that original
+    poster: a calling ping gets a real answer, a bare name-call gets a
+    human greeting. Later turns from that OP in the same channel keep
     getting replies without naming him again and without a Discord
     reply-arrow. Discord reply-ladder messages still continue. A lone
-    "Grim" ping counts as still here while the conversation is open. Five
-    minutes of OP silence ends it. Speaking to someone else, saying this
-    was for another person, or telling him not to reply also ends it, and
-    he stays quiet.
+    "Grim" ping is a bare greet, and also counts as still here while the
+    conversation is already open. Five minutes of OP silence ends it.
+    Speaking to someone else, saying this was for another person, or
+    telling him not to reply also ends it, and he stays quiet.
     """
     content = getattr(message, "content", "") or ""
     if content.lstrip().startswith("!"):
@@ -5596,6 +5755,9 @@ async def generate_contextual_reply(message: discord.Message) -> ContextualReply
         f"<@{bot.user.id}>", ""
     ).replace(f"<@!{bot.user.id}>", "").strip()
     media_ask = parse_chat_media_request(mentioned_text, message)
+    mentioned = _message_mentions_grim(message)
+    if not media_ask and grim_name_call_is_bare(message.content, mentioned=mentioned):
+        return ContextualReply(text=grim_bare_ping_greet())
     if not api_key and not media_ask:
         return ContextualReply()
     conversational = not mention_asks_for_facts(mentioned_text)

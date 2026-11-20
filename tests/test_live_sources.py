@@ -694,14 +694,17 @@ class LiveSourcesTests(unittest.TestCase):
 
     def test_recall_without_a_prior_fact_ask_is_normal_chat(self):
         research = AsyncMock(return_value=SUCCESS)
+        main._bare_ping_greet_at = 0
         replies, model = self.converse(
             ["yo grim how we doing", "Recall"],
             research,
-            model_reply=["still here.", "what's on your mind."],
+            model_reply=["what's on your mind."],
         )
         research.assert_not_awaited()
-        self.assertEqual(replies[0].text, "still here.")
+        self.assertEqual(replies[0].text, "What's up?")
+        self.assertIn(replies[0].text, main.BARE_PING_GREETS)
         self.assertEqual(replies[1].text, "what's on your mind.")
+        self.assertEqual(model.await_count, 1)
         self.assertNotIn(main.LIVE_SEARCH_ZERO_INFO, replies[1].text)
         self.assertNotIn(VITAMIN_RISK, replies[1].text)
         self.assertNotIn("-# sources:", replies[1].text)
