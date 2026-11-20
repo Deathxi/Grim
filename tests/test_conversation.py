@@ -1,7 +1,8 @@
+import asyncio
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import PropertyMock, patch
+from unittest.mock import AsyncMock, PropertyMock, patch
 
 import main
 
@@ -459,6 +460,167 @@ class ConversationPersistenceTests(unittest.TestCase):
             self.assertIn("related from", blob)
             self.assertNotIn("pineapple", blob)
             self.assertLessEqual(len(related), 4)
+        finally:
+            main.CHAT_DB_FILE = original_db
+            temp_dir.cleanup()
+
+    def test_reply_payload_keeps_ten_newest_turns(self):
+        import tempfile
+        from pathlib import Path as _Path
+
+        original_db = main.CHAT_DB_FILE
+        temp_dir = tempfile.TemporaryDirectory()
+        try:
+            main.CHAT_DB_FILE = str(_Path(temp_dir.name) / "chat_history.db")
+            main.init_chat_db()
+            for index in range(1, 16):
+                main.save_message_to_db(
+                    "50", "9", f"p{index:02d}", "Kōshin",
+                    f"prior-{index:02d} still talking",
+                    float(index), False, author_id="10",
+                )
+            main.save_message_to_db(
+                "50", "9", "other", "Noct",
+                "kardashev secret from someone else",
+                0.5, False, author_id="20",
+            )
+            main.save_message_to_db(
+                "50", "9", "cur", "Kōshin",
+                "still here with you",
+                16.0, False, author_id="10",
+            )
+            stored = main.get_operator_channel_history_from_db(
+                "50", "9", author_id="10", author_name="Kōshin", limit=50,
+            )
+            self.assertGreater(len(stored), main.MODEL_REPLY_HISTORY_MESSAGES)
+            self.assertIn("prior-01", stored[0][1])
+            self.assertEqual(main.MODEL_REPLY_HISTORY_MESSAGES, 10)
+            self.assertEqual(main.LIVE_SEARCH_MAX_TOKENS, 600)
+
+            captured = {}
+
+            async def complete(
+                session, headers, system_prompt, chat_messages,
+                text_fallback, has_images,
+            ):
+                captured["system"] = system_prompt
+                captured["messages"] = [dict(item) for item in chat_messages]
+                return "the river bit still lands, and i'm still on it with you."
+
+            channel = SimpleNamespace(id=9, name="general")
+
+            async def empty_history(limit=50, before=None):
+                if False:
+                    yield None
+
+            channel.history = empty_history
+            message = SimpleNamespace(
+                id="cur",
+                content="still here with you",
+                author=SimpleNamespace(id=10, display_name="Kōshin", bot=False),
+                channel=channel,
+                mentions=[],
+                reference=None,
+                attachments=[],
+                embeds=[],
+                guild=SimpleNamespace(
+                    id=50, name="Seclude", member_count=3, members=[OP, OTHER, GRIM],
+                ),
+            )
+
+            async def run():
+                with patch.dict(main.os.environ, {"XAI_API_KEY": "test-key"}), \
+                        patch.object(main, "_complete_contextual_reply", complete), \
+                        patch.object(main, "grok_research_query", AsyncMock()) as research:
+                    reply = await main.generate_contextual_reply(message)
+                    captured["research_called"] = research.await_count
+                    return reply
+
+            reply = asyncio.run(run())
+            self.assertTrue(reply.text)
+            self.assertEqual(captured["research_called"], 0)
+            messages = captured["messages"]
+            history = messages[:-1]
+            self.assertEqual(len(history), 10)
+            blob = " ".join(item["content"] for item in messages)
+            self.assertNotIn("prior-01", blob)
+            self.assertNotIn("prior-05", blob)
+            self.assertIn("prior-06", blob)
+            self.assertIn("prior-15", blob)
+            self.assertNotIn("kardashev", blob.casefold())
+            self.assertEqual(blob.count("still here with you"), 1)
+            self.assertIn("HOW GRIM SPEAKS", captured["system"])
+            self.assertIn("CONVERSATION SCOPE (HARD RULE)", captured["system"])
+        finally:
+            main.CHAT_DB_FILE = original_db
+            temp_dir.cleanup()
+
+    def test_discord_history_fallback_payload_is_capped_at_ten(self):
+        import tempfile
+        from pathlib import Path as _Path
+
+        original_db = main.CHAT_DB_FILE
+        temp_dir = tempfile.TemporaryDirectory()
+        try:
+            main.CHAT_DB_FILE = str(_Path(temp_dir.name) / "chat_history.db")
+            main.init_chat_db()
+            newest_first = [
+                SimpleNamespace(
+                    id=f"d{index:02d}",
+                    content=f"discord-{index:02d} line",
+                    author=SimpleNamespace(id=10, display_name="Kōshin", bot=False),
+                )
+                for index in range(12, 0, -1)
+            ]
+
+            class HistoryChannel:
+                id = 9
+                name = "general"
+
+                def history(self, limit=50, before=None):
+                    async def _gen():
+                        for msg in newest_first[:limit]:
+                            yield msg
+                    return _gen()
+
+            captured = {}
+
+            async def complete(
+                session, headers, system_prompt, chat_messages,
+                text_fallback, has_images,
+            ):
+                captured["messages"] = [dict(item) for item in chat_messages]
+                return "the river bit still lands, and i'm still on it with you."
+
+            message = SimpleNamespace(
+                id="cur",
+                content="still here with you",
+                author=SimpleNamespace(id=10, display_name="Kōshin", bot=False),
+                channel=HistoryChannel(),
+                mentions=[],
+                reference=None,
+                attachments=[],
+                embeds=[],
+                guild=SimpleNamespace(
+                    id=50, name="Seclude", member_count=3, members=[OP, OTHER, GRIM],
+                ),
+            )
+
+            async def run():
+                with patch.dict(main.os.environ, {"XAI_API_KEY": "test-key"}), \
+                        patch.object(main, "_complete_contextual_reply", complete):
+                    return await main.generate_contextual_reply(message)
+
+            reply = asyncio.run(run())
+            self.assertTrue(reply.text)
+            messages = captured["messages"]
+            blob = " ".join(item["content"] for item in messages)
+            self.assertEqual(len(messages) - 1, 10)
+            self.assertNotIn("discord-01", blob)
+            self.assertNotIn("discord-02", blob)
+            self.assertIn("discord-03", blob)
+            self.assertIn("discord-12", blob)
+            self.assertEqual(blob.count("still here with you"), 1)
         finally:
             main.CHAT_DB_FILE = original_db
             temp_dir.cleanup()
