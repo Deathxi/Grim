@@ -1137,6 +1137,9 @@ class SecurityControlsTests(unittest.TestCase):
         )
         self.assertIn("An @mention is not required", changelog)
         self.assertIn("Empty pings and drive-by name-drops get no reply", changelog)
+        self.assertIn("Calling pings", changelog)
+        self.assertIn("rotating human greeting", changelog)
+        self.assertIn("Drive-by noun mentions stay quiet unless he can actually help", changelog)
         self.assertIn("real filenames on ordinary deploys", changelog)
         self.assertIn(
             "always post normal public patch notes with real filenames",

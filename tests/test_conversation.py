@@ -122,7 +122,10 @@ class ConversationPersistenceTests(unittest.TestCase):
         for idx, text in enumerate(lines, start=FOLLOW_ID):
             with self.subTest(text=text):
                 bare = chat_message(text, mid=idx, reference=None)
-                self.assertFalse(main.grim_should_reply_to_message(bare))
+                if main.grim_name_call_is_bare(text):
+                    self.assertTrue(main.grim_should_reply_to_message(bare))
+                else:
+                    self.assertFalse(main.grim_should_reply_to_message(bare))
                 self.assertTrue(main.grim_chat_turn_action(bare, now=T0 + idx))
         self.assertTrue(main.grim_conversation_open(opener, now=T0 + FOLLOW_ID))
         self.assertTrue(main._needs_live_sources(FOLLOW_UP, ""))
@@ -154,12 +157,14 @@ class ConversationPersistenceTests(unittest.TestCase):
             )
         )
 
-    def test_lone_grim_ping_continues_only_while_the_conversation_is_open(self):
+    def test_lone_grim_ping_is_a_bare_name_call_and_still_continues(self):
         ping = chat_message("Grim", mid=FOLLOW_ID, reference=None)
-        self.assertFalse(main.grim_should_reply_to_message(ping))
-        self.assertFalse(main.grim_chat_turn_action(ping, now=T0))
-        self.start_opener()
-        self.assertTrue(main.grim_chat_turn_action(ping, now=T0 + 4))
+        self.assertTrue(main.grim_name_call_is_bare("Grim"))
+        self.assertTrue(main.grim_should_reply_to_message(ping))
+        self.assertTrue(main.grim_chat_turn_action(ping, now=T0))
+        self.assertTrue(main.grim_conversation_open(ping, now=T0))
+        later = chat_message("you there bruh", mid=3, reference=None)
+        self.assertTrue(main.grim_chat_turn_action(later, now=T0 + 4))
 
     def test_saying_this_was_for_someone_else_ends_it_and_stays_quiet(self):
         opener = self.start_opener()
