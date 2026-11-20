@@ -7880,15 +7880,50 @@ def _extract_added_changelog_notes(patch: str) -> list[str]:
                 notes.append(note)
     return notes
 
+# Discord embed field values fail the whole message above this length.
+# V2.86's changelog bullets were 1058 characters, so the real card never
+# sent and the retry fell through to the one-line fallback.
+DISCORD_EMBED_FIELD_LIMIT = 1024
+DISCORD_EMBED_DESC_LIMIT = 4096
+
+
+def _patch_note_chunks(
+    notes: list[str],
+    max_notes: int = 8,
+    field_limit: int = DISCORD_EMBED_FIELD_LIMIT,
+) -> list[str]:
+    """Public changelog bullets split so each Discord field can be sent."""
+    lines = []
+    seen = set()
+    for note in notes:
+        clean = " ".join(str(note).split())
+        if not clean or clean in seen:
+            continue
+        seen.add(clean)
+        prefix = "• "
+        room = field_limit - len(prefix)
+        if room > 3 and len(clean) > room:
+            clean = f"{clean[: room - 3].rstrip()}..."
+        lines.append(prefix + clean)
+        if len(lines) >= max_notes:
+            break
+    chunks = []
+    current: list[str] = []
+    for line in lines:
+        trial = "\n".join(current + [line])
+        if current and len(trial) > field_limit:
+            chunks.append("\n".join(current))
+            current = [line]
+        else:
+            current.append(line)
+    if current:
+        chunks.append("\n".join(current))
+    return chunks
+
+
 def _format_patch_notes(notes: list[str], max_notes: int = 8) -> str:
-    """Format changelog bullets for a compact Discord embed field."""
-    formatted = []
-    for note in notes[:max_notes]:
-        clean_note = " ".join(note.split())
-        if len(clean_note) > 240:
-            clean_note = f"{clean_note[:237].rstrip()}..."
-        formatted.append(f"• {clean_note}")
-    return "\n".join(formatted)
+    """Format changelog bullets for a Discord deploy card."""
+    return "\n".join(_patch_note_chunks(notes, max_notes=max_notes))
 
 # Stealth logs on /grim_updates are off. Every deploy card lists real
 # filenames and the public changelog bullets. A CLASSIFIED label cannot
@@ -7913,100 +7948,267 @@ def _deploy_card_patch_notes(notes: list[str], *, classified=False) -> list[str]
     return list(notes)
 
 
+def _run_git(args: list[str], *, repo_dir: str):
+    """Read-only git. The live unit keeps the checkout read-only."""
+    try:
+        return subprocess.run(
+            ["git", *args],
+            cwd=repo_dir,
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+            env={
+                **os.environ,
+                "GIT_OPTIONAL_LOCKS": "0",
+                "GIT_PAGER": "cat",
+                "GIT_TERMINAL_PROMPT": "0",
+            },
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def _valid_git_sha(value) -> str | None:
+    if isinstance(value, str) and re.fullmatch(r"[0-9a-fA-F]{40}", value.strip()):
+        return value.strip()
+    return None
+
+
+def _read_local_deploy_delta(since_revision: str | None = None, *, repo_dir: str | None = None) -> dict:
+    """Filenames and changelog bullets in the checkout that just deployed.
+
+    Compares since_revision..HEAD when that revision is an ancestor.
+    Otherwise uses the latest commit only — the merge currently checked out.
+    Does not call GitHub and does not write the repository.
+    """
+    empty = {"sha": None, "commit_count": 0, "filenames": [], "notes": []}
+    repo_dir = repo_dir or os.path.dirname(os.path.abspath(__file__))
+    head_run = _run_git(["rev-parse", "HEAD"], repo_dir=repo_dir)
+    if not head_run or head_run.returncode != 0:
+        return empty
+    head = _valid_git_sha(head_run.stdout)
+    if not head:
+        return empty
+
+    since = _valid_git_sha(since_revision)
+    use_range = False
+    if since and since != head:
+        ancestor = _run_git(["merge-base", "--is-ancestor", since, head], repo_dir=repo_dir)
+        use_range = bool(ancestor and ancestor.returncode == 0)
+
+    if use_range:
+        names_run = _run_git(
+            ["diff-tree", "-r", "--name-only", "--no-commit-id", since, head],
+            repo_dir=repo_dir,
+        )
+        patch_run = _run_git(
+            ["diff-tree", "-U0", "-r", "--no-commit-id", since, head, "--", "CHANGELOG.md"],
+            repo_dir=repo_dir,
+        )
+        count_run = _run_git(["rev-list", "--count", f"{since}..{head}"], repo_dir=repo_dir)
+        count_text = (count_run.stdout or "").strip() if count_run and count_run.returncode == 0 else ""
+        commit_count = int(count_text) if count_text.isdigit() else 0
+    else:
+        names_run = _run_git(
+            ["diff-tree", "-r", "--name-only", "--no-commit-id", head],
+            repo_dir=repo_dir,
+        )
+        patch_run = _run_git(
+            ["show", "-U0", "--pretty=format:", "--no-renames", head, "--", "CHANGELOG.md"],
+            repo_dir=repo_dir,
+        )
+        commit_count = 1
+
+    filenames = []
+    if names_run and names_run.returncode == 0:
+        for line in names_run.stdout.splitlines():
+            name = line.strip().replace("\\", "/")
+            if name and name not in filenames:
+                filenames.append(name)
+    notes = []
+    if patch_run and patch_run.returncode == 0:
+        notes = _extract_added_changelog_notes(patch_run.stdout or "")
+    if not commit_count and (filenames or notes):
+        commit_count = 1
+    return {
+        "sha": head,
+        "commit_count": commit_count,
+        "filenames": filenames,
+        "notes": notes,
+    }
+
+
+def _build_deploy_update_embed(
+    *,
+    version: str,
+    repo: str,
+    commit_count: int,
+    filenames: list[str],
+    notes: list[str],
+    change_count: int | None = None,
+) -> discord.Embed:
+    """Normal public deploy card. Notes stay on the card even with no GitHub commits."""
+    file_list = "\n".join(f"`{name}`" for name in filenames)
+    note_text = _format_patch_notes(notes)
+    if commit_count:
+        header = f"**{commit_count} commit(s) deployed**"
+    elif note_text or file_list:
+        header = "**Updated and redeployed**"
+    else:
+        header = "Grim has been updated and redeployed."
+    # The body holds the notes. A field stops at 1024 characters, and the
+    # V2.86 changelog was longer than that, so the real card never sent.
+    body = [header]
+    if note_text:
+        body.append(f"**Patch Notes**\n{note_text}")
+    if file_list:
+        body.append(file_list)
+    description = "\n\n".join(body)
+    note_chunks: list[str] = []
+    if len(description) > DISCORD_EMBED_DESC_LIMIT and note_text:
+        note_chunks = _patch_note_chunks(notes)
+        body = [header]
+        if file_list:
+            body.append(file_list)
+        description = "\n\n".join(body)
+    if len(description) > DISCORD_EMBED_DESC_LIMIT:
+        description = f"{description[: DISCORD_EMBED_DESC_LIMIT - 3].rstrip()}..."
+    embed = discord.Embed(
+        title=f"Grim — {version}",
+        description=description,
+        color=discord.Color.from_rgb(18, 18, 18),
+    )
+    for chunk in note_chunks:
+        embed.add_field(name="Patch Notes", value=chunk, inline=False)
+    embed.add_field(name="Repository", value=f"[{repo}](https://github.com/{repo})", inline=True)
+    total_changes = len(filenames) if change_count is None else change_count
+    if total_changes:
+        embed.add_field(name="Changes", value=str(total_changes), inline=True)
+    embed.set_footer(text=xsi_footer(version=version))
+    return embed
+
+
+_update_notification_lock = asyncio.Lock()
+
+
 async def post_update_notification():
     """Post an update embed to all registered channels when the version has changed.
-    Fully GitHub-independent — uses persistent disk to track last announced version."""
-    # Delay to ensure guild/channel cache is fully populated
-    await asyncio.sleep(30)
 
-    if not updates_channels:
-        print("[Updates] No channels registered, skipping.")
-        return
+    Patch notes come from the checkout's CHANGELOG (the merge that shipped).
+    The optional GitHub token only fills in when that local diff has no notes.
+    A failed send does not advance the announced revision, so the next start
+    can still post the real notes. Stealth logs cannot fire.
+    """
+    async with _update_notification_lock:
+        # Delay to ensure guild/channel cache is fully populated
+        await asyncio.sleep(30)
 
-    last_version = _load_last_announced_version()
-    if last_version == VERSION:
-        print(f"[Updates] Already announced {VERSION}, skipping.")
-        return
+        if not updates_channels:
+            print("[Updates] No channels registered, skipping.")
+            return
 
-    print(f"[Updates] New version detected: {last_version or 'none'} → {VERSION}. Posting to {len(updates_channels)} channel(s).")
+        last_version = _load_last_announced_version()
+        if last_version == VERSION:
+            print(f"[Updates] Already announced {VERSION}, skipping.")
+            return
 
-    # Try to pull commit data from GitHub for a richer embed
-    repo = "Deathxi/Grim"
-    branch = "main"
-    new_commits = []
-    changed_files = {}
-    patch_notes = []
-    token = os.environ.get("GITHUB_PERSONAL_ACCESS_TOKEN")
-    if token:
-        try:
-            headers = {"Authorization": f"token {token}", "Accept": "application/vnd.github.v3+json", "User-Agent": "GrimBot"}
-            async with aiohttp.ClientSession() as session:
-                async with session.get(f"https://api.github.com/repos/{repo}/commits?ref={branch}&per_page=25", headers=headers) as r:
-                    all_commits = await r.json()
-                if isinstance(all_commits, list) and all_commits:
-                    latest_sha = all_commits[0]["sha"]
-                    last_sha = updates_sha.get("_global")
-                    for commit in all_commits:
-                        if commit["sha"] == last_sha:
-                            break
-                        new_commits.append(commit)
-                        if len(new_commits) >= 10:
-                            break
-                    # Fetch changed files from the most recent commits
-                    for commit in new_commits[:5]:
-                        async with session.get(f"https://api.github.com/repos/{repo}/commits/{commit['sha']}", headers=headers) as r:
-                            detail = await r.json()
-                        for file in detail.get("files", []):
-                            changed_files[file["filename"]] = file["status"]
-                            if file["filename"] == "CHANGELOG.md" and file.get("patch"):
-                                patch_notes.extend(
-                                    _extract_added_changelog_notes(file["patch"])
-                                )
-                    updates_sha["_global"] = latest_sha
-                    save_updates_sha(updates_sha)
-        except Exception as e:
-            print(f"[Updates] Could not fetch GitHub commit data: {e}")
+        print(f"[Updates] New version detected: {last_version or 'none'} → {VERSION}. Posting to {len(updates_channels)} channel(s).")
 
-    # Always a normal public card: real filenames and public changelog
-    # bullets. Stealth logs cannot fire.
-    public_notes = _deploy_card_patch_notes(patch_notes)
-    if new_commits:
+        repo = "Deathxi/Grim"
+        branch = "main"
+        delta = _read_local_deploy_delta(updates_sha.get("_announced_revision"))
+        patch_notes = list(delta["notes"])
+        changed_files = {name: "modified" for name in delta["filenames"]}
+        commit_count = delta["commit_count"]
+        announced_sha = delta["sha"]
+        github_sha = None
+        if patch_notes:
+            print(f"[Updates] {len(patch_notes)} changelog note(s) from the deployed checkout.")
+        else:
+            print("[Updates] No changelog bullets in the local merge diff.")
+
+        # Optional. The card already has the checkout's notes when git worked.
+        # List-commits takes `sha`, not `ref`. The cursor is saved only after
+        # Discord accepts the card.
+        token = os.environ.get("GITHUB_PERSONAL_ACCESS_TOKEN")
+        if token and not patch_notes:
+            try:
+                headers = {"Authorization": f"token {token}", "Accept": "application/vnd.github.v3+json", "User-Agent": "GrimBot"}
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(
+                        f"https://api.github.com/repos/{repo}/commits?sha={branch}&per_page=25",
+                        headers=headers,
+                    ) as r:
+                        all_commits = await r.json()
+                    if isinstance(all_commits, list) and all_commits:
+                        latest_sha = all_commits[0].get("sha")
+                        if isinstance(latest_sha, str):
+                            github_sha = latest_sha
+                        last_sha = updates_sha.get("_global")
+                        new_commits = []
+                        for commit in all_commits:
+                            if commit.get("sha") == last_sha:
+                                break
+                            new_commits.append(commit)
+                            if len(new_commits) >= 10:
+                                break
+                        if new_commits and not commit_count:
+                            commit_count = len(new_commits)
+                        fill_files = not changed_files
+                        for commit in new_commits[:5]:
+                            async with session.get(
+                                f"https://api.github.com/repos/{repo}/commits/{commit['sha']}",
+                                headers=headers,
+                            ) as r:
+                                detail = await r.json()
+                            if not isinstance(detail, dict):
+                                continue
+                            for file in detail.get("files", []):
+                                filename = file.get("filename")
+                                if not filename:
+                                    continue
+                                if fill_files:
+                                    changed_files[filename] = file.get("status", "modified")
+                                if filename == "CHANGELOG.md" and file.get("patch"):
+                                    patch_notes.extend(
+                                        _extract_added_changelog_notes(file["patch"])
+                                    )
+            except Exception as e:
+                print(f"[Updates] Could not fetch GitHub commit data: {e}")
+
+        # Always a normal public card: real filenames and public changelog
+        # bullets. Stealth logs cannot fire.
+        public_notes = _deploy_card_patch_notes(patch_notes)
         file_names = _deploy_card_file_names(changed_files)
-        file_list = "\n".join(f"`{fname}`" for fname in file_names) if file_names else ""
-        description = f"**{len(new_commits)} commit(s) deployed**"
-        if file_list:
-            description += f"\n\n{file_list}"
-    else:
-        description = "Grim has been updated and redeployed."
-    embed = discord.Embed(
-        title=f"Grim — {VERSION}",
-        description=description,
-        color=discord.Color.from_rgb(18, 18, 18)
-    )
-    if public_notes:
-        embed.add_field(
-            name="Patch Notes",
-            value=_format_patch_notes(public_notes),
-            inline=False,
+        embed = _build_deploy_update_embed(
+            version=VERSION,
+            repo=repo,
+            commit_count=commit_count,
+            filenames=file_names,
+            notes=public_notes,
+            change_count=len(changed_files),
         )
-    embed.add_field(name="Repository", value=f"[{repo}](https://github.com/{repo})", inline=True)
-    if changed_files:
-        embed.add_field(name="Changes", value=str(len(changed_files)), inline=True)
-    embed.set_footer(text=xsi_footer())
 
-    posted = False
-    for guild_id, data in list(updates_channels.items()):
-        try:
-            channel = await bot.fetch_channel(int(data["channel_id"]))
-            await channel.send(embed=embed)
-            print(f"[Updates] Posted to channel {data['channel_id']} in guild {guild_id}")
-            posted = True
-        except Exception as e:
-            print(f"[Updates] Could not post to channel {data['channel_id']} in guild {guild_id}: {e}")
+        posted = False
+        for guild_id, data in list(updates_channels.items()):
+            try:
+                channel = await bot.fetch_channel(int(data["channel_id"]))
+                await channel.send(embed=embed)
+                print(f"[Updates] Posted to channel {data['channel_id']} in guild {guild_id}")
+                posted = True
+            except Exception as e:
+                print(f"[Updates] Could not post to channel {data['channel_id']} in guild {guild_id}: {e}")
 
-    if posted:
-        _save_last_announced_version(VERSION)
-        print(f"[Updates] Saved last announced version as {VERSION}")
+        if posted:
+            if announced_sha:
+                updates_sha["_announced_revision"] = announced_sha
+            if github_sha:
+                updates_sha["_global"] = github_sha
+            if announced_sha or github_sha:
+                save_updates_sha(updates_sha)
+            _save_last_announced_version(VERSION)
+            print(f"[Updates] Saved last announced version as {VERSION}")
 
 async def post_outage_after_report(outage: dict, report_id: str | None = None):
     """Post recovery details to the channels configured by /grim_updates."""
