@@ -387,7 +387,7 @@ class SecurityControlsTests(unittest.TestCase):
     def test_regular_member_cannot_manage_channels(self):
         event = interaction()
         allowed = asyncio.run(
-            main.require_permission(event, "manage_channels", "nftwatch_create")
+            main.require_permission(event, "manage_channels", "member_log_manage")
         )
         self.assertFalse(allowed)
         self.assertTrue(event.response.messages)
@@ -409,7 +409,7 @@ class SecurityControlsTests(unittest.TestCase):
         moderator = interaction(manage_channels=True)
         self.assertTrue(
             asyncio.run(
-                main.require_permission(moderator, "manage_channels", "nftwatch_create")
+                main.require_permission(moderator, "manage_channels", "member_log_manage")
             )
         )
         self.assertFalse(
@@ -542,6 +542,17 @@ class SecurityControlsTests(unittest.TestCase):
         self.assertNotIn("grim_memberlog", slash_names)
         self.assertIn("vc_join", slash_names)
         self.assertIn("vc_leave", slash_names)
+        self.assertIn("ghostwrite", slash_names)
+        self.assertIn("status", slash_names)
+        for retired in (
+            "livetweet",
+            "nftwatch",
+            "nftwatch_cancel",
+            "redditfeed",
+            "redditfeed_cancel",
+            "redditfeed_status",
+        ):
+            self.assertNotIn(retired, slash_names)
         self.assertNotIn("server", prefix_names)
         self.assertNotIn("info", prefix_names)
         clear_command = next(
@@ -555,6 +566,34 @@ class SecurityControlsTests(unittest.TestCase):
         self.assertEqual(number_parameter.min_value, 1)
         self.assertEqual(number_parameter.max_value, 100)
         self.assertTrue(clear_command.default_permissions.manage_messages)
+
+    def test_status_omits_retired_feeds_and_keeps_the_x_client(self):
+        source = Path(main.__file__).read_text()
+        start = source.index("async def grim_status(")
+        end = source.index('@bot.tree.command(name="mod_add"', start)
+        status = source[start:end]
+        for gone in (
+            "X/Twitter",
+            "OpenSea",
+            "Reddit Feed",
+            "Livetweets",
+            "NFT Watch",
+            "Reddit Feeds",
+            "NFT Watches",
+            "api.twitter.com",
+            "OPENSEA_API_KEY",
+        ):
+            self.assertNotIn(gone, status)
+        self.assertIn("Discord", status)
+        self.assertIn("xAI", status)
+        self.assertIn("**Voice:**", status)
+        self.assertIn('"RemindMe"', status)
+        self.assertIn('"VC Monitor"', status)
+        self.assertIn("get_twitter_client", source[source.index("async def fetch_user_tweets"):source.index("async def generate_ghostwrite")])
+        self.assertNotIn("def parse_opensea_url", source)
+        self.assertNotIn("def check_livetweets", source)
+        self.assertNotIn("def check_redditfeed", source)
+        self.assertNotIn("def check_nftwatch", source)
 
     def test_help_names_admin_commands_and_leaves_language_open(self):
         ctx = FakeContext()
@@ -576,6 +615,15 @@ class SecurityControlsTests(unittest.TestCase):
         self.assertEqual(fields["/grim_translate"], "Translate text")
         self.assertNotIn("admin", fields["/grim_language"].lower())
         self.assertNotIn("admin", fields["/grim_translate"].lower())
+        for retired in (
+            "/livetweet",
+            "/nftwatch",
+            "/nftwatch_cancel",
+            "/redditfeed",
+            "/redditfeed_cancel",
+            "/redditfeed_status",
+        ):
+            self.assertNotIn(retired, fields)
 
     def test_admin_slash_commands_use_the_say_gate(self):
         admin_commands = (

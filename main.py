@@ -496,23 +496,6 @@ async def _x_api_call(method, /, **kwargs):
         asyncio.to_thread(method, **kwargs), timeout=X_API_TIMEOUT_SECONDS
     )
 
-# Storage for live tweet tracking: {channel_id: {"username": str, "user_id": str, "last_tweet_id": str}}
-LIVETWEET_FILE = _data_path("livetweet_data.json")
-
-def load_livetweet_data():
-    try:
-        if os.path.exists(LIVETWEET_FILE):
-            with open(LIVETWEET_FILE, 'r') as f:
-                return json.load(f)
-    except:
-        pass
-    return {}
-
-def save_livetweet_data(data):
-    _atomic_json_write(LIVETWEET_FILE, data)
-
-livetweet_channels = load_livetweet_data()
-
 # Cache for ghostwrite tweet data: {username: {"data": tweet_data, "timestamp": time}}
 import time
 from datetime import datetime, time as clock_time, timezone, timedelta
@@ -1821,39 +1804,6 @@ def profile_needs_update(guild_id: str, member_id: str, current_count: int) -> b
     except:
         return False
 
-NFTWATCH_FILE = _data_path("nftwatch_data.json")
-
-def load_nftwatch_data():
-    try:
-        if os.path.exists(NFTWATCH_FILE):
-            with open(NFTWATCH_FILE, 'r') as f:
-                return json.load(f)
-    except:
-        pass
-    return {}
-
-def save_nftwatch_data(data):
-    _atomic_json_write(NFTWATCH_FILE, data)
-
-nftwatch_feeds = load_nftwatch_data()
-
-# Storage for redditfeed: {feed_id: {"channel_id": str, "guild_id": str, "subreddits": list, "interval_minutes": int, "last_run": float, "posted_urls": list}}
-REDDITFEED_FILE = _data_path("redditfeed_data.json")
-
-def load_redditfeed_data():
-    try:
-        if os.path.exists(REDDITFEED_FILE):
-            with open(REDDITFEED_FILE, 'r') as f:
-                return json.load(f)
-    except:
-        pass
-    return {}
-
-def save_redditfeed_data(data):
-    _atomic_json_write(REDDITFEED_FILE, data)
-
-redditfeed_feeds = load_redditfeed_data()
-
 MODERATION_FILE = _data_path("moderation_data.json")
 
 def load_moderation_data():
@@ -2243,40 +2193,6 @@ def parse_remindme_target(when_str: str):
         return parsed.timestamp()
 
     return None
-
-def parse_opensea_url(url):
-    url = url.strip().rstrip('/')
-    patterns = [
-        r'opensea\.io/collection/([a-zA-Z0-9_-]+)',
-        r'opensea\.io/assets/([a-zA-Z0-9]+)/(0x[a-fA-F0-9]+)',
-    ]
-    slug_match = re.match(patterns[0], url.split('://')[-1].split('www.')[-1])
-    if slug_match:
-        return {"type": "slug", "slug": slug_match.group(1)}
-    contract_match = re.match(patterns[1], url.split('://')[-1].split('www.')[-1])
-    if contract_match:
-        return {"type": "contract", "chain": contract_match.group(1), "address": contract_match.group(2)}
-    return None
-
-async def fetch_opensea_api(session, endpoint, params=None):
-    api_key = os.environ.get("OPENSEA_API_KEY")
-    if not api_key:
-        return None
-    headers = {
-        "accept": "application/json",
-        "X-API-KEY": api_key
-    }
-    url = f"https://api.opensea.io/api/v2{endpoint}"
-    try:
-        async with session.get(url, headers=headers, params=params) as resp:
-            if resp.status == 200:
-                return await resp.json()
-            else:
-                print(f"[NFTWatch] API error {resp.status}: {await resp.text()}")
-                return None
-    except Exception as e:
-        print(f"[NFTWatch] Request error: {e}")
-        return None
 
 # Using xAI/Grok API with OpenAI-compatible client
 HAIKU_THEMES = [
@@ -6423,320 +6339,6 @@ Make it sound authentically like them."""
         print(f"Error generating ghostwrite: {e}")
         return None
 
-@tasks.loop(minutes=3)
-async def check_livetweets():
-    global livetweet_channels
-    if not livetweet_channels:
-        return
-    
-    twitter = get_twitter_client()
-    if not twitter:
-        return
-    
-    channels_to_remove = []
-    
-    for channel_id, data in list(livetweet_channels.items()):
-        try:
-            channel = bot.get_channel(int(channel_id))
-            if not channel:
-                channels_to_remove.append(channel_id)
-                continue
-            
-            tweets = await _x_api_call(
-                twitter.get_users_tweets,
-                id=data["user_id"],
-                max_results=5,
-                since_id=data.get("last_tweet_id"),
-                tweet_fields=['created_at', 'text', 'attachments'],
-                expansions=['attachments.media_keys', 'author_id'],
-                media_fields=['url', 'preview_image_url', 'type'],
-                user_fields=['profile_image_url', 'name', 'username']
-            )
-            
-            if tweets.data:
-                user_info = None
-                if tweets.includes and 'users' in tweets.includes:
-                    user_info = tweets.includes['users'][0]
-                
-                media_dict = {}
-                if tweets.includes and 'media' in tweets.includes:
-                    for media in tweets.includes['media']:
-                        media_dict[media.media_key] = media
-                
-                for tweet in reversed(tweets.data):
-                    embed = discord.Embed(
-                        description=tweet.text,
-                        color=discord.Color.from_rgb(18, 18, 18),
-                        url=f"https://x.com/{data['username']}/status/{tweet.id}"
-                    )
-                    
-                    if user_info:
-                        embed.set_author(
-                            name=f"{user_info.name} (@{user_info.username})",
-                            icon_url=user_info.profile_image_url,
-                            url=f"https://x.com/{user_info.username}"
-                        )
-                    
-                    if hasattr(tweet, 'attachments') and tweet.attachments:
-                        media_keys = tweet.attachments.get('media_keys', [])
-                        for key in media_keys:
-                            if key in media_dict:
-                                media = media_dict[key]
-                                if hasattr(media, 'url') and media.url:
-                                    embed.set_image(url=media.url)
-                                    break
-                                elif hasattr(media, 'preview_image_url') and media.preview_image_url:
-                                    embed.set_image(url=media.preview_image_url)
-                                    break
-                    
-                    embed.set_footer(text=xsi_footer("X"))
-                    await channel.send(embed=embed)
-                
-                livetweet_channels[channel_id]["last_tweet_id"] = str(tweets.data[0].id)
-                save_livetweet_data(livetweet_channels)
-                
-        except Exception as e:
-            print(f"Error checking tweets for {data.get('username', 'unknown')}: {e}")
-    
-    for cid in channels_to_remove:
-        del livetweet_channels[cid]
-        save_livetweet_data(livetweet_channels)
-
-@check_livetweets.before_loop
-async def before_check_livetweets():
-    await bot.wait_until_ready()
-
-@check_livetweets.after_loop
-async def after_check_livetweets():
-    if check_livetweets.is_being_cancelled():
-        print("[Livetweets] Task was cancelled")
-    else:
-        print("[Livetweets] Task stopped unexpectedly, will restart on next health check")
-
-@tasks.loop(seconds=30)
-async def check_nftwatch():
-    global nftwatch_feeds
-    if not nftwatch_feeds:
-        return
-    
-    async with aiohttp.ClientSession() as session:
-        for watch_id, data in list(nftwatch_feeds.items()):
-            try:
-                slug = data.get("slug")
-                channel_id = data.get("channel_id")
-                channel = bot.get_channel(int(channel_id))
-                if not channel:
-                    continue
-                
-                last_event_time = data.get("last_event_time", 0)
-                
-                params = {
-                    "event_type": ["listing"],
-                    "limit": 10
-                }
-                if last_event_time > 0:
-                    params["after"] = int(last_event_time)
-                
-                result = await fetch_opensea_api(session, f"/events/collection/{slug}", params)
-                if not result or "asset_events" not in result:
-                    continue
-                
-                events = result["asset_events"]
-                if not events:
-                    continue
-                
-                newest_time = last_event_time
-                new_listings = []
-                
-                for event in events:
-                    event_ts = event.get("event_timestamp", 0)
-                    if isinstance(event_ts, str):
-                        try:
-                            dt = datetime.fromisoformat(event_ts.replace("Z", "+00:00"))
-                            event_ts = dt.timestamp()
-                        except:
-                            continue
-                    
-                    if event_ts > last_event_time:
-                        new_listings.append(event)
-                        if event_ts > newest_time:
-                            newest_time = event_ts
-                
-                if not new_listings:
-                    continue
-                
-                nftwatch_feeds[watch_id]["last_event_time"] = newest_time
-                save_nftwatch_data(nftwatch_feeds)
-                
-                for event in new_listings[:5]:
-                    try:
-                        nft_data = event.get("nft", {})
-                        token_id = nft_data.get("identifier", "?")
-                        nft_name = nft_data.get("name") or f"#{token_id}"
-                        image_url = nft_data.get("image_url") or nft_data.get("display_image_url")
-                        opensea_url = nft_data.get("opensea_url", "")
-                        
-                        payment = event.get("payment", {})
-                        price_raw = payment.get("quantity", "0")
-                        decimals = int(payment.get("decimals", 18))
-                        symbol = payment.get("symbol", "ETH")
-                        try:
-                            price_val = int(price_raw) / (10 ** decimals)
-                            if price_val >= 1:
-                                price_str = f"{price_val:.4f} {symbol}"
-                            else:
-                                price_str = f"{price_val:.6f} {symbol}"
-                        except:
-                            price_str = "Price unavailable"
-                        
-                        contract_addr = nft_data.get("contract", "")
-                        chain = event.get("chain", "ethereum")
-                        
-                        rarity_str = None
-                        nft_detail = await fetch_opensea_api(session, f"/chain/{chain}/contract/{contract_addr}/nfts/{token_id}")
-                        if nft_detail and "nft" in nft_detail:
-                            detail = nft_detail["nft"]
-                            rarity_info = detail.get("rarity")
-                            if rarity_info:
-                                rank = rarity_info.get("rank")
-                                max_rank = rarity_info.get("max_rank")
-                                if rank:
-                                    rarity_str = f"Rank #{rank}"
-                                    if max_rank:
-                                        rarity_str += f" / {max_rank}"
-                            if not image_url:
-                                image_url = detail.get("image_url") or detail.get("display_image_url")
-                        
-                        embed = discord.Embed(
-                            title=nft_name,
-                            url=opensea_url if opensea_url else None,
-                            color=discord.Color.from_rgb(18, 18, 18)
-                        )
-                        
-                        info_lines = [f"**Token:** #{token_id}", f"**Price:** {price_str}"]
-                        if rarity_str:
-                            info_lines.append(f"**Rarity:** {rarity_str}")
-                        embed.description = "\n".join(info_lines)
-                        
-                        if image_url:
-                            embed.set_image(url=image_url)
-                        
-                        embed.add_field(name="\u200b", value=f"```{slug}```", inline=True)
-                        embed.add_field(name="\u200b", value="```NEW LISTING```", inline=True)
-                        embed.set_footer(text=xsi_footer("Grim NFT Watch"))
-                        
-                        await channel.send(embed=embed)
-                        await asyncio.sleep(1)
-                        
-                    except Exception as e:
-                        print(f"[NFTWatch] Error posting listing: {e}")
-                
-            except Exception as e:
-                print(f"[NFTWatch] Error checking {data.get('slug', 'unknown')}: {e}")
-
-@check_nftwatch.before_loop
-async def before_check_nftwatch():
-    await bot.wait_until_ready()
-
-@check_nftwatch.after_loop
-async def after_check_nftwatch():
-    if check_nftwatch.is_being_cancelled():
-        print("[NFTWatch] Task was cancelled")
-    else:
-        print("[NFTWatch] Task stopped unexpectedly, will restart on next health check")
-
-_REDDIT_IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".gif", ".webp")
-
-@tasks.loop(minutes=1)
-async def check_redditfeed():
-    global redditfeed_feeds
-    if not redditfeed_feeds:
-        return
-
-    current_time = time.time()
-
-    for feed_id, data in list(redditfeed_feeds.items()):
-        try:
-            interval_seconds = data.get("interval_minutes", 60) * 60
-            last_run = data.get("last_run", 0)
-            if current_time - last_run < interval_seconds:
-                continue
-
-            channel = bot.get_channel(int(data["channel_id"]))
-            if not channel:
-                continue
-
-            subreddits = data.get("subreddits", [])
-            if not subreddits:
-                continue
-
-            posted_urls = set(data.get("posted_urls", []))
-
-            # Pick a random subreddit from the list for variety
-            import random
-            subreddit = random.choice(subreddits)
-            url = f"https://www.reddit.com/r/{subreddit}/hot.json?limit=50"
-            headers = {"User-Agent": "GrimBot/1.0 (Discord bot; github.com/Deathxi/Grim)"}
-
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as resp:
-                    if resp.status != 200:
-                        print(f"[RedditFeed] r/{subreddit} returned {resp.status}")
-                        continue
-                    raw = await resp.json()
-
-            posts = raw.get("data", {}).get("children", [])
-            image_posts = [
-                p["data"] for p in posts
-                if not p["data"].get("is_self", True)
-                and p["data"].get("url", "").lower().endswith(_REDDIT_IMAGE_EXTS)
-                and p["data"].get("url") not in posted_urls
-                and not p["data"].get("over_18", False)
-            ]
-
-            if not image_posts:
-                print(f"[RedditFeed] No new image posts in r/{subreddit}")
-                continue
-
-            post = random.choice(image_posts)
-            img_url = post.get("url", "")
-            title = post.get("title", "")[:250]
-            permalink = "https://reddit.com" + post.get("permalink", "")
-            score = post.get("score", 0)
-
-            embed = discord.Embed(
-                description=f"[{title}]({permalink})",
-                color=discord.Color.from_rgb(18, 18, 18)
-            )
-            embed.set_image(url=img_url)
-            embed.set_footer(text=xsi_footer(f"r/{subreddit}", f"↑{score:,}"))
-
-            await channel.send(embed=embed)
-
-            # Keep posted_urls list bounded to last 500 entries
-            posted_urls.add(img_url)
-            if len(posted_urls) > 500:
-                posted_urls = set(list(posted_urls)[-500:])
-
-            redditfeed_feeds[feed_id]["posted_urls"] = list(posted_urls)
-            redditfeed_feeds[feed_id]["last_run"] = current_time
-            save_redditfeed_data(redditfeed_feeds)
-            print(f"[RedditFeed] Posted from r/{subreddit} to channel {data['channel_id']}")
-
-        except Exception as e:
-            print(f"[RedditFeed] Error for feed {feed_id}: {e}")
-
-@check_redditfeed.before_loop
-async def before_check_redditfeed():
-    await bot.wait_until_ready()
-
-@check_redditfeed.after_loop
-async def after_check_redditfeed():
-    if check_redditfeed.is_being_cancelled():
-        print("[RedditFeed] Task was cancelled")
-    else:
-        print("[RedditFeed] Task stopped unexpectedly, will restart on next health check")
-
 # ── Member directory UI ─────────────────────────────────────────────────────
 MEMBER_DIRECTORY_PAGE_SIZE = 20
 
@@ -7032,27 +6634,6 @@ async def health_monitor():
         
         tasks_status = []
         
-        # Check and restart livetweets task
-        if not check_livetweets.is_running():
-            print("[Health Monitor] Livetweets task not running, restarting...")
-            try:
-                check_livetweets.start()
-                tasks_status.append("livetweets: RESTARTED")
-            except Exception as e:
-                tasks_status.append(f"livetweets: FAILED ({e})")
-        else:
-            tasks_status.append("livetweets: OK")
-        
-        if not check_nftwatch.is_running():
-            print("[Health Monitor] NFTWatch task not running, restarting...")
-            try:
-                check_nftwatch.start()
-                tasks_status.append("nftwatch: RESTARTED")
-            except Exception as e:
-                tasks_status.append(f"nftwatch: FAILED ({e})")
-        else:
-            tasks_status.append("nftwatch: OK")
-
         if not check_remindme.is_running():
             print("[Health Monitor] RemindMe task not running, restarting...")
             try:
@@ -7082,16 +6663,6 @@ async def health_monitor():
                 tasks_status.append(f"vc_monitor: FAILED ({e})")
         else:
             tasks_status.append("vc_monitor: OK")
-
-        if not check_redditfeed.is_running():
-            print("[Health Monitor] Reddit feed task not running, restarting...")
-            try:
-                check_redditfeed.start()
-                tasks_status.append("redditfeed: RESTARTED")
-            except Exception as e:
-                tasks_status.append(f"redditfeed: FAILED ({e})")
-        else:
-            tasks_status.append("redditfeed: OK")
 
         if not runtime_heartbeat.is_running():
             print("[Health Monitor] Runtime heartbeat not running, restarting...")
@@ -7315,14 +6886,6 @@ async def on_ready():
     except Exception as e:
         print(f"[Zork] Could not register the panel: {type(e).__name__}")
     
-    if not check_livetweets.is_running():
-        check_livetweets.start()
-        print("Started livetweet checker")
-    
-    if not check_nftwatch.is_running():
-        check_nftwatch.start()
-        print("Started NFT watch checker")
-    
     if not check_remindme.is_running():
         check_remindme.start()
         print("Started remindme checker")
@@ -7351,10 +6914,6 @@ async def on_ready():
     if not vc_empty_monitor.is_running():
         vc_empty_monitor.start()
         print("Started VC empty-channel monitor (checks every 2 minutes)")
-
-    if not check_redditfeed.is_running():
-        check_redditfeed.start()
-        print("Started Reddit feed checker")
 
     if not check_grim_birthday.is_running():
         check_grim_birthday.start()
@@ -9299,60 +8858,6 @@ async def ghostwrite(interaction: discord.Interaction, username: str, topics: st
     
     await interaction.followup.send(embed=embed)
 
-@bot.tree.command(name="redditfeed_status", description="View active Reddit image feeds and their status")
-async def redditfeed_status(interaction: discord.Interaction):
-    global redditfeed_feeds
-
-    current_time = time.time()
-    guild_id_str = str(interaction.guild_id)
-
-    guild_feeds = {fid: d for fid, d in redditfeed_feeds.items() if d.get("guild_id") == guild_id_str}
-
-    task_ok = check_redditfeed.is_running()
-    embed = discord.Embed(
-        title="Reddit Feed Status",
-        description=f"**{'Operational' if task_ok else 'Attention needed'}**",
-        color=discord.Color.from_rgb(18, 18, 18)
-    )
-
-    embed.add_field(
-        name="Task",
-        value=f"**Reddit Feed:** {'Active' if task_ok else 'Stopped'}",
-        inline=False
-    )
-
-    if guild_feeds:
-        feed_lines = []
-        for feed_id, data in guild_feeds.items():
-            channel_id = data.get("channel_id")
-            subs = ", ".join([f"r/{s}" for s in data.get("subreddits", [])])
-            interval_minutes = data.get("interval_minutes", 60)
-            interval_display = f"{interval_minutes // 60}h" if interval_minutes % 60 == 0 else f"{interval_minutes}m"
-            last_run = data.get("last_run", 0)
-            interval_seconds = interval_minutes * 60
-            next_run = last_run + interval_seconds
-            time_until = next_run - current_time
-
-            if time_until <= 0:
-                next_str = "**Due now**"
-            elif time_until < 60:
-                next_str = f"in {int(time_until)}s"
-            elif time_until < 3600:
-                next_str = f"in {int(time_until / 60)}m"
-            else:
-                h = int(time_until / 3600)
-                m = int((time_until % 3600) / 60)
-                next_str = f"in {h}h {m}m"
-
-            feed_lines.append(f"**{subs}** ({interval_display})\n<#{channel_id}> · Next: {next_str} · `{feed_id}`")
-
-        embed.add_field(name=f"Feeds ({len(guild_feeds)})", value="\n".join(feed_lines), inline=False)
-    else:
-        embed.add_field(name="Feeds", value="No active Reddit feeds", inline=False)
-
-    embed.set_footer(text=xsi_footer(datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
-    await interaction.response.send_message(embed=embed, ephemeral=True)
-
 @bot.tree.command(name="status", description="Full system and API health dashboard")
 async def grim_status(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
@@ -9377,10 +8882,8 @@ async def grim_status(interaction: discord.Interaction):
     guild_count = len(bot.guilds)
     total_members = sum(g.member_count or 0 for g in bot.guilds)
 
-    # ── API health checks (run concurrently) ─────────────
+    # ── API health checks ─────────────────────────────────
     api_key = os.environ.get("XAI_API_KEY")
-    x_bearer = os.environ.get("X_BEARER_TOKEN")
-    opensea_key = os.environ.get("OPENSEA_API_KEY")
 
     async def check_xai():
         if not api_key:
@@ -9399,29 +8902,10 @@ async def grim_status(interaction: discord.Interaction):
         except:
             return "Unreachable", None
 
-    async def check_x():
-        if not x_bearer:
-            return "No key", None
-        try:
-            t0 = time.time()
-            async with aiohttp.ClientSession() as s:
-                async with s.get(
-                    "https://api.twitter.com/2/users/by/username/twitter",
-                    headers={"Authorization": f"Bearer {x_bearer}"},
-                    timeout=aiohttp.ClientTimeout(total=8)
-                ) as r:
-                    lat = round((time.time() - t0) * 1000)
-                    return ("Online" if r.status in (200, 400) else f"Error {r.status}"), lat
-        except:
-            return "Unreachable", None
-
-    (xai_status, xai_lat), (x_status, x_lat) = await asyncio.gather(check_xai(), check_x())
+    xai_status, xai_lat = await check_xai()
 
     # ── Background tasks ──────────────────────────────────
     task_map = {
-        "Reddit Feed": check_redditfeed,
-        "Livetweets": check_livetweets,
-        "NFT Watch": check_nftwatch,
         "RemindMe": check_remindme,
         "Digest": synthesize_server_digest,
         "Health Monitor": health_monitor,
@@ -9432,9 +8916,6 @@ async def grim_status(interaction: discord.Interaction):
 
     # ── Active features (this server) ─────────────────────
     guild_id_str = str(interaction.guild_id)
-    active_reddit = sum(1 for d in redditfeed_feeds.values() if d.get("guild_id") == guild_id_str)
-    active_tweets = sum(1 for d in livetweet_channels.values() if isinstance(d, dict) and d.get("guild_id") == guild_id_str)
-    active_nft = sum(1 for d in nftwatch_feeds.values() if isinstance(d, dict) and d.get("guild_id") == guild_id_str)
     vc_session = vc_sessions.get(guild_id_str)
     vc_str = f"In **{vc_session['vc'].channel.name}**" if vc_session and vc_session.get("vc") and vc_session["vc"].is_connected() else "Inactive"
 
@@ -9470,12 +8951,10 @@ async def grim_status(interaction: discord.Interaction):
     embed.add_field(name="\u200b", value="\u200b", inline=True)
 
     xai_line = f"{tick(xai_status == 'Online')} xAI — {xai_status}" + (f" ({xai_lat}ms)" if xai_lat else "")
-    x_line = f"{tick(x_status == 'Online')} X/Twitter — {x_status}" + (f" ({x_lat}ms)" if x_lat else "")
     discord_line = f"✓ Discord — Online ({latency_ms}ms)"
-    opensea_line = f"{tick(bool(opensea_key))} OpenSea — {'Key set' if opensea_key else 'No key'}"
     embed.add_field(
         name="APIs",
-        value=f"{discord_line}\n{xai_line}\n{x_line}\n{opensea_line}",
+        value=f"{discord_line}\n{xai_line}",
         inline=True
     )
 
@@ -9488,319 +8967,12 @@ async def grim_status(interaction: discord.Interaction):
 
     embed.add_field(
         name="Active (this server)",
-        value=(
-            f"**Reddit Feeds:** {active_reddit}\n"
-            f"**Livetweets:** {active_tweets}\n"
-            f"**NFT Watches:** {active_nft}\n"
-            f"**Voice:** {vc_str}"
-        ),
+        value=f"**Voice:** {vc_str}",
         inline=True
     )
 
     embed.set_footer(text=xsi_footer(datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
     await interaction.followup.send(embed=embed, ephemeral=True)
-
-@bot.tree.command(name="nftwatch", description="Watch an OpenSea collection for live new listings")
-async def nftwatch(interaction: discord.Interaction, link: str):
-    global nftwatch_feeds
-    
-    if not await require_permission(interaction, "manage_channels", "nftwatch_create"):
-        return
-    
-    api_key = os.environ.get("OPENSEA_API_KEY")
-    if not api_key:
-        await interaction.response.send_message("OpenSea API key not configured. Please add `OPENSEA_API_KEY` to the VPS `.env`.", ephemeral=True)
-        return
-    
-    await interaction.response.defer()
-    
-    parsed = parse_opensea_url(link)
-    if not parsed or parsed["type"] != "slug":
-        await interaction.followup.send("Invalid OpenSea collection link. Use a URL like `https://opensea.io/collection/collection-name`")
-        return
-    
-    slug = parsed["slug"]
-    channel_id = str(interaction.channel_id)
-    
-    for wid, wdata in nftwatch_feeds.items():
-        if wdata.get("slug") == slug and wdata.get("channel_id") == channel_id:
-            await interaction.followup.send(f"Already watching **{slug}** in this channel.")
-            return
-    
-    async with aiohttp.ClientSession() as session:
-        collection_data = await fetch_opensea_api(session, f"/collections/{slug}")
-        if not collection_data:
-            await interaction.followup.send(f"Could not find collection **{slug}** on OpenSea. Check the link and try again.")
-            return
-    
-    watch_id = str(uuid.uuid4())[:8]
-    nftwatch_feeds[watch_id] = {
-        "channel_id": channel_id,
-        "guild_id": str(interaction.guild_id),
-        "slug": slug,
-        "last_event_time": time.time(),
-        "collection_name": collection_data.get("name", slug)
-    }
-    save_nftwatch_data(nftwatch_feeds)
-    record_security_event(interaction, "nftwatch_create", "success", {"watch_id": watch_id})
-    
-    collection_name = collection_data.get("name", slug)
-    image_url = collection_data.get("image_url", "")
-    
-    embed = discord.Embed(
-        title="NFT Watch Active",
-        description=f"Monitoring **{collection_name}** for new listings.\nPolling every 30 seconds.",
-        color=discord.Color.from_rgb(18, 18, 18)
-    )
-    if image_url:
-        embed.set_thumbnail(url=image_url)
-    embed.add_field(name="\u200b", value=f"```{slug}```", inline=True)
-    embed.add_field(name="\u200b", value="```LIVE```", inline=True)
-    embed.set_footer(text=xsi_footer("Grim NFT Watch"))
-    
-    await interaction.followup.send(embed=embed)
-
-@bot.tree.command(name="nftwatch_cancel", description="Cancel an active NFT watch in this channel")
-async def nftwatch_cancel(interaction: discord.Interaction):
-    global nftwatch_feeds
-    
-    if not await require_permission(interaction, "manage_channels", "nftwatch_cancel"):
-        return
-    
-    guild_id = str(interaction.guild_id)
-    guild_watches = {wid: wdata for wid, wdata in nftwatch_feeds.items() if wdata.get("guild_id") == guild_id}
-    
-    if not guild_watches:
-        await interaction.response.send_message("No active NFT watches in this server.", ephemeral=True)
-        return
-    
-    if len(guild_watches) == 1:
-        wid = list(guild_watches.keys())[0]
-        wdata = guild_watches[wid]
-        del nftwatch_feeds[wid]
-        save_nftwatch_data(nftwatch_feeds)
-        record_security_event(interaction, "nftwatch_cancel", "success", {"watch_id": wid})
-        
-        embed = discord.Embed(
-            title="NFT Watch Cancelled",
-            description=f"Stopped watching **{wdata.get('collection_name', wdata['slug'])}**",
-            color=discord.Color.from_rgb(18, 18, 18)
-        )
-        embed.set_footer(text=xsi_footer("Grim NFT Watch"))
-        await interaction.response.send_message(embed=embed)
-        return
-    
-    options = []
-    for wid, wdata in guild_watches.items():
-        cname = wdata.get("collection_name", wdata["slug"])
-        options.append(discord.SelectOption(label=cname[:100], value=wid, description=f"Channel: #{bot.get_channel(int(wdata['channel_id']))}"))
-    
-    class NFTWatchCancelSelect(ui.Select):
-        def __init__(self):
-            super().__init__(placeholder="Select a watch to cancel...", options=options, min_values=1, max_values=len(options))
-        
-        async def callback(self, inter: discord.Interaction):
-            if not await require_permission(inter, "manage_channels", "nftwatch_cancel"):
-                return
-            cancelled = []
-            for wid in self.values:
-                if (
-                    wid in nftwatch_feeds
-                    and nftwatch_feeds[wid].get("guild_id") == str(inter.guild_id)
-                ):
-                    cancelled.append(nftwatch_feeds[wid].get("collection_name", nftwatch_feeds[wid]["slug"]))
-                    del nftwatch_feeds[wid]
-            save_nftwatch_data(nftwatch_feeds)
-            record_security_event(
-                inter, "nftwatch_cancel", "success", {"cancelled_count": len(cancelled)}
-            )
-            
-            embed = discord.Embed(
-                title="NFT Watch Cancelled",
-                description="\n".join([f"Stopped watching **{c}**" for c in cancelled]),
-                color=discord.Color.from_rgb(18, 18, 18)
-            )
-            embed.set_footer(text=xsi_footer("Grim NFT Watch"))
-            await inter.response.send_message(embed=embed)
-    
-    class NFTWatchCancelView(ui.View):
-        def __init__(self):
-            super().__init__(timeout=60)
-            self.add_item(NFTWatchCancelSelect())
-    
-    await interaction.response.send_message("Select which NFT watch(es) to cancel:", view=NFTWatchCancelView(), ephemeral=True)
-
-# ── Reddit Feed ───────────────────────────────────────────────────────────────
-
-def _parse_subreddit_name(raw: str) -> str:
-    """Extract subreddit name from a URL, r/name, or plain name."""
-    raw = raw.strip().rstrip("/")
-    # Handle full URLs: https://www.reddit.com/r/SubName or https://reddit.com/r/SubName
-    if "reddit.com/r/" in raw:
-        part = raw.split("reddit.com/r/")[-1]
-        return part.split("/")[0]
-    # Handle r/SubName
-    if raw.lower().startswith("r/"):
-        return raw[2:]
-    return raw
-
-@bot.tree.command(name="redditfeed", description="Post images from Reddit subreddits on a schedule")
-@discord.app_commands.describe(
-    subreddits="Subreddit names or links, comma-separated (e.g. r/DarkAesthetic or reddit.com/r/darkcore)",
-    interval="How often to post, e.g. 30m or 12h (min 10m)"
-)
-async def redditfeed(interaction: discord.Interaction, subreddits: str, interval: str):
-    global redditfeed_feeds
-
-    if not await require_permission(interaction, "manage_channels", "redditfeed_create"):
-        return
-
-    interval = interval.strip().lower()
-    if interval.endswith("h") and interval[:-1].isdigit():
-        interval_minutes = int(interval[:-1]) * 60
-        interval_display = f"{interval[:-1]}h"
-    elif interval.endswith("m") and interval[:-1].isdigit():
-        interval_minutes = int(interval[:-1])
-        interval_display = f"{interval[:-1]}m"
-    elif interval.isdigit():
-        interval_minutes = int(interval)
-        interval_display = f"{interval}m"
-    else:
-        await interaction.response.send_message("Invalid interval. Use formats like `30m` or `12h`.", ephemeral=True)
-        return
-
-    if interval_minutes < 10:
-        await interaction.response.send_message("Minimum interval is 10 minutes (`10m`).", ephemeral=True)
-        return
-
-    sub_list = [_parse_subreddit_name(s) for s in subreddits.split(",") if s.strip()]
-    if not sub_list:
-        await interaction.response.send_message("Please provide at least one subreddit.", ephemeral=True)
-        return
-    if len(sub_list) > 10:
-        await interaction.response.send_message("Maximum of 10 subreddits per feed.", ephemeral=True)
-        return
-
-    feed_id = str(uuid.uuid4())[:8]
-    redditfeed_feeds[feed_id] = {
-        "channel_id": str(interaction.channel_id),
-        "guild_id": str(interaction.guild_id),
-        "subreddits": sub_list,
-        "interval_minutes": interval_minutes,
-        "last_run": 0,
-        "posted_urls": []
-    }
-    save_redditfeed_data(redditfeed_feeds)
-    record_security_event(
-        interaction, "redditfeed_create", "success",
-        {"feed_id": feed_id, "subreddit_count": len(sub_list), "interval_minutes": interval_minutes},
-    )
-
-    sub_display = ", ".join([f"r/{s}" for s in sub_list])
-    embed = discord.Embed(
-        title="Reddit Feed Started",
-        description=f"Posting images every **{interval_display}** from:\n{sub_display}",
-        color=discord.Color.from_rgb(18, 18, 18)
-    )
-    embed.add_field(name="\u200b", value=f"```{feed_id}```", inline=True)
-    embed.set_footer(text=xsi_footer("Grim Reddit Feed"))
-
-    await interaction.response.send_message(embed=embed, ephemeral=True)
-
-
-class RedditfeedCancelSelect(ui.Select):
-    def __init__(self, feeds: dict):
-        options = []
-        for feed_id, data in feeds.items():
-            subs = ", ".join([f"r/{s}" for s in data.get("subreddits", [])])[:100]
-            channel = bot.get_channel(int(data.get("channel_id", 0)))
-            ch_name = f"#{channel.name}" if channel else "unknown channel"
-            options.append(discord.SelectOption(
-                label=subs,
-                value=feed_id,
-                description=f"{ch_name} · every {data.get('interval_minutes', '?')} min"
-            ))
-        super().__init__(
-            placeholder="Select a Reddit feed to cancel...",
-            min_values=1,
-            max_values=1,
-            options=options
-        )
-
-    async def callback(self, interaction: discord.Interaction):
-        global redditfeed_feeds
-        if not await require_permission(interaction, "manage_channels", "redditfeed_cancel"):
-            return
-        feed_id = self.values[0]
-        if feed_id in redditfeed_feeds:
-            data = redditfeed_feeds[feed_id]
-            if data.get("guild_id") != str(interaction.guild_id):
-                record_security_event(interaction, "redditfeed_cancel", "denied", {"reason": "cross_server"})
-                await interaction.response.send_message(
-                    "That feed does not belong to this server.", ephemeral=True
-                )
-                return
-            subs = ", ".join([f"r/{s}" for s in data.get("subreddits", [])])
-            del redditfeed_feeds[feed_id]
-            save_redditfeed_data(redditfeed_feeds)
-            record_security_event(interaction, "redditfeed_cancel", "success", {"feed_id": feed_id})
-            embed = discord.Embed(
-                title="Cancelled",
-                description=f"Stopped Reddit feed for **{subs}**",
-                color=discord.Color.from_rgb(18, 18, 18)
-            )
-            embed.add_field(name="\u200b", value=f"```{feed_id}```", inline=True)
-            await interaction.response.edit_message(embed=embed, view=None)
-        else:
-            embed = discord.Embed(
-                title="Already Cancelled",
-                description="This feed was already cancelled or no longer exists.",
-                color=discord.Color.from_rgb(40, 40, 40)
-            )
-            await interaction.response.edit_message(embed=embed, view=None)
-
-
-class RedditfeedCancelView(ui.View):
-    def __init__(self, feeds: dict):
-        super().__init__(timeout=120)
-        self.add_item(RedditfeedCancelSelect(feeds))
-        self.message = None
-
-    async def on_timeout(self):
-        if self.message:
-            try:
-                embed = discord.Embed(
-                    title="Expired",
-                    description="This menu has expired. Use `/redditfeed_cancel` again.",
-                    color=discord.Color.from_rgb(40, 40, 40)
-                )
-                await self.message.edit(embed=embed, view=None)
-            except:
-                pass
-
-
-@bot.tree.command(name="redditfeed_cancel", description="Cancel an active Reddit image feed")
-async def redditfeed_cancel(interaction: discord.Interaction):
-    global redditfeed_feeds
-
-    if not await require_permission(interaction, "manage_channels", "redditfeed_cancel"):
-        return
-
-    guild_id_str = str(interaction.guild_id)
-    guild_feeds = {fid: d for fid, d in redditfeed_feeds.items() if d.get("guild_id") == guild_id_str}
-
-    if not guild_feeds:
-        await interaction.response.send_message("No active Reddit feeds in this server.", ephemeral=True)
-        return
-
-    view = RedditfeedCancelView(guild_feeds)
-    embed = discord.Embed(
-        title="Cancel Reddit Feed",
-        description=f"Select a feed to cancel.\n\n**Active:** {len(guild_feeds)}",
-        color=discord.Color.from_rgb(18, 18, 18)
-    )
-    await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
-    view.message = await interaction.original_response()
 
 @bot.tree.command(name="mod_add", description="Add a word to the auto-delete list")
 async def mod_add(interaction: discord.Interaction, word: str):
@@ -10176,69 +9348,6 @@ async def creator(interaction: discord.Interaction):
     embed.set_footer(text=f"Grim · {VERSION}")
     
     await interaction.response.send_message(embed=embed)
-
-@bot.tree.command(name="livetweet", description="Toggle live tweet updates from an X account in this channel")
-async def livetweet(interaction: discord.Interaction, username: str):
-    global livetweet_channels
-    
-    if not await require_permission(interaction, "manage_channels", "livetweet_manage"):
-        return
-    
-    await interaction.response.defer()
-    
-    channel_id = str(interaction.channel_id)
-    clean_username = username.lstrip('@')
-    
-    if channel_id in livetweet_channels and livetweet_channels[channel_id]["username"].lower() == clean_username.lower():
-        del livetweet_channels[channel_id]
-        save_livetweet_data(livetweet_channels)
-        record_security_event(interaction, "livetweet_manage", "disabled")
-        
-        embed = discord.Embed(
-            title="Disabled",
-            description=f"Stopped tracking **@{clean_username}**",
-            color=discord.Color.from_rgb(18, 18, 18)
-        )
-        await interaction.followup.send(embed=embed)
-        return
-    
-    twitter = get_twitter_client()
-    if not twitter:
-        await interaction.followup.send("X API not configured. Please add `X_BEARER_TOKEN` to the VPS `.env`.")
-        return
-    
-    try:
-        user = await _x_api_call(twitter.get_user, username=clean_username, user_fields=['profile_image_url', 'name'])
-        
-        if not user.data:
-            await interaction.followup.send(f"Could not find X user **@{clean_username}**. Check the username and try again.")
-            return
-        
-        tweets = await _x_api_call(twitter.get_users_tweets, id=user.data.id, max_results=5)
-        last_tweet_id = str(tweets.data[0].id) if tweets.data else None
-        
-        livetweet_channels[channel_id] = {
-            "username": clean_username,
-            "user_id": str(user.data.id),
-            "last_tweet_id": last_tweet_id
-        }
-        save_livetweet_data(livetweet_channels)
-        record_security_event(interaction, "livetweet_manage", "enabled")
-        
-        embed = discord.Embed(
-            title="Enabled",
-            description=f"Now tracking **@{clean_username}**",
-            color=discord.Color.from_rgb(18, 18, 18)
-        )
-        if hasattr(user.data, 'profile_image_url'):
-            embed.set_thumbnail(url=user.data.profile_image_url)
-        embed.set_footer(text=f"Run again to disable · {VERSION}")
-        
-        await interaction.followup.send(embed=embed)
-        
-    except Exception as e:
-        print(f"Error setting up livetweet: {e}")
-        await interaction.followup.send("Error: Could not set up tracking. The X API may be rate limited or the username is invalid.")
 
 @bot.tree.command(
     name="grim_updates",
@@ -10910,13 +10019,7 @@ async def help_grim(ctx):
     embed.add_field(name="/creator", value="Creator", inline=True)
     embed.add_field(name="/roast", value="Roast", inline=True)
     embed.add_field(name="/ascii", value="ASCII art", inline=True)
-    embed.add_field(name="/livetweet", value="X updates", inline=True)
     embed.add_field(name="/ghostwrite", value="Ghostwrite", inline=True)
-    embed.add_field(name="/nftwatch", value="NFT tracker", inline=True)
-    embed.add_field(name="/nftwatch_cancel", value="Stop NFT watch", inline=True)
-    embed.add_field(name="/redditfeed", value="Reddit image feed", inline=True)
-    embed.add_field(name="/redditfeed_cancel", value="Stop Reddit feed", inline=True)
-    embed.add_field(name="/redditfeed_status", value="Reddit feed status", inline=True)
     embed.add_field(name="/grim_language", value="Language preference", inline=True)
     embed.add_field(name="/grim_translate", value="Translate text", inline=True)
     embed.add_field(name="/members", value="Staff member history", inline=True)

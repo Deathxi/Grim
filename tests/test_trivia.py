@@ -642,12 +642,6 @@ class TriviaTests(unittest.TestCase):
             if not inspect.isfunction(target):
                 target = target.callback
             self.assertIn("with_grim_voice", inspect.getsource(target))
-        for relay in ("check_livetweets", "check_redditfeed", "check_nftwatch"):
-            target = getattr(main, relay)
-            target = getattr(target, "coro", target)
-            source = inspect.getsource(target)
-            self.assertNotIn("with_grim_voice", source)
-            self.assertNotIn("GRIM_CHAT_VOICE", source)
         self.assertEqual(
             main.MENTION_FAILURE_LINES["timeout"],
             "Traffic went AWOL. Call it again.",
@@ -1000,16 +994,10 @@ class TriviaTests(unittest.TestCase):
             "async def roast(",
             "async def ascii_art(",
             "async def ghostwrite(",
-            "async def check_livetweets(",
-            "async def check_nftwatch(",
-            "async def check_redditfeed(",
             "def build_server_info_embed(",
             "def _build_clear_log_embeds(",
             "def _build_outage_report_embed(",
-            "async def redditfeed_status(",
             "async def grim_status(",
-            "async def nftwatch(",
-            "async def redditfeed(",
             "async def stats(",
             "async def haiku(",
             "async def grim_translate(",
