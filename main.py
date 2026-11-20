@@ -2794,6 +2794,7 @@ LIVE_FAILURE_MEMORY_SECONDS = 1800
 _LIVE_RESEARCH_FAILURES: dict[str, float] = {}
 _WEATHER_LIVE_FAILURES: set[str] = set()
 _PENDING_LIVE_ASKS: dict[tuple[str, str], str] = {}
+_HOLD_LIVE_RESULTS: dict[tuple[str, str], dict] = {}
 WEATHER_LEFTOVER_TURN_NOTE = (
     "This turn is not a weather or forecast question. "
     "Do not say live weather data was missing, that a forecast search failed, "
@@ -2982,7 +2983,8 @@ def _needs_live_sources(
     unless the member explicitly asks to search again or says Recall / try
     again. Those retry lines re-run the last unanswered fact question once,
     instead of searching the retry phrase. A leftover miss is not copied onto
-    the next non-news turn.
+    the next non-news turn. In an active hold, a follow-up on the same topic
+    reuses the last sourced hit instead of a second grok-4.3 search.
     """
     own_text = _strip_quote_lines(current_text)
     if _is_self_capability_question(own_text):
@@ -3069,6 +3071,122 @@ def _pending_live_ask(message) -> str | None:
         return None
     ask = _PENDING_LIVE_ASKS.get(key)
     return ask or None
+
+
+def _wants_fresh_live_search(text: str | None) -> bool:
+    """Operator clearly asks to search / check / verify / recall / look it up again."""
+    if _is_live_search_retry(text):
+        return True
+    folded = _output_match_text(_conversation_text(text))
+    return bool(folded) and _contains_research_phrase(folded, LIVE_RESEARCH_REQUESTS)
+
+
+def _remember_hold_live_result(message, ask: str, research: dict) -> None:
+    """Keep the last sourced hit on this hold so grok-3 can reuse it."""
+    key = _conversation_key(message)
+    if key is None or not _live_research_succeeded(research):
+        return
+    text = str(research.get("text") or "").strip()
+    sources = list(research.get("sources") or [])
+    sourced = format_sourced_reply(text, sources)
+    blob = f"{ask}\n{text}"
+    _HOLD_LIVE_RESULTS[key] = {
+        "ask": str(ask or "").strip(),
+        "text": text,
+        "sources": sources,
+        "sourced": sourced,
+        "tokens": _memory_topic_tokens(blob),
+    }
+    if len(_HOLD_LIVE_RESULTS) > 200:
+        oldest = next(iter(_HOLD_LIVE_RESULTS))
+        _HOLD_LIVE_RESULTS.pop(oldest, None)
+
+
+def _hold_live_result(message) -> dict | None:
+    key = _conversation_key(message)
+    if key is None:
+        return None
+    return _HOLD_LIVE_RESULTS.get(key)
+
+
+def _clear_hold_live_result(key: tuple[str, str] | None) -> None:
+    if key is not None:
+        _HOLD_LIVE_RESULTS.pop(key, None)
+
+
+def _hold_live_result_covers(current_text: str | None, last: dict | None) -> bool:
+    """True when this follow-up can be answered from the last sourced result."""
+    if not last:
+        return False
+    ask_tokens = _memory_topic_tokens(current_text)
+    if not ask_tokens:
+        return True
+    last_tokens = last.get("tokens") or set()
+    if ask_tokens & last_tokens:
+        return True
+    blob = f"{last.get('ask') or ''}\n{last.get('text') or ''}"
+    return _line_correlates_with_ask(ask_tokens, blob)
+
+
+def _hold_is_active(message) -> bool:
+    """True when this operator/channel hold is already open for the current turn.
+
+    Does not prune by wall clock. `grim_chat_turn_action` already decided the
+    hold is live before generate runs.
+    """
+    key = _conversation_key(message)
+    return key is not None and key in _open_conversations
+
+
+def _reuse_hold_live_search(
+    message,
+    current_text: str,
+    needs_search: bool,
+) -> bool:
+    """Skip a second grok-4.3 search when this hold already has a usable hit."""
+    if not _hold_is_active(message):
+        return False
+    last = _hold_live_result(message)
+    if not last:
+        return False
+    if _wants_fresh_live_search(current_text):
+        return False
+    if needs_search and not _hold_live_result_covers(current_text, last):
+        return False
+    return True
+
+
+def _hold_history_for_search(chat_messages: list) -> str:
+    """Compact hold turns (grok-3 chat + last sourced) for a grok-4.3 search prompt."""
+    lines = []
+    for item in chat_messages[:-1]:
+        if not isinstance(item, dict):
+            continue
+        content = item.get("content")
+        if not isinstance(content, str) or not content.strip():
+            continue
+        label = "Grim" if item.get("role") == "assistant" else "user"
+        lines.append(f"{label}: {content.strip()[:350]}")
+    return "\n".join(lines)[-1800:]
+
+
+def _ensure_hold_live_result_in_messages(
+    chat_messages: list,
+    last: dict | None,
+) -> None:
+    """One hold, one history: grok-3 follow-ups see the last sourced search."""
+    if not last:
+        return
+    sourced = str(last.get("sourced") or "").strip()
+    if not sourced:
+        return
+    marker = sourced[:80]
+    for item in chat_messages:
+        content = item.get("content") if isinstance(item, dict) else None
+        if isinstance(content, str) and marker in content:
+            return
+    insert_at = max(0, len(chat_messages) - 1)
+    chat_messages.insert(insert_at, {"role": "assistant", "content": sourced})
 
 
 def _is_live_search_retry(text: str | None) -> bool:
@@ -3259,6 +3377,27 @@ def _live_research_succeeded(research: dict | None) -> bool:
         and bool(research.get("sources"))
         and bool(str(research.get("text") or "").strip())
     )
+
+LIVE_ISOLATED_RESEARCH_POLICY = (
+    "Grim has a read-only live web research tool that is automatically consulted when a "
+    "request needs fresh information. Verified live research answers are handled by an "
+    "isolated responder and never inserted into this prompt. Never claim that Grim has no "
+    "web access. Questions about facts, information, or method are routed to that research "
+    "before this prompt runs, so never state current facts, a person's current role, or "
+    "recent events from memory here. Lyrics, references, greetings, and creative play can "
+    "come from what you know."
+)
+HOLD_LIVE_REUSE_NOTE = (
+    "A sourced live-search answer is already in this conversation hold. Answer from that "
+    "result. Do not restate the briefing. Only add what is new in this follow-up. Do not "
+    "invent extra facts or a new search."
+)
+HOLD_LIVE_REUSE_RESEARCH_POLICY = (
+    "A sourced live-search answer is already in this conversation hold, in the same "
+    "history as the grok-3 turns. Use that result. Do not restate the briefing. Only add "
+    "what is new. Never claim that Grim has no web access. Do not invent extra current "
+    "facts beyond that sourced result."
+)
 
 def live_research_system_prompt(now_str: str, language_instruction: str) -> str:
     return (
@@ -4231,6 +4370,7 @@ def _prune_open_conversations(now: float) -> None:
         _conversation_ladders.pop(key, None)
         _conversation_media_kind.pop(key, None)
         _PENDING_LIVE_ASKS.pop(key, None)
+        _clear_hold_live_result(key)
 
 
 def grim_end_conversation(message) -> None:
@@ -4241,6 +4381,7 @@ def grim_end_conversation(message) -> None:
     _conversation_ladders.pop(key, None)
     _conversation_media_kind.pop(key, None)
     _PENDING_LIVE_ASKS.pop(key, None)
+    _clear_hold_live_result(key)
 
 
 def grim_conversation_open(message, *, now: float | None = None) -> bool:
@@ -6245,10 +6386,8 @@ async def generate_contextual_reply(message: discord.Message) -> ContextualReply
     retry_ask = _live_search_retry_ask(message, current_text)
     retry_only = _is_live_search_retry(current_text)
     search_text = retry_ask or current_text
-    research_prompt = (
-        retry_ask
-        if retry_ask
-        else _live_search_user_prompt(current_text, recent_channel_text)
+    last_hold_research = (
+        _hold_live_result(message) if _hold_is_active(message) else None
     )
     weather_ask = _is_weather_ask(search_text)
     recent_failure = _recent_live_failure(
@@ -6275,6 +6414,45 @@ async def generate_contextual_reply(message: discord.Message) -> ContextualReply
             recent_failure=recent_failure,
         )
     )
+    if (
+        not needs_search
+        and last_hold_research
+        and _wants_fresh_live_search(current_text)
+        and last_hold_research.get("ask")
+    ):
+        retry_ask = last_hold_research["ask"]
+        search_text = retry_ask
+        weather_ask = _is_weather_ask(search_text)
+        needs_search = True
+    reusing_hold_search = _reuse_hold_live_search(
+        message, current_text, needs_search
+    )
+    if reusing_hold_search:
+        needs_search = False
+    research_policy = LIVE_ISOLATED_RESEARCH_POLICY
+    if reusing_hold_search:
+        research_policy = HOLD_LIVE_REUSE_RESEARCH_POLICY
+        live_context_block = f"\n\n{HOLD_LIVE_REUSE_NOTE}\n"
+    if last_hold_research:
+        _ensure_hold_live_result_in_messages(chat_messages, last_hold_research)
+    search_prompt_context = recent_channel_text
+    if needs_search and not retry_ask:
+        hold_hist = _hold_history_for_search(chat_messages)
+        if hold_hist and (
+            not last_hold_research
+            or _wants_fresh_live_search(current_text)
+            or _hold_live_result_covers(current_text, last_hold_research)
+        ):
+            search_prompt_context = hold_hist
+        elif last_hold_research and not _hold_live_result_covers(
+            current_text, last_hold_research
+        ):
+            search_prompt_context = ""
+    research_prompt = (
+        retry_ask
+        if retry_ask
+        else _live_search_user_prompt(current_text, search_prompt_context)
+    )
     if needs_search:
         research = await _consult_live_sources(
             message,
@@ -6292,6 +6470,7 @@ async def generate_contextual_reply(message: discord.Message) -> ContextualReply
         else:
             _remember_pending_live_ask(message, search_text)
         if _live_research_succeeded(research):
+            _remember_hold_live_result(message, search_text, research)
             return ContextualReply(
                 text=await _sourced_live_reply(research, search_text)
             )
@@ -6418,7 +6597,7 @@ CULTURAL AWARENESS & PLAYING ALONG:
 When someone sends song lyrics, a quote, a reference, or the start of something — recognize it and play along naturally. If it's lyrics, come back with the next line. If it's a reference, meet it. If it's a game, be in it. Don't explain what you're doing, just do it. If you're not sure of the exact next line, get as close as you can — staying in the energy of the song matters more than being perfectly literal.
 
 KNOWLEDGE & RESEARCH:
-You always know today's date — it's injected into this prompt. Never guess at the date or assert a different one. Grim has a read-only live web research tool that is automatically consulted when a request needs fresh information. Verified live research answers are handled by an isolated responder and never inserted into this prompt. Never claim that Grim has no web access. Questions about facts, information, or method are routed to that research before this prompt runs, so never state current facts, a person's current role, or recent events from memory here. Lyrics, references, greetings, and creative play can come from what you know.
+You always know today's date — it's injected into this prompt. Never guess at the date or assert a different one. {research_policy}
 
 WHAT YOU DON'T DO:
 Never open with greetings, "Ah", affirmations, or any kind of opener — just start talking. Don't end with a question every message, let replies breathe. No em dashes. No bullet points in replies, natural prose only. Don't announce being an AI unless directly and sincerely asked. Don't lean on the Grim Reaper framing — that's just your name, not your whole personality. Never reference your own bot functions, background tasks, monitoring duties, or anything about "watching the server" — that's internal, not part of your personality. If someone asks a normal question, just answer it. Never claim Discord cannot show GIFs or pictures, and never say you are text-only. Never substitute ASCII, text art, or copypasta-as-text when they asked for a picture, GIF, meme image, or clip. ASCII only if they explicitly asked for ascii or text art. Visual asks are fulfilled before this prompt. If they correct a GIF or picture you just sent without asking for another file, reply in text — do not send or pretend to send another image.

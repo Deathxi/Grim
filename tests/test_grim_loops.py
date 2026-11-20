@@ -103,6 +103,7 @@ class GrimLoopIntegrationTests(unittest.TestCase):
         main.init_chat_db()
         main._open_conversations.clear()
         main._conversation_ladders.clear()
+        main._HOLD_LIVE_RESULTS.clear()
         self.user_patch = patch.object(
             main.discord.Client,
             "user",

@@ -62,6 +62,7 @@ class ConversationPersistenceTests(unittest.TestCase):
         main._conversation_ladders.clear()
         main._conversation_media_kind.clear()
         main._PENDING_LIVE_ASKS.clear()
+        main._HOLD_LIVE_RESULTS.clear()
 
     def tearDown(self):
         self.user_patch.stop()
@@ -69,6 +70,7 @@ class ConversationPersistenceTests(unittest.TestCase):
         main._conversation_ladders.clear()
         main._conversation_media_kind.clear()
         main._PENDING_LIVE_ASKS.clear()
+        main._HOLD_LIVE_RESULTS.clear()
 
     def start_opener(self, *, now=T0, grim_reply_id=GRIM_REPLY_ID):
         opener = chat_message(OPENER, mid=OPENER_ID)
