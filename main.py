@@ -7968,6 +7968,63 @@ async def server_info(interaction: discord.Interaction):
     )
     await interaction.followup.send(embed=embed)
 
+SECLUDE_INVITE_URL = "https://discord.com/invite/KFcpDGtckz"
+# Matte near-black. No blurple or other bright accent.
+SECLUDE_EMBED_COLOR = discord.Color.from_rgb(26, 26, 26)
+
+def build_seclude_embed() -> discord.Embed:
+    """Static Seclude card. Copy stays exact; the invite is a link, not a ping."""
+    embed = discord.Embed(
+        title="Seclude",
+        color=SECLUDE_EMBED_COLOR,
+    )
+    embed.add_field(
+        name="The Visuals",
+        value=(
+            "Darkwear, tech-brutalism, and matte greys/blacks visually mirror the feeling "
+            "of isolation and stepping back from a loud, overwhelming world. It feels like "
+            "a quiet, reinforced concrete bunker away from mainstream noise."
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="The Purpose",
+        value=(
+            "Instead of letting that isolation turn into stagnation, the Japanese philosophy "
+            "of Kaizen—focusing on tiny, disciplined, 1% daily improvements—gives members "
+            "a concrete, stoic framework to rebuild and sharpen themselves quietly."
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="The Outlet",
+        value=(
+            "Having a dedicated space for dense geopolitical and retrospective discussions "
+            "naturally attracts people who feel alienated by surface-level small talk elsewhere, "
+            "giving their exulansis an actual, grounded place to land."
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="Enter",
+        value=f"[{SECLUDE_INVITE_URL}]({SECLUDE_INVITE_URL})",
+        inline=False,
+    )
+    embed.set_footer(
+        text=(
+            "It feels less like a standard chat room and more like an underground "
+            "think-tank or a modern dojo."
+        )
+    )
+    return embed
+
+@bot.tree.command(name="seclude", description="What Seclude is")
+async def seclude(interaction: discord.Interaction):
+    await interaction.response.send_message(
+        embed=build_seclude_embed(),
+        allowed_mentions=discord.AllowedMentions.none(),
+    )
+
 def _snapshot_cleared_message(message) -> dict:
     author = getattr(message, "author", None)
     author_id = getattr(author, "id", None)
@@ -10826,6 +10883,7 @@ async def help_grim(ctx):
             "`/zork-ui` — switch your panel between HUD and TERMINAL\n"
             "`/zork-map` — rooms you have walked\n"
             "`/trivia` — ten private questions on a subject, scored out of 10\n"
+            "`/seclude` — what Seclude is\n"
             "Server administrators: `/grim_updates`, `/grim_auditor`, "
             "`/grim_remember`, `/grim_memories`, `/grim_forget`.\n"
             "`/grim_language` sets your reply language. `/grim_translate` translates text."
