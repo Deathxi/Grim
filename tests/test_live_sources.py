@@ -62,6 +62,25 @@ SUCCESS = {
     ],
 }
 
+CAIRNCROSS = {
+    "status": "success",
+    "used_search": True,
+    "cached": False,
+    "text": (
+        "as of nov 20, cnn and politico report sean cairncross left amid "
+        "an nsa outage."
+    ),
+    "sources": [
+        {"title": "CNN", "url": "https://www.cnn.com/politics/a"},
+        {"title": "Politico", "url": "https://www.politico.com/a"},
+        {"title": "Fox", "url": "https://www.foxnews.com/a"},
+    ],
+}
+CAIRNCROSS_WHY = "why did Sean Cairncross jump ship"
+NSA_ANGLE = "the NSA outage angle, that's why he left"
+NSA_FOLLOW = "if anything this NSA outage shows mass soft deployment"
+NVIDIA_STOCK = "what's nvidia's stock price today"
+
 FORECAST = {
     "status": "success",
     "used_search": True,
@@ -148,6 +167,7 @@ class LiveSourcesTests(unittest.TestCase):
         main._LIVE_RESEARCH_FAILURES.clear()
         main._WEATHER_LIVE_FAILURES.clear()
         main._PENDING_LIVE_ASKS.clear()
+        main._HOLD_LIVE_RESULTS.clear()
         main._open_conversations.clear()
         main._conversation_ladders.clear()
         main._conversation_media_kind.clear()
@@ -159,6 +179,7 @@ class LiveSourcesTests(unittest.TestCase):
         main._LIVE_RESEARCH_FAILURES.clear()
         main._WEATHER_LIVE_FAILURES.clear()
         main._PENDING_LIVE_ASKS.clear()
+        main._HOLD_LIVE_RESULTS.clear()
         main._open_conversations.clear()
         main._conversation_ladders.clear()
         main._conversation_media_kind.clear()
@@ -186,6 +207,65 @@ class LiveSourcesTests(unittest.TestCase):
                     patch.object(main, "_complete_contextual_reply", model):
                 for text in texts:
                     results.append(await main.generate_contextual_reply(mention(text, channel)))
+
+        asyncio.run(run())
+        return results, model
+
+    def hold_converse(self, texts, research, model_reply="sure."):
+        """Open a name-call hold, then run each turn through the real handler."""
+        if isinstance(model_reply, (list, tuple)):
+            model = AsyncMock(side_effect=list(model_reply))
+        else:
+            model = AsyncMock(return_value=model_reply)
+        results = []
+        grim_user = SimpleNamespace(id=999)
+        now = 1_700_000_000.0
+
+        async def run():
+            channel = FakeChannel()
+            with patch.dict(main.os.environ, {"XAI_API_KEY": "test-key"}), \
+                    patch.object(
+                        main.discord.Client,
+                        "user",
+                        new_callable=PropertyMock,
+                        return_value=grim_user,
+                    ), \
+                    patch.object(
+                        main.bot,
+                        "get_channel",
+                        return_value=SimpleNamespace(name="general"),
+                    ), \
+                    patch.object(main, "grok_research_query", research), \
+                    patch.object(main, "_complete_contextual_reply", model):
+                for idx, text in enumerate(texts):
+                    msg = mention(text, channel) if idx == 0 else hold_follow(text, channel)
+                    msg.id = idx + 1
+                    self.assertTrue(main.grim_chat_turn_action(msg, now=now + idx), text)
+                    main.save_message_to_db(
+                        "50",
+                        "9",
+                        str(msg.id),
+                        msg.author.display_name,
+                        msg.content,
+                        now + idx,
+                        False,
+                        author_id=str(msg.author.id),
+                    )
+                    reply = await main.generate_contextual_reply(msg)
+                    results.append(reply)
+                    if reply.text:
+                        grim_id = 1000 + idx
+                        main.save_message_to_db(
+                            "50",
+                            "9",
+                            str(grim_id),
+                            "Grim",
+                            reply.text,
+                            now + idx + 0.5,
+                            True,
+                            author_id="999",
+                        )
+                        main.grim_register_ladder_ids(msg, [grim_id])
 
         asyncio.run(run())
         return results, model
@@ -291,6 +371,110 @@ class LiveSourcesTests(unittest.TestCase):
         ):
             self.assertFalse(main._is_judgment_or_meme_take(text), text)
             self.assertTrue(main._needs_live_sources(text, ""), text)
+
+    def test_same_topic_hold_followup_reuses_last_sourced_search(self):
+        self.assertTrue(main._needs_live_sources(NSA_ANGLE, ""))
+        self.assertTrue(main._needs_live_sources(NSA_FOLLOW, ""))
+        self.assertFalse(main._wants_fresh_live_search(NSA_FOLLOW))
+        research = AsyncMock(return_value=CAIRNCROSS)
+        replies, model = self.hold_converse(
+            [CAIRNCROSS_WHY, NSA_ANGLE, "yeah that tracks", NSA_FOLLOW],
+            research,
+            model_reply=[
+                "no verified details. say the angle.",
+                "yeah.",
+                "that's the tell, not a new briefing.",
+            ],
+        )
+        self.assertEqual(research.await_count, 1)
+        self.assertEqual(model.await_count, 3)
+        self.assertEqual(replies[0].text, "no verified details. say the angle.")
+        self.assertTrue(replies[1].text.startswith(CAIRNCROSS["text"]))
+        self.assertIn("-# sources:", replies[1].text)
+        self.assertEqual(replies[2].text, "yeah.")
+        self.assertEqual(replies[3].text, "that's the tell, not a new briefing.")
+        self.assertNotIn("-# sources:", replies[3].text)
+        prompt = model.await_args.args[2]
+        messages = model.await_args.args[3]
+        blob = " ".join(
+            item["content"]
+            for item in messages
+            if isinstance(item, dict) and isinstance(item.get("content"), str)
+        )
+        self.assertIn(CAIRNCROSS["text"], blob)
+        self.assertIn(main.HOLD_LIVE_REUSE_NOTE, prompt)
+        self.assertIn("Do not restate the briefing", prompt)
+        self.assertIn("Only add what is new", prompt)
+        self.assertIn(main.HOLD_LIVE_REUSE_RESEARCH_POLICY, prompt)
+        self.assertNotIn("isolated responder", prompt)
+        search_prompt = research.await_args.args[1]
+        self.assertIn("Cairncross", search_prompt)
+        self.assertIn("jump ship", search_prompt.casefold())
+
+    def test_hold_explicit_lookup_reruns_last_search(self):
+        research = AsyncMock(return_value=CAIRNCROSS)
+        replies, model = self.hold_converse(
+            [NSA_ANGLE, "search again"],
+            research,
+            model_reply="should not speak",
+        )
+        self.assertEqual(research.await_count, 2)
+        self.assertEqual(research.await_args.args[1], NSA_ANGLE)
+        self.assertTrue(replies[0].text.startswith(CAIRNCROSS["text"]))
+        self.assertTrue(replies[1].text.startswith(CAIRNCROSS["text"]))
+        model.assert_not_awaited()
+
+    def test_hold_look_it_up_searches_with_shared_history(self):
+        research = AsyncMock(return_value=CAIRNCROSS)
+        replies, model = self.hold_converse(
+            [NSA_ANGLE, "look it up"],
+            research,
+            model_reply="should not speak",
+        )
+        self.assertEqual(research.await_count, 2)
+        self.assertTrue(replies[1].text.startswith(CAIRNCROSS["text"]))
+        model.assert_not_awaited()
+        second_prompt = research.await_args_list[1].args[1]
+        self.assertIn("nsa outage", second_prompt.casefold())
+        self.assertIn("Ask:", second_prompt)
+        self.assertIn("look it up", second_prompt)
+
+    def test_hold_distinct_fact_check_still_live_searches(self):
+        research = AsyncMock(side_effect=[CAIRNCROSS, SUCCESS])
+        replies, model = self.hold_converse(
+            [NSA_ANGLE, NVIDIA_STOCK],
+            research,
+        )
+        self.assertEqual(research.await_count, 2)
+        model.assert_not_awaited()
+        self.assertTrue(replies[0].text.startswith(CAIRNCROSS["text"]))
+        self.assertTrue(replies[1].text.startswith(SUCCESS["text"]))
+        self.assertNotIn("cairncross", research.await_args.args[1].casefold())
+
+    def test_hold_end_clears_last_sourced_result(self):
+        msg = mention(NSA_ANGLE)
+        main._remember_hold_live_result(msg, NSA_ANGLE, CAIRNCROSS)
+        self.assertIsNotNone(main._hold_live_result(msg))
+        self.assertTrue(main._hold_live_result_covers(NSA_FOLLOW, main._hold_live_result(msg)))
+        self.assertFalse(main._hold_live_result_covers(NVIDIA_STOCK, main._hold_live_result(msg)))
+        main.grim_end_conversation(msg)
+        self.assertIsNone(main._hold_live_result(msg))
+
+    def test_fresh_search_phrases_do_not_widen_the_gate(self):
+        for text in (
+            "search again",
+            "look it up",
+            "verify this",
+            "check again",
+            "Recall",
+            "fact check that",
+        ):
+            self.assertTrue(main._wants_fresh_live_search(text), text)
+        for text in (NSA_FOLLOW, "yeah that tracks", "right or wrong?"):
+            self.assertFalse(main._wants_fresh_live_search(text), text)
+        self.assertTrue(main._needs_live_sources("is this true", ""))
+        self.assertTrue(main._needs_live_sources(NSA_FOLLOW, ""))
+        self.assertFalse(main._needs_live_sources("yeah that tracks", ""))
 
     def test_capability_question_is_not_a_news_search(self):
         for text in (
@@ -1540,6 +1724,14 @@ class LiveSourcesTests(unittest.TestCase):
         recovered = classify_security_rows(main._health_security_rows(0))
         self.assertNotIn("search_failed", recovered)
         self.assertEqual(score_health([], recovered).level, 5)
+
+    def test_changelog_names_hold_search_reuse(self):
+        changelog = Path(__file__).resolve().parents[1].joinpath("CHANGELOG.md").read_text()
+        self.assertIn("reuses the last sourced live-search result", changelog)
+        self.assertIn("does not restate that briefing", changelog)
+        self.assertIn("search / check / verify / recall / look it up again", changelog)
+        self.assertIn("distinct fact-check", changelog)
+        self.assertNotIn("[REDACTED]", changelog.split("last sourced live-search result")[1][:800])
 
     def test_changelog_names_the_current_events_search_fix(self):
         changelog = Path(__file__).resolve().parents[1].joinpath("CHANGELOG.md").read_text()
