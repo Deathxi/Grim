@@ -2494,21 +2494,40 @@ def _is_weather_ask(text: str | None) -> bool:
     folded = _output_match_text(_conversation_text(text))
     return _contains_research_phrase(folded, _WEATHER_PHRASES)
 
-def _live_research_context_signals(current_text: str) -> tuple[str, ...]:
-    """Channel leftover forecast does not make an unrelated follow-up a search."""
-    if _is_weather_ask(current_text):
-        return LIVE_RESEARCH_SIGNALS
-    return tuple(
-        phrase for phrase in LIVE_RESEARCH_SIGNALS if phrase not in _WEATHER_PHRASES
-    )
+_WEATHER_QUESTION_PHRASES = (
+    "weather in", "weather for", "weather like", "forecast", "tomorrow",
+)
+_WEATHER_QUESTION_STARTS = frozenset({
+    "what", "whats", "how", "hows", "will", "is", "are", "does", "do", "can",
+})
+
+def _is_weather_question(text: str | None) -> bool:
+    """A weather ask that wants conditions, not a complaint about the weather."""
+    if not _is_weather_ask(text):
+        return False
+    visible = _conversation_text(text)
+    if "?" in visible:
+        return True
+    folded = _output_match_text(visible)
+    if _contains_research_phrase(folded, _WEATHER_QUESTION_PHRASES):
+        return True
+    tokens = [token for token in folded.split() if token != "grim"]
+    return bool(tokens) and tokens[0] in _WEATHER_QUESTION_STARTS
 
 def _should_use_live_research(current_text: str, recent_channel_text: str) -> bool:
     current = " ".join(str(current_text or "").lower().split())[:1000]
     if not current:
         return False
-    if _contains_research_phrase(current, LIVE_RESEARCH_SIGNALS):
+    if _contains_research_phrase(current, _STRONG_LIVE_SIGNALS):
+        return True
+    if _is_weather_question(current_text):
         return True
     if _contains_research_phrase(current, LIVE_RESEARCH_REQUESTS):
+        return True
+    if (
+        _contains_research_phrase(current, _WEAK_LIVE_SIGNALS)
+        and mention_asks_for_facts(current_text)
+    ):
         return True
     is_followup = len(current) <= 120 and _contains_research_phrase(
         current,
@@ -2517,17 +2536,24 @@ def _should_use_live_research(current_text: str, recent_channel_text: str) -> bo
     if not is_followup:
         return False
     context = " ".join(str(recent_channel_text or "").lower().split())[-1800:]
-    if (
-        _contains_research_phrase(context, _live_research_context_signals(current_text))
-        or _contains_research_phrase(context, LIVE_RESEARCH_REQUESTS)
+    return (
+        _contains_research_phrase(context, LIVE_RESEARCH_REQUESTS)
         or "need to check" in context
         or "fresh numbers" in context
-    ):
-        return True
-    if _is_weather_ask(current_text):
-        return _needs_live_sources(recent_channel_text, "")
-    return False
+    )
 
+# Time and trend words alone do not turn a take, meme, or personal line
+# into a fact-check; they only count once the line already reads as a question.
+_WEAK_LIVE_SIGNALS = (
+    "right now", "currently", "today", "tonight", "this week", "this month",
+    "recent", "newest", "just happened", "trend", "score", "schedule",
+    "results", "availability",
+)
+_STRONG_LIVE_SIGNALS = tuple(
+    phrase
+    for phrase in LIVE_RESEARCH_SIGNALS
+    if phrase not in _WEAK_LIVE_SIGNALS and phrase not in _WEATHER_PHRASES
+)
 _LIVE_CREATIVE_OR_OPINION = (
     "joke", "jokes", "poem", "haiku", "story", "roast", "rap", "riddle", "pun",
     "limerick", "write me", "make up", "imagine", "pretend", "would you rather",
@@ -2612,13 +2638,13 @@ def _asks_strict_live_fact(folded: str, current_text: str) -> bool:
     """True only for teaching, verify, method, weather, or concrete current facts."""
     return bool(
         _contains_research_phrase(folded, _FACT_REQUEST_PHRASES)
-        or _contains_research_phrase(folded, LIVE_RESEARCH_SIGNALS)
+        or _contains_research_phrase(folded, _STRONG_LIVE_SIGNALS)
         or _contains_research_phrase(folded, LIVE_RESEARCH_REQUESTS)
         or _contains_research_phrase(folded, _METHOD_PHRASES)
         or _asks_causal_fact(folded)
         or _states_current_event(folded)
         or _asks_current_events_with_topic(folded)
-        or _is_weather_ask(current_text)
+        or _is_weather_question(current_text)
     )
 
 def _is_judgment_or_meme_take(current_text: str) -> bool:
@@ -2709,11 +2735,10 @@ _SELF_CAPABILITY_ASK = re.compile(
     r"is live search|is web search|does live search|does web search)"
     r"(?!\w)"
 )
-LIVE_SEARCH_PROOF_QUERY = (
-    "What is one major world news headline from today? "
-    "Answer only from this search, with the date, in one or two sentences."
+LIVE_SEARCH_CAPABILITY_REPLY = (
+    "yeah, live search is on. it runs when you ask me to teach something "
+    "or verify a concrete fact, not to prove it's there."
 )
-CAPABILITY_PROOF_PREFIX = "yeah, live search is on. just pulled this:"
 
 def _asks_causal_fact(folded: str) -> bool:
     """Can X cause Y / what causes X is information, not opinion."""
@@ -2770,9 +2795,9 @@ def _needs_live_sources(
     on fiction or shitposts stay on conversation — prefer answering from this
     turn without search when search would only add weight. Theology and
     riddles stay on chat. Internet/capability asks are bot state, not news.
-    After one honest miss, later pings stay on chat demeanor unless the member
-    explicitly asks to search again, says Recall / try again, or asks the
-    weather. Those retry lines re-run the last unanswered fact question
+    After one honest miss, later pings stay on chat demeanor (weather included)
+    unless the member explicitly asks to search again or says Recall / try
+    again. Those retry lines re-run the last unanswered fact question once,
     instead of searching the retry phrase. A leftover miss is not copied onto
     the next non-news turn.
     """
@@ -2782,7 +2807,6 @@ def _needs_live_sources(
     folded = _output_match_text(_conversation_text(own_text))[:1000]
     if (
         recent_failure
-        and not _is_weather_ask(own_text)
         and not _contains_research_phrase(folded, LIVE_RESEARCH_REQUESTS)
     ):
         return False
@@ -2905,8 +2929,12 @@ def _remember_live_failure(scope: str) -> None:
         oldest = min(_LIVE_RESEARCH_FAILURES, key=_LIVE_RESEARCH_FAILURES.get)
         _LIVE_RESEARCH_FAILURES.pop(oldest, None)
 
+def _weather_failure_scope(scope: str) -> str:
+    return f"{scope}:weather"
+
 def _remember_weather_live_failure(scope: str) -> None:
-    """Weather misses stay on weather asks; they do not mute later name-calls."""
+    """Weather misses mute repeat weather searches, not later fact asks or name-calls."""
+    _remember_live_failure(_weather_failure_scope(scope))
     _WEATHER_LIVE_FAILURES.add(scope)
     if len(_WEATHER_LIVE_FAILURES) > 200:
         _WEATHER_LIVE_FAILURES.pop()
@@ -2944,26 +2972,6 @@ LIVE_SOURCE_FAILURE_LINES = {
         "and i won't guess. give it a minute."
     ),
 }
-LIVE_SOURCE_CAPABILITY_LINES = {
-    "empty": (
-        "yeah, live search is wired. searched just now to prove it and nothing "
-        "current came back. i won't fill the gap from memory. ask a news question "
-        "or try again in a bit."
-    ),
-    "error": (
-        "yeah, live search is wired. the check broke on my end just now, so i "
-        "can't show a live hit. not guessing. try again in a bit."
-    ),
-    "timeout": (
-        "yeah, live search is wired. the check timed out before anything came "
-        "back, so i can't show a live hit. not guessing. try again in a bit."
-    ),
-    "rate_limited": (
-        "yeah, live search is wired. search budget's spent for the moment, so i "
-        "can't show a live hit. give it a minute."
-    ),
-}
-
 def live_source_failure_text(status: str | None) -> str:
     status = str(status or "")
     if status in ("empty", "unverified"):
@@ -3060,14 +3068,6 @@ def format_live_search_miss_reply(wrap: str | None) -> str:
         body = LIVE_SEARCH_MISS_WRAP_FALLBACK
     return f"{LIVE_SEARCH_ZERO_INFO}\n{body}"
 
-def live_capability_reply_text(status: str | None) -> str:
-    status = str(status or "")
-    if status in ("empty", "unverified"):
-        return LIVE_SOURCE_CAPABILITY_LINES["empty"]
-    if status in LIVE_SOURCE_CAPABILITY_LINES:
-        return LIVE_SOURCE_CAPABILITY_LINES[status]
-    return LIVE_SOURCE_CAPABILITY_LINES["error"]
-
 def _live_research_succeeded(research: dict | None) -> bool:
     research = research or {}
     return (
@@ -3076,9 +3076,6 @@ def _live_research_succeeded(research: dict | None) -> bool:
         and bool(research.get("sources"))
         and bool(str(research.get("text") or "").strip())
     )
-
-def format_capability_proof_reply(text: str, sources: list[dict]) -> str:
-    return f"{CAPABILITY_PROOF_PREFIX}\n{format_sourced_reply(text, sources)}"
 
 def live_research_system_prompt(now_str: str, language_instruction: str) -> str:
     return (
@@ -3276,6 +3273,7 @@ async def _consult_live_sources(
     system_prompt: str,
     tools: tuple | list | None = None,
     remember_failure: bool = True,
+    quiet_retry: bool = True,
 ) -> dict:
     research = _get_cached_research(research_scope, research_prompt)
     if not research:
@@ -3301,7 +3299,7 @@ async def _consult_live_sources(
                 print(f"[Grim] Live search error: {type(error).__name__}")
                 research = {"status": "provider_error"}
             research = research or {"status": "provider_error"}
-            if _live_search_should_quiet_retry(research):
+            if quiet_retry and _live_search_should_quiet_retry(research):
                 try:
                     retried = await grok_research_query(
                         system_prompt,
@@ -3320,6 +3318,7 @@ async def _consult_live_sources(
     status = str(research.get("status") or "provider_error")[:40]
     if _live_research_succeeded(research):
         _LIVE_RESEARCH_FAILURES.pop(research_scope, None)
+        _LIVE_RESEARCH_FAILURES.pop(_weather_failure_scope(research_scope), None)
         _WEATHER_LIVE_FAILURES.discard(research_scope)
         record_security_event(
             message,
@@ -5153,33 +5152,6 @@ def parse_chat_media_request(text: str | None, message=None) -> dict | None:
     }
 
 
-def _media_topic_from_research(text: str) -> str:
-    line = str(text or "").strip().split("\n")[0]
-    line = _HTTPS_URL.sub("", line)
-    words = [
-        token
-        for token in _output_match_text(line).split()
-        if token not in _OUTPUT_STOPWORDS and len(token) >= 2
-    ]
-    return " ".join(words[:6])
-
-
-def _short_chat_media_caption(text: str, *, fallback: str) -> str:
-    body = discord.utils.escape_mentions(str(text or "").strip())
-    body = _HTTPS_URL.sub("", body)
-    body = " ".join(body.split())
-    if ". " in body:
-        body = body.split(". ", 1)[0].strip()
-    if not body:
-        body = fallback
-    if len(body) > 180:
-        body = body[:177].rstrip() + "..."
-    folded = body.casefold()
-    if any(marker in folded for marker in CHAT_MEDIA_REFUSAL_MARKERS):
-        return fallback
-    return body
-
-
 def _chat_media_https_url(url) -> str | None:
     if isinstance(url, str) and url.startswith("https://"):
         return url
@@ -5482,41 +5454,12 @@ async def _download_cleaned_chat_media(
 async def fulfill_chat_media_request(
     message,
     request: dict,
-    *,
-    guild_id: str,
-    actor_id: str,
-    research_scope: str,
-    live_search_system: str,
-    current_text: str,
 ) -> "ContextualReply":
     kind = request["kind"]
     topic = str(request.get("topic") or "")
     caption = CHAT_MEDIA_HERE[kind]
     if request.get("current_events"):
-        research = await _consult_live_sources(
-            message,
-            guild_id=guild_id,
-            actor_id=actor_id,
-            research_scope=research_scope,
-            research_prompt=LIVE_SEARCH_PROOF_QUERY,
-            system_prompt=live_search_system,
-            tools=XAI_WEB_SEARCH_TOOLS,
-        )
-        if _live_research_succeeded(research):
-            topic = _media_topic_from_research(research["text"]) or topic or "world news"
-            caption = _short_chat_media_caption(
-                research["text"], fallback="today's wire."
-            )
-        elif _live_search_was_empty(research.get("status")):
-            return ContextualReply(
-                text=format_live_search_miss_reply(
-                    "can't pin a real headline to a file if the wire's empty."
-                )
-            )
-        else:
-            return ContextualReply(
-                text=live_source_failure_text(research.get("status"))
-            )
+        topic = "news"
     elif request.get("capability"):
         topic = topic or ("ok" if kind == "gif" else "night sky")
         caption = "yeah."
@@ -5942,7 +5885,6 @@ async def generate_contextual_reply(message: discord.Message) -> ContextualReply
         live_research_system_prompt(now_str, language_instruction)
     )
     live_miss_wrap = False
-    recent_failure = _recent_live_failure(research_scope)
     retry_ask = _live_search_retry_ask(message, current_text)
     retry_only = _is_live_search_retry(current_text)
     search_text = retry_ask or current_text
@@ -5952,6 +5894,9 @@ async def generate_contextual_reply(message: discord.Message) -> ContextualReply
         else _live_search_user_prompt(current_text, recent_channel_text)
     )
     weather_ask = _is_weather_ask(search_text)
+    recent_failure = _recent_live_failure(
+        _weather_failure_scope(research_scope) if weather_ask else research_scope
+    )
     weather_leftover_note = ""
     if not weather_ask:
         weather_leftover = _clear_weather_live_failure(research_scope)
@@ -5959,49 +5904,18 @@ async def generate_contextual_reply(message: discord.Message) -> ContextualReply
             weather_leftover_note = f"\n\n{WEATHER_LEFTOVER_TURN_NOTE}\n"
     media_request = parse_chat_media_request(current_text, message)
     if media_request:
-        if not media_request.get("current_events") and not media_request.get("capability"):
-            _recover_live_search_latch(message, research_scope)
-        return await fulfill_chat_media_request(
-            message,
-            media_request,
-            guild_id=guild_id,
-            actor_id=str(author.id),
-            research_scope=research_scope,
-            live_search_system=live_search_system,
-            current_text=current_text,
-        )
+        _recover_live_search_latch(message, research_scope)
+        return await fulfill_chat_media_request(message, media_request)
     _remember_conversation_media(message, None)
     if current_text and _is_self_capability_question(current_text):
-        research = await _consult_live_sources(
-            message,
-            guild_id=guild_id,
-            actor_id=str(author.id),
-            research_scope=research_scope,
-            research_prompt=LIVE_SEARCH_PROOF_QUERY,
-            system_prompt=live_search_system,
-            tools=XAI_WEB_SEARCH_TOOLS,
-        )
-        if _live_research_succeeded(research):
-            body = discord.utils.escape_mentions(research["text"].strip())
-            screened = await screen_conversational_reply(
-                body, user_text=current_text
-            )
-            return ContextualReply(
-                text=format_capability_proof_reply(
-                    screened or body, research["sources"]
-                )[:6000]
-            )
-        return ContextualReply(text=live_capability_reply_text(research.get("status")))
+        return ContextualReply(text=LIVE_SEARCH_CAPABILITY_REPLY)
     needs_search = bool(retry_ask) or (
         bool(current_text)
         and not retry_only
-        and (
-            weather_ask
-            or _needs_live_sources(
-                current_text,
-                recent_channel_text,
-                recent_failure=recent_failure,
-            )
+        and _needs_live_sources(
+            current_text,
+            recent_channel_text,
+            recent_failure=recent_failure,
         )
     )
     if needs_search:
@@ -6014,13 +5928,16 @@ async def generate_contextual_reply(message: discord.Message) -> ContextualReply
             system_prompt=live_search_system,
             tools=_search_tools_for(search_text),
             remember_failure=not weather_ask,
+            quiet_retry=not retry_ask,
         )
-        if _live_research_succeeded(research):
+        if _live_research_succeeded(research) or retry_ask:
             _clear_pending_live_ask(message)
+        else:
+            _remember_pending_live_ask(message, search_text)
+        if _live_research_succeeded(research):
             return ContextualReply(
                 text=await _sourced_live_reply(research, search_text)
             )
-        _remember_pending_live_ask(message, search_text)
         if research.get("status") == "rate_limited" and not retry_ask:
             return ContextualReply(text=live_source_failure_text("rate_limited"))
         if (
