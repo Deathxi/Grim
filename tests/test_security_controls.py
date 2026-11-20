@@ -1,6 +1,7 @@
 import asyncio
 import json
 import sqlite3
+import subprocess
 import tempfile
 import threading
 import time
@@ -643,6 +644,184 @@ class SecurityControlsTests(unittest.TestCase):
         self.assertEqual(
             main._format_patch_notes(notes),
             "• new addition\n• nested addition",
+        )
+
+    def test_v286_deploy_card_lists_the_merge_changelog(self):
+        """The V2.86 card is the merge changelog, not the one-line fallback.
+
+        Those six bullets format to 1060 characters. A Discord field stops at
+        1024, so the notes sit in the body, which holds them in one list.
+        """
+        notes = [
+            "`/vc_join` is back (`main.py`). Grim joins your voice channel again and still leaves on his own after an hour with no humans in it; `/vc_leave` works with it. Needs Move Members.",
+            "Grim's message sends block `@everyone`, `@here`, and role pings by default (`main.py`), so model-written text can never mass-ping a server. `/say` and `/announce` are unchanged: an administrator's typed mentions still ping.",
+            "`/8ball`, `/truth`, `/roast`, `/howdie`, `/summon`, `/inspire`, `!haiku`, ghostwrite, and X/livetweet lookups no longer freeze Grim while xAI or X answers (`main.py`). Those calls run off the bot's main loop with a 45s (xAI) or 30s (X) limit.",
+            "Pillow 13.0.0 (`requirements.txt`, `pyproject.toml`, `uv.lock`) for upstream image-decoding security fixes.",
+            "`/language` is retired in favor of `/grim_language`, which does the same thing. Saved language preferences carry over.",
+            "`help_grim` lists `!server` instead of the retired `!info`. Removed unused code and the inert project-root `version.txt`; the version counter still lives under `~/.grim_data`.",
+        ]
+        files = [
+            "CHANGELOG.md",
+            "OPERATIONS_SECURITY.md",
+            "main.py",
+            "pyproject.toml",
+            "reply_auditor.py",
+            "requirements.txt",
+            "substance.py",
+            "tests/test_chat_media.py",
+            "tests/test_reply_auditor.py",
+            "tests/test_security_controls.py",
+            "uv.lock",
+            "version.txt",
+        ]
+        public = main._deploy_card_patch_notes(notes, classified=True)
+        self.assertEqual(public, notes)
+        shown = main._deploy_card_file_names(files, classified=True)
+        embed = main._build_deploy_update_embed(
+            version="V2.86",
+            repo="Deathxi/Grim",
+            commit_count=1,
+            filenames=shown,
+            notes=public,
+            change_count=len(files),
+        )
+
+        self.assertEqual(embed.title, "Grim — V2.86")
+        self.assertEqual(embed.footer.text, "Powered by XSI • V2.86")
+        self.assertTrue(embed.description.startswith("**1 commit(s) deployed**"))
+        self.assertIn("**Patch Notes**", embed.description)
+        self.assertNotIn("Grim has been updated and redeployed.", embed.description)
+        self.assertIn("`main.py`", embed.description)
+        self.assertIn("`CHANGELOG.md`", embed.description)
+        self.assertNotIn("\n`uv.lock`", embed.description)
+        self.assertNotIn("\n`version.txt`", embed.description)
+        self.assertLessEqual(len(embed.description), main.DISCORD_EMBED_DESC_LIMIT)
+        self.assertGreater(len(main._format_patch_notes(public)), main.DISCORD_EMBED_FIELD_LIMIT)
+        for note in notes:
+            self.assertIn(note, embed.description)
+        self.assertIn("30s (X) limit.", embed.description)
+        self.assertNotIn("[REDACTED]", embed.description)
+        self.assertFalse(any(field.name == "Patch Notes" for field in embed.fields))
+
+        repo_field = next(field for field in embed.fields if field.name == "Repository")
+        changes_field = next(field for field in embed.fields if field.name == "Changes")
+        self.assertEqual(repo_field.value, "[Deathxi/Grim](https://github.com/Deathxi/Grim)")
+        self.assertEqual(changes_field.value, "12")
+        for field in embed.fields:
+            self.assertLessEqual(len(field.name), 256)
+            self.assertLessEqual(len(field.value), main.DISCORD_EMBED_FIELD_LIMIT)
+            self.assertNotIn("[REDACTED]", field.value)
+
+        empty = main._build_deploy_update_embed(
+            version="V2.86",
+            repo="Deathxi/Grim",
+            commit_count=0,
+            filenames=[],
+            notes=[],
+            change_count=0,
+        )
+        self.assertEqual(empty.description, "Grim has been updated and redeployed.")
+        self.assertFalse(any(field.name == "Patch Notes" for field in empty.fields))
+
+    def test_huge_patch_notes_move_into_fields_under_the_discord_limit(self):
+        notes = [f"note {index} " + ("x" * 900) for index in range(6)]
+        embed = main._build_deploy_update_embed(
+            version="V2.86",
+            repo="Deathxi/Grim",
+            commit_count=1,
+            filenames=["main.py"],
+            notes=notes,
+            change_count=1,
+        )
+        self.assertLessEqual(len(embed.description), main.DISCORD_EMBED_DESC_LIMIT)
+        self.assertNotIn("note 0", embed.description)
+        note_fields = [field for field in embed.fields if field.name == "Patch Notes"]
+        self.assertGreaterEqual(len(note_fields), 2)
+        listed = "\n".join(field.value for field in note_fields)
+        for note in notes:
+            self.assertIn(note, listed)
+        for field in embed.fields:
+            self.assertLessEqual(len(field.value), main.DISCORD_EMBED_FIELD_LIMIT)
+
+    def test_local_merge_diff_supplies_notes_without_github(self):
+        old_note = "old weather note that must not be on the next card"
+        shipped = "deploy card reads the merge changelog"
+        with tempfile.TemporaryDirectory() as repo:
+            subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True)
+            changelog = Path(repo) / "CHANGELOG.md"
+            changelog.write_text(f"# Grim — Changelog\n\n### Fixed\n- {old_note}\n")
+            (Path(repo) / "main.py").write_text("print('old')\n")
+            subprocess.run(["git", "add", "CHANGELOG.md", "main.py"], cwd=repo, check=True, capture_output=True)
+            self._git_commit(repo, "previous deploy")
+            previous = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=repo,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+
+            changelog.write_text(
+                changelog.read_text()
+                + "- `/vc_join` is back (`main.py`). Grim joins your voice channel again.\n"
+            )
+            (Path(repo) / "main.py").write_text("print('shipped')\n")
+            subprocess.run(["git", "add", "CHANGELOG.md", "main.py"], cwd=repo, check=True, capture_output=True)
+            self._git_commit(repo, "Audit Phase 2")
+
+            latest = main._read_local_deploy_delta(None, repo_dir=repo)
+            ranged = main._read_local_deploy_delta(previous, repo_dir=repo)
+            self.assertEqual(latest["notes"], ranged["notes"])
+            self.assertEqual(latest["commit_count"], 1)
+            self.assertIn("vc_join", latest["notes"][0])
+            self.assertNotIn(old_note, " ".join(latest["notes"]))
+            self.assertIn("main.py", latest["filenames"])
+            self.assertIn("CHANGELOG.md", latest["filenames"])
+
+            changelog.write_text(changelog.read_text() + f"- {shipped}\n")
+            subprocess.run(["git", "add", "CHANGELOG.md"], cwd=repo, check=True, capture_output=True)
+            self._git_commit(repo, "patch notes fix")
+            head_only = main._read_local_deploy_delta(None, repo_dir=repo)
+            self.assertEqual(head_only["notes"], [shipped])
+            self.assertNotIn("vc_join", " ".join(head_only["notes"]))
+            since_previous = main._read_local_deploy_delta(previous, repo_dir=repo)
+            self.assertTrue(any("vc_join" in note for note in since_previous["notes"]))
+            self.assertIn(shipped, since_previous["notes"])
+            self.assertNotIn(old_note, " ".join(since_previous["notes"]))
+
+        missing = main._read_local_deploy_delta(None, repo_dir=repo)
+        self.assertEqual(missing["notes"], [])
+        self.assertEqual(missing["commit_count"], 0)
+
+        source = Path(main.__file__).read_text()
+        post = source[
+            source.index("async def post_update_notification") : source.index(
+                "async def post_outage_after_report"
+            )
+        ]
+        self.assertIn("_read_local_deploy_delta", post)
+        self.assertIn("sha={branch}", post)
+        self.assertNotIn("?ref=", post)
+        self.assertLess(post.index("await channel.send"), post.index("save_updates_sha"))
+        self.assertNotIn("classified=", post)
+        self.assertNotIn("[REDACTED]", post)
+
+    def _git_commit(self, repo: str, message: str):
+        subprocess.run(
+            [
+                "git",
+                "-c",
+                "user.email=grim@example.com",
+                "-c",
+                "user.name=Grim",
+                "commit",
+                "-m",
+                message,
+            ],
+            cwd=repo,
+            check=True,
+            capture_output=True,
+            text=True,
         )
 
     def test_ordinary_deploys_list_real_names_including_classified_modules(self):
