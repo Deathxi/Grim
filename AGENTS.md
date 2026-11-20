@@ -22,6 +22,7 @@ with xAI's Grok API integration. Live runtime is the VPS deploy path
 
 ## Project structure
 - `main.py` — bot commands and event handlers
+- `grim_loops.py` — sticky context, repair/confirm, optional nudges, next-step offers, 👍/👎 feedback (same completion; nudges default off)
 - `delete_report.py` — founder-only deleted-message DMs (`FOUNDER_DISCORD_ID`);
   `/panopticon` is the Founder-only on/off toggle (default on)
 - `substance.py` — per-mood substance rules and the post-check on mention replies

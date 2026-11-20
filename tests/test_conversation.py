@@ -556,6 +556,9 @@ class ConversationPersistenceTests(unittest.TestCase):
             self.assertEqual(blob.count("still here with you"), 1)
             self.assertIn("HOW GRIM SPEAKS", captured["system"])
             self.assertIn("CONVERSATION SCOPE (HARD RULE)", captured["system"])
+            self.assertIn("NUDGES ARE OFF", captured["system"])
+            self.assertNotIn("STICKY CONTEXT", captured["system"])
+            self.assertIn("LIGHT AGENTIC", captured["system"])
         finally:
             main.CHAT_DB_FILE = original_db
             temp_dir.cleanup()

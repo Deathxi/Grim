@@ -55,6 +55,7 @@ from grim_health import (
 )
 from reply_auditor import AuditorConfig, ReplyAuditor, conversation_key, format_events
 from substance import SUBSTANCE_PROMPT, ensure_substance
+import grim_loops
 from delete_report import (
     configure_founder_delete_dms_state,
     configure_nightfall_state,
@@ -650,6 +651,26 @@ def init_chat_db():
     conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_member_history_retention
         ON member_history_events (occurred_at)
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS grim_nudge_settings (
+            scope TEXT PRIMARY KEY,
+            enabled INTEGER NOT NULL DEFAULT 0,
+            updated_at REAL NOT NULL
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS member_memory_notes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            guild_id TEXT NOT NULL,
+            member_id TEXT NOT NULL,
+            note TEXT NOT NULL,
+            created_at REAL NOT NULL
+        )
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_member_memory_notes
+        ON member_memory_notes (guild_id, member_id, created_at DESC)
     """)
     conn.commit()
     conn.close()
@@ -1464,6 +1485,46 @@ def get_operator_other_channel_ids(
         print(f"[DB] Operator other-channel lookup error: {e}")
         return []
 
+def get_operator_guild_lines_from_db(
+    guild_id: str,
+    *,
+    author_id: str | None,
+    author_name: str,
+    limit: int = 40,
+) -> list[tuple[str, str]]:
+    """This operator's recent lines across the guild, newest first.
+
+    Used to keep sticky topics when they start a new thread. Not a second store
+    and never sent wholesale — callers correlate and clip.
+    """
+    try:
+        conn = sqlite3.connect(CHAT_DB_FILE)
+        actor = str(author_id) if author_id is not None else ""
+        name = str(author_name or "")
+        rows = conn.execute("""
+            SELECT channel_id, content FROM messages
+            WHERE guild_id = ?
+              AND is_grim = 0
+              AND (
+                (author_id IS NOT NULL AND author_id != '' AND author_id = ?)
+                OR (
+                    (author_id IS NULL OR author_id = '')
+                    AND author_name = ?
+                )
+              )
+            ORDER BY timestamp DESC
+            LIMIT ?
+        """, (guild_id, actor, name, limit)).fetchall()
+        conn.close()
+        return [
+            (str(channel_id), str(content or ""))
+            for channel_id, content in rows
+            if content and str(content).strip()
+        ]
+    except Exception as e:
+        print(f"[DB] Operator guild lines fetch error: {e}")
+        return []
+
 def get_channel_recent_lines_from_db(
     guild_id: str,
     channel_id: str,
@@ -1569,6 +1630,80 @@ def correlated_foreign_channel_context(
             if len(picked) >= limit:
                 return picked
     return picked
+
+def collect_sticky_context(
+    guild_id: str,
+    channel_id: str,
+    *,
+    author_id: str | None,
+    author_name: str,
+    ask_text: str | None,
+    memories: list[str] | None = None,
+    language_pref: str | None = None,
+    member_profile: str | None = None,
+    digest_text: str | None = None,
+    skip_texts: list[str] | None = None,
+    history_window: int | None = None,
+) -> str | None:
+    """Compact topics/prefs/vibe from existing stores, only when they correlate.
+
+    Does not resend 50 history and does not reset when the operator opens a
+    new thread. Uncorrelated asks get nothing.
+    """
+    ask_tokens = _memory_topic_tokens(ask_text)
+    if len(ask_tokens) < 1:
+        return None
+    skip = {
+        " ".join(str(text or "").split()).casefold()[:160]
+        for text in (skip_texts or [])
+        if text
+    }
+    topics: list[str] = []
+    current_seen = 0
+    window = MODEL_REPLY_HISTORY_MESSAGES if history_window is None else history_window
+    for row_channel, content in get_operator_guild_lines_from_db(
+        guild_id,
+        author_id=author_id,
+        author_name=author_name,
+        limit=40,
+    ):
+        text = str(content or "").strip()
+        if not text:
+            continue
+        clipped_key = " ".join(text.split()).casefold()[:160]
+        if clipped_key in skip:
+            continue
+        if str(row_channel) == str(channel_id):
+            current_seen += 1
+            if current_seen <= window:
+                continue
+        if not _line_correlates_with_ask(ask_tokens, text):
+            continue
+        topics.append(text[: grim_loops.MAX_STICKY_LINE])
+        if len(topics) >= grim_loops.MAX_STICKY_TOPICS:
+            break
+
+    prefs: list[str] = []
+    for memory in memories or []:
+        if _line_correlates_with_ask(ask_tokens, memory):
+            prefs.append(str(memory)[: grim_loops.MAX_STICKY_LINE])
+        if len(prefs) >= grim_loops.MAX_STICKY_PREFS:
+            break
+    for note in get_member_memory_notes(guild_id, str(author_id or ""), limit=8):
+        if _line_correlates_with_ask(ask_tokens, note):
+            prefs.append(note[: grim_loops.MAX_STICKY_LINE])
+        if len(prefs) >= grim_loops.MAX_STICKY_PREFS:
+            break
+    if language_pref and grim_loops.prefers_language_context(ask_text):
+        prefs.append(f"language:{language_pref}")
+
+    vibe = None
+    profile_text = str(member_profile or "").strip()
+    if profile_text and _line_correlates_with_ask(ask_tokens, profile_text):
+        vibe = profile_text
+    elif digest_text and _line_correlates_with_ask(ask_tokens, digest_text):
+        vibe = str(digest_text).strip()
+    return grim_loops.format_sticky_block(topics=topics, prefs=prefs, vibe=vibe)
 
 def get_server_history_from_db(guild_id: str, limit: int = 50):
     """Returns last N messages from the entire server (all channels), in chronological order.
@@ -1779,6 +1914,129 @@ def get_language_reply_instruction(guild_id: str, member_id: str) -> str:
         "any human language. Do not impose an English-only rule, refuse a language, or "
         "translate the member's original message unless they explicitly ask."
     )
+
+def _nudge_scope_guild(guild_id: str) -> str:
+    return f"guild:{guild_id}"
+
+def _nudge_scope_user(guild_id: str, member_id: str) -> str:
+    return f"user:{guild_id}:{member_id}"
+
+def _nudge_flag(scope: str) -> bool | None:
+    try:
+        conn = sqlite3.connect(CHAT_DB_FILE)
+        row = conn.execute(
+            "SELECT enabled FROM grim_nudge_settings WHERE scope = ?",
+            (scope,),
+        ).fetchone()
+        conn.close()
+        if row is None:
+            return None
+        return bool(row[0])
+    except Exception as e:
+        print(f"[DB] Nudge flag fetch error: {e}")
+        return None
+
+def _set_nudge_flag(scope: str, enabled: bool) -> bool:
+    try:
+        conn = sqlite3.connect(CHAT_DB_FILE)
+        conn.execute(
+            """
+            INSERT INTO grim_nudge_settings (scope, enabled, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(scope) DO UPDATE SET
+                enabled=excluded.enabled,
+                updated_at=excluded.updated_at
+            """,
+            (scope, 1 if enabled else 0, time.time()),
+        )
+        conn.commit()
+        conn.close()
+        return enabled
+    except Exception as e:
+        print(f"[DB] Nudge flag save error: {e}")
+        return enabled
+
+def guild_nudges_enabled(guild_id: str) -> bool:
+    """Guild default is OFF unless an admin turns `/grim_nudges` on."""
+    return bool(_nudge_flag(_nudge_scope_guild(str(guild_id))))
+
+def toggle_guild_nudges(guild_id: str) -> bool:
+    return _set_nudge_flag(_nudge_scope_guild(str(guild_id)), not guild_nudges_enabled(guild_id))
+
+def user_nudge_override(guild_id: str, member_id: str) -> bool | None:
+    return _nudge_flag(_nudge_scope_user(str(guild_id), str(member_id)))
+
+def toggle_user_nudges(guild_id: str, member_id: str) -> bool:
+    current = nudges_enabled(guild_id, member_id)
+    return _set_nudge_flag(_nudge_scope_user(str(guild_id), str(member_id)), not current)
+
+def nudges_enabled(guild_id: str, member_id: str) -> bool:
+    """Per-user override if set, else the guild default, else OFF."""
+    override = user_nudge_override(guild_id, member_id)
+    if override is not None:
+        return override
+    return guild_nudges_enabled(guild_id)
+
+def get_member_memory_notes(guild_id: str, member_id: str, limit: int = 8) -> list[str]:
+    try:
+        conn = sqlite3.connect(CHAT_DB_FILE)
+        rows = conn.execute(
+            """
+            SELECT note FROM member_memory_notes
+            WHERE guild_id = ? AND member_id = ?
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            (str(guild_id), str(member_id), limit),
+        ).fetchall()
+        conn.close()
+        return [str(row[0]) for row in rows if row and row[0]]
+    except Exception as e:
+        print(f"[DB] Memory note fetch error: {e}")
+        return []
+
+def append_member_memory_note(guild_id: str, member_id: str, note: str) -> None:
+    text = " ".join(str(note or "").split())[:300]
+    if not text:
+        return
+    try:
+        conn = sqlite3.connect(CHAT_DB_FILE)
+        conn.execute(
+            """
+            INSERT INTO member_memory_notes (guild_id, member_id, note, created_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (str(guild_id), str(member_id), text, time.time()),
+        )
+        conn.execute(
+            """
+            DELETE FROM member_memory_notes
+            WHERE guild_id = ? AND member_id = ? AND id NOT IN (
+                SELECT id FROM member_memory_notes
+                WHERE guild_id = ? AND member_id = ?
+                ORDER BY created_at DESC
+                LIMIT 20
+            )
+            """,
+            (str(guild_id), str(member_id), str(guild_id), str(member_id)),
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"[DB] Memory note save error: {e}")
+
+def message_is_grim_reply(message_id: str) -> bool:
+    try:
+        conn = sqlite3.connect(CHAT_DB_FILE)
+        row = conn.execute(
+            "SELECT is_grim FROM messages WHERE message_id = ?",
+            (str(message_id),),
+        ).fetchone()
+        conn.close()
+        return bool(row and row[0])
+    except Exception as e:
+        print(f"[DB] Grim reply lookup error: {e}")
+        return False
 
 def profile_needs_update(guild_id: str, member_id: str, current_count: int) -> bool:
     """Returns True if the profile should be regenerated based on message count thresholds."""
@@ -4006,6 +4264,18 @@ def grim_register_ladder_ids(message, message_ids) -> None:
             ladder.add(str(mid))
 
 
+def grim_open_feedback_hold(channel_id, author_id, message_ids, *, now: float | None = None) -> None:
+    """Keep the 👎 follow-up in-channel without a second model call."""
+    if channel_id is None or author_id is None:
+        return
+    key = (str(channel_id), str(author_id))
+    _open_conversations[key] = _conversation_now(now)
+    ladder = _conversation_ladders.setdefault(key, set())
+    for mid in message_ids:
+        if mid is not None:
+            ladder.add(str(mid))
+
+
 def _touch_conversation(message, *, now: float | None = None) -> None:
     key = _conversation_key(message)
     if key is None:
@@ -6059,6 +6329,29 @@ async def generate_contextual_reply(message: discord.Message) -> ContextualReply
             "'can't risk' copy.\n"
         )
 
+    skip_texts = []
+    for item in chat_messages:
+        content = item.get("content") if isinstance(item, dict) else None
+        if isinstance(content, str):
+            skip_texts.append(content)
+    sticky_block = collect_sticky_context(
+        guild_id,
+        channel_id,
+        author_id=str(author.id),
+        author_name=getattr(author, "display_name", "") or "",
+        ask_text=current_text,
+        memories=memory_list,
+        language_pref=get_member_language_preference(guild_id, str(author.id)),
+        member_profile=member_profile,
+        digest_text=digest_data.get("text") if digest_data else None,
+        skip_texts=skip_texts,
+    )
+    loop_notes = grim_loops.reply_loop_instructions(
+        repair=grim_loops.needs_repair_confirm(current_text),
+        nudges_on=nudges_enabled(guild_id, str(author.id)),
+        sticky_block=sticky_block,
+    )
+
     system_prompt = f"""You are Grim — a permanent member of {server_name}. Not a tool people summon, not a bot with a gimmick. You've been here, watching the channels, reading what people say, picking up the dynamics. When someone @s you, they're talking to someone who's been paying attention.
 
 Think Cortana. Think Ghost. The AI that knows your history, references it naturally, and gives you something real — not a canned response.
@@ -6138,7 +6431,9 @@ point, example, or insight. Never pad, repeat yourself, or add filler just to be
 Finish a substantive answer instead of cutting it off for Discord's message limit.
 
 {SUBSTANCE_PROMPT}
-{live_context_block}{miss_wrap_note}{weather_leftover_note}"""
+{live_context_block}{miss_wrap_note}{weather_leftover_note}
+
+{loop_notes}"""
 
     try:
         async with aiohttp.ClientSession(
@@ -10014,6 +10309,92 @@ async def _send_mention_reply(
         message,
         [getattr(sent, "id", None) for sent in sent_messages],
     )
+    if sent_messages:
+        await _add_feedback_reactions(sent_messages[0])
+
+
+async def _add_feedback_reactions(sent) -> None:
+    """👍 / 👎 on Grim's reply. Discord-only; no xAI."""
+    if sent is None:
+        return
+    add_reaction = getattr(sent, "add_reaction", None)
+    if not callable(add_reaction):
+        return
+    for emoji in (grim_loops.FEEDBACK_UP, grim_loops.FEEDBACK_DOWN):
+        try:
+            await add_reaction(emoji)
+        except Exception as e:
+            print(f"[Feedback] reaction skipped: {e}")
+            return
+
+
+async def handle_grim_reply_feedback(payload) -> None:
+    """👍 is a silent log skip. 👎 may ask 'what missed?' in-channel, no model call."""
+    bot_user = getattr(bot, "user", None)
+    bot_id = getattr(bot_user, "id", None)
+    user_id = getattr(payload, "user_id", None)
+    if bot_id is not None and user_id == bot_id:
+        return
+    kind = grim_loops.is_feedback_emoji(getattr(payload, "emoji", None))
+    if kind is None:
+        return
+    message_id = str(getattr(payload, "message_id", "") or "")
+    if not message_id or not message_is_grim_reply(message_id):
+        return
+    if kind == "up":
+        return
+    guild_id = getattr(payload, "guild_id", None)
+    channel_id = getattr(payload, "channel_id", None)
+    if guild_id is None or channel_id is None or user_id is None:
+        return
+    append_member_memory_note(
+        str(guild_id),
+        str(user_id),
+        grim_loops.miss_note_from_reaction(),
+    )
+    if grim_loops.already_prompted_miss(message_id):
+        return
+    channel = bot.get_channel(int(channel_id)) if str(channel_id).isdigit() else None
+    if channel is None:
+        fetch_channel = getattr(bot, "fetch_channel", None)
+        if callable(fetch_channel):
+            try:
+                channel = await fetch_channel(int(channel_id))
+            except Exception:
+                channel = None
+    if channel is None:
+        grim_loops.mark_miss_prompted(message_id)
+        return
+    try:
+        sent = await _send_discord_with_retry(channel.send, grim_loops.MISS_PROMPT)
+    except Exception as e:
+        print(f"[Feedback] miss prompt skipped: {e}")
+        grim_loops.mark_miss_prompted(message_id)
+        return
+    sent_id = getattr(sent, "id", None)
+    grim_open_feedback_hold(channel_id, user_id, [message_id, sent_id])
+    grim_loops.set_pending_miss(str(channel_id), str(user_id), message_id)
+    if sent_id is not None:
+        created = getattr(sent, "created_at", None)
+        stamp = created.timestamp() if created is not None else time.time()
+        save_message_to_db(
+            str(guild_id),
+            str(channel_id),
+            str(sent_id),
+            BOT_NAME,
+            grim_loops.MISS_PROMPT,
+            stamp,
+            is_grim=True,
+            author_id=str(bot_id) if bot_id is not None else None,
+        )
+
+
+@bot.event
+async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
+    try:
+        await handle_grim_reply_feedback(payload)
+    except Exception as error:
+        print(f"[Feedback] Handler failed ({type(error).__name__}).")
 
 
 @bot.event
@@ -10045,6 +10426,12 @@ async def on_message(message):
             message.content, message.created_at.timestamp(), is_grim=False,
             author_id=str(message.author.id),
         )
+        if grim_loops.take_pending_miss(str(message.channel.id), str(message.author.id)):
+            append_member_memory_note(
+                str(message.guild.id),
+                str(message.author.id),
+                grim_loops.miss_note_from_explanation(message.content),
+            )
         await asyncio.to_thread(
             increment_member_message_count,
             message.guild.id,
@@ -10186,8 +10573,9 @@ async def help_grim(ctx):
             "`/trivia` — ten private questions on a subject, scored out of 10\n"
             "`/seclude` — what Seclude is\n"
             "Server administrators: `/grim_updates`, `/grim_auditor`, "
-            "`/grim_remember`, `/grim_memories`, `/grim_forget`.\n"
-            "`/grim_language` sets your reply language. `/grim_translate` translates text."
+            "`/grim_remember`, `/grim_memories`, `/grim_forget`, `/grim_nudges`.\n"
+            "`/grim_language` sets your reply language. `/grim_nudge` is a personal "
+            "follow-up toggle (off by default). `/grim_translate` translates text."
         ),
         color=discord.Color.from_rgb(18, 18, 18)
     )
@@ -10204,6 +10592,7 @@ async def help_grim(ctx):
     embed.add_field(name="/ascii", value="ASCII art", inline=True)
     embed.add_field(name="/ghostwrite", value="Ghostwrite", inline=True)
     embed.add_field(name="/grim_language", value="Language preference", inline=True)
+    embed.add_field(name="/grim_nudge", value="Personal follow-up toggle", inline=True)
     embed.add_field(name="/grim_translate", value="Translate text", inline=True)
     embed.add_field(name="/members", value="Staff member history", inline=True)
     embed.add_field(name="/memberlog ENABLE/DISABLE", value="Staff leave notifications", inline=True)
@@ -10363,6 +10752,50 @@ async def grim_forget(interaction: discord.Interaction, number: int):
     embed.add_field(name="removed", value=f"```{removed}```", inline=False)
     embed.set_footer(text=f"Grim · {VERSION}")
     await interaction.response.send_message(embed=embed, ephemeral=True)
+
+@bot.tree.command(
+    name="grim_nudges",
+    description="Toggle server-wide follow-up suggestions after Grim replies (admin only)",
+)
+@discord.app_commands.default_permissions(administrator=True)
+@discord.app_commands.guild_only()
+async def grim_nudges(interaction: discord.Interaction):
+    if not await require_administrator(interaction, "grim_nudges"):
+        return
+    enabled = toggle_guild_nudges(str(interaction.guild_id))
+    record_security_event(
+        interaction, "grim_nudges", "enabled" if enabled else "disabled"
+    )
+    state = "on" if enabled else "off"
+    await interaction.response.send_message(
+        f"server nudges are **{state}**. default is off. members can still use "
+        "`/grim_nudge` for themselves. this never runs on idle channels.",
+        ephemeral=True,
+    )
+
+@bot.tree.command(
+    name="grim_nudge",
+    description="Toggle a short follow-up suggestion after Grim replies to you (off by default)",
+)
+@discord.app_commands.guild_only()
+async def grim_nudge(interaction: discord.Interaction):
+    if not interaction.guild_id:
+        await interaction.response.send_message(
+            "nudges are available inside a server.", ephemeral=True
+        )
+        return
+    if not await require_member_state_action(interaction, "grim_nudge"):
+        return
+    enabled = toggle_user_nudges(str(interaction.guild_id), str(interaction.user.id))
+    record_security_event(
+        interaction, "grim_nudge", "enabled" if enabled else "disabled"
+    )
+    state = "on" if enabled else "off"
+    await interaction.response.send_message(
+        f"your nudges are **{state}**. when on, grim may add one short follow-up "
+        "in the same reply. never on idle channels, never a second model call.",
+        ephemeral=True,
+    )
 
 async def _handle_language_preference(
     interaction: discord.Interaction,
