@@ -607,6 +607,7 @@ class SecurityControlsTests(unittest.TestCase):
             "/grim_remember",
             "/grim_memories",
             "/grim_forget",
+            "/grim_nudges",
         ):
             self.assertIn(name, embed.description)
         self.assertIn("Server administrators", embed.description)
@@ -614,8 +615,10 @@ class SecurityControlsTests(unittest.TestCase):
         self.assertNotIn("!server", fields)
         self.assertEqual(fields["/server"], "Server status")
         self.assertEqual(fields["/grim_language"], "Language preference")
+        self.assertEqual(fields["/grim_nudge"], "Personal follow-up toggle")
         self.assertEqual(fields["/grim_translate"], "Translate text")
         self.assertNotIn("admin", fields["/grim_language"].lower())
+        self.assertNotIn("admin", fields["/grim_nudge"].lower())
         self.assertNotIn("admin", fields["/grim_translate"].lower())
         for retired in (
             "/livetweet",
@@ -634,13 +637,14 @@ class SecurityControlsTests(unittest.TestCase):
             main.grim_forget,
             main.grim_memories_cmd,
             main.grim_remember,
+            main.grim_nudges,
         )
         for command in admin_commands:
             self.assertTrue(command.guild_only, command.name)
             self.assertTrue(command.default_permissions.administrator, command.name)
             self.assertIn("admin only", command.description)
 
-        for command in (main.grim_language, main.grim_translate):
+        for command in (main.grim_language, main.grim_nudge, main.grim_translate):
             permissions = command.default_permissions
             self.assertTrue(permissions is None or not permissions.administrator, command.name)
             self.assertNotIn("admin only", command.description)
@@ -669,6 +673,8 @@ class SecurityControlsTests(unittest.TestCase):
                     await main.grim_forget.callback(forget, 1)
                     auditor = slash_interaction(**kwargs)
                     await main.grim_auditor.callback(auditor)
+                    nudges = slash_interaction(**kwargs)
+                    await main.grim_nudges.callback(nudges)
 
                     for event, command in (
                         (updates, "grim_updates"),
@@ -676,6 +682,7 @@ class SecurityControlsTests(unittest.TestCase):
                         (memories, "grim_memories"),
                         (forget, "grim_forget"),
                         (auditor, "grim_auditor"),
+                        (nudges, "grim_nudges"),
                     ):
                         text = event.response.sent[0][0][0]
                         self.assertEqual(text, f"Only server administrators can use /{command}.")
@@ -714,6 +721,8 @@ class SecurityControlsTests(unittest.TestCase):
                 await main.grim_forget.callback(forget, 1)
                 auditor = slash_interaction(administrator=True)
                 await main.grim_auditor.callback(auditor)
+                nudges = slash_interaction(administrator=True)
+                await main.grim_nudges.callback(nudges)
 
                 self.assertEqual(main.updates_channels["50"], {"channel_id": "77"})
                 save_updates.assert_called()
@@ -726,6 +735,8 @@ class SecurityControlsTests(unittest.TestCase):
                 self.assertEqual(auditor.response.sent[0][1]["embed"].title, "Auditor Log")
                 self.assertIn("timeout (reply)", auditor.response.sent[0][1]["embed"].description)
                 self.assertTrue(auditor.response.sent[0][1]["ephemeral"])
+                self.assertIn("server nudges are **on**", nudges.response.sent[0][0][0])
+                self.assertTrue(main.guild_nudges_enabled("50"))
 
         asyncio.run(run())
 
@@ -735,6 +746,12 @@ class SecurityControlsTests(unittest.TestCase):
             await main.grim_language.callback(event, None)
             self.assertIn("Auto", event.response.sent[0][0][0])
             self.assertNotIn("Only server administrators", event.response.sent[0][0][0])
+
+            event = slash_interaction()
+            await main.grim_nudge.callback(event)
+            self.assertIn("your nudges are **on**", event.response.sent[0][0][0])
+            self.assertNotIn("Only server administrators", event.response.sent[0][0][0])
+            self.assertTrue(main.nudges_enabled("50", "10"))
 
             event = slash_interaction(manage_channels=True)
             await main.grim_translate.callback(event, "spanish", "   ")

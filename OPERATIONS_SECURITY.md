@@ -10,16 +10,17 @@ contain credentials or recovery keys.
 | --- | --- |
 | Regular member | Use normal conversation, language, reminder, and public utility commands. |
 | Moderator with the relevant Discord permission | Manage feeds, welcome messages, live updates, member history, departure logs, and voice actions when Discord grants the required permission. |
-| Server owner or Discord administrator | All moderator actions plus moderation word lists, server memories (`/grim_remember`, `/grim_memories`, `/grim_forget`), `/grim_updates`, `/grim_auditor`, and the GitHub diagnostic. |
+| Server owner or Discord administrator | All moderator actions plus moderation word lists, server memories (`/grim_remember`, `/grim_memories`, `/grim_forget`), `/grim_updates`, `/grim_auditor`, `/grim_nudges`, and the GitHub diagnostic. |
 | Creator | Receives creator-aware conversational context, but does **not** bypass Discord permissions, platform rules, safety, or privacy boundaries. |
 
 Management commands must be run inside a server. They fail closed in DMs and
 record denied attempts in the audit database without recording message content.
 Never elevate someone solely because a display name resembles the creator.
 
-`/grim_updates`, `/grim_auditor`, `/grim_remember`, `/grim_memories`, and
-`/grim_forget` use the same administrator gate as `/say` and `/announce`.
-`/grim_language` and `/grim_translate` stay available to members.
+`/grim_updates`, `/grim_auditor`, `/grim_remember`, `/grim_memories`,
+`/grim_forget`, and `/grim_nudges` use the same administrator gate as `/say`
+and `/announce`. `/grim_language`, `/grim_nudge`, and `/grim_translate` stay
+available to members. Nudges default off and never run on idle channels.
 
 ## 2. Routine server setup
 
