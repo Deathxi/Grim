@@ -10798,21 +10798,6 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
 async def ping(ctx):
     await ctx.send(f"Pong! Latency: {round(bot.latency * 1000)}ms")
 
-@bot.command(name="server")
-async def server_info_prefix(ctx):
-    if not ctx.guild:
-        await ctx.send("This command can only be used in a server!")
-        return
-    server_description = await resolve_server_description(ctx.guild)
-    language_preferences = await asyncio.to_thread(get_guild_language_preferences, ctx.guild.id)
-    embed = build_server_info_embed(
-        ctx.guild,
-        language_preferences=language_preferences,
-        bot_latency=round(bot.latency * 1000),
-        server_description=server_description,
-    )
-    await ctx.send(embed=embed)
-
 @bot.command(name="haiku")
 async def haiku(ctx):
     guild_id = str(ctx.guild.id) if ctx.guild else "dm"
@@ -10848,7 +10833,6 @@ async def help_grim(ctx):
         color=discord.Color.from_rgb(18, 18, 18)
     )
     embed.add_field(name="!ping", value="Latency", inline=True)
-    embed.add_field(name="!server", value="Server info", inline=True)
     embed.add_field(name="!haiku", value="Haiku", inline=True)
     embed.add_field(name="/server", value="Server status", inline=True)
     embed.add_field(name="/howdie", value="Fate", inline=True)

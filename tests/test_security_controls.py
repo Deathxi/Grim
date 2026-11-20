@@ -542,7 +542,7 @@ class SecurityControlsTests(unittest.TestCase):
         self.assertNotIn("grim_memberlog", slash_names)
         self.assertIn("vc_join", slash_names)
         self.assertIn("vc_leave", slash_names)
-        self.assertIn("server", prefix_names)
+        self.assertNotIn("server", prefix_names)
         self.assertNotIn("info", prefix_names)
         clear_command = next(
             command for command in main.bot.tree.get_commands()
@@ -570,6 +570,8 @@ class SecurityControlsTests(unittest.TestCase):
             self.assertIn(name, embed.description)
         self.assertIn("Server administrators", embed.description)
         fields = {field.name: field.value for field in embed.fields}
+        self.assertNotIn("!server", fields)
+        self.assertEqual(fields["/server"], "Server status")
         self.assertEqual(fields["/grim_language"], "Language preference")
         self.assertEqual(fields["/grim_translate"], "Translate text")
         self.assertNotIn("admin", fields["/grim_language"].lower())
