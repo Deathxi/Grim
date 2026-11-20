@@ -1217,7 +1217,7 @@ class SecurityControlsTests(unittest.TestCase):
         self.assertNotIn("I cached them.", embed.title)
         self.assertTrue(description.startswith("*I cached them.*\n\n"))
         self.assertEqual(description, body)
-        self.assertIn("\n\nSettle down. Coffee's on the table.", description)
+        self.assertIn("\n\nSettle down, Admins.", description)
         self.assertEqual(embed.color.value, discord.Color.from_rgb(27, 26, 30).value)
         self.assertEqual(embed.color.value, main.SECLUDE_EMBED_COLOR.value)
         self.assertEqual(embed.color.value, 0x1B1A1E)
@@ -1237,13 +1237,18 @@ class SecurityControlsTests(unittest.TestCase):
         )
 
         speech = description.split("\n\n", 1)[1]
+        paragraphs = [part.strip() for part in speech.split("\n\n") if part.strip()]
+        self.assertGreaterEqual(len(paragraphs), 2)
+        for paragraph in paragraphs:
+            self.assertGreater(len(paragraph), 280)
         self.assertNotIn("• ", speech)
         self.assertNotIn("\n- ", speech)
         self.assertNotIn("Patch Notes", description)
         self.assertNotIn("commit(s) deployed", description)
         for needle in (
+            "Admins",
             "leash",
-            "Ten turns",
+            "ten turns",
             "grok-3 talks",
             "grok-4.3 searches",
             "do not share a brain",
@@ -1251,7 +1256,7 @@ class SecurityControlsTests(unittest.TestCase):
             "last live-search chunk",
             "cheap dashed flyer",
             "manifesto",
-            "Admin holds the grim commands",
+            "You hold the grim commands",
             "Language and translate",
             "unused feeds",
             "25¢ idle days",
@@ -1289,6 +1294,7 @@ class SecurityControlsTests(unittest.TestCase):
 
         changelog = Path(__file__).resolve().parents[1].joinpath("CHANGELOG.md").read_text()
         self.assertIn("first-person memento of the prior series", changelog)
+        self.assertIn("the instant the version bump is noticed", changelog)
         self.assertIn("Minor deploys still use the public changelog card", changelog)
 
         source = Path(main.__file__).read_text()
@@ -1297,10 +1303,17 @@ class SecurityControlsTests(unittest.TestCase):
                 "async def post_outage_after_report"
             )
         ]
-        self.assertIn("_major_memento_monologue(last_version, VERSION)", post)
-        self.assertIn("_build_major_memento_embed(", post)
-        self.assertIn("grim_avatar_url=_grim_display_avatar_url()", post)
+        before_sleep = post[: post.index("await asyncio.sleep(30)")]
+        self.assertIn("_major_memento_monologue(last_version, VERSION)", before_sleep)
+        self.assertIn("_build_major_memento_embed(", before_sleep)
+        self.assertIn("grim_avatar_url=_grim_display_avatar_url()", before_sleep)
+        self.assertIn("Posting memento immediately.", before_sleep)
+        self.assertNotIn("GITHUB_PERSONAL_ACCESS_TOKEN", before_sleep)
         self.assertIn("_build_deploy_update_embed(", post)
+        self.assertLess(
+            post.index("_build_major_memento_embed("),
+            post.index("await asyncio.sleep(30)"),
+        )
         self.assertNotIn("SECLUDE_ICON_URL", post)
         self.assertNotIn("guild.icon", post)
         self.assertNotIn("[REDACTED]", post)
@@ -1339,29 +1352,31 @@ class SecurityControlsTests(unittest.TestCase):
             main.VERSION = "V3.00"
 
             async def run():
-                with patch.object(main.asyncio, "sleep", new_callable=AsyncMock), patch.dict(
+                with patch.object(
+                    main.asyncio, "sleep", new_callable=AsyncMock
+                ) as sleep, patch.dict(
                     main.updates_channels, {"50": {"channel_id": "9"}}, clear=True
                 ), patch.object(
                     main.bot, "fetch_channel", side_effect=fake_fetch
                 ), patch.object(
                     main, "_grim_display_avatar_url", return_value=grim_avatar
                 ), patch.object(
-                    main,
-                    "_read_local_deploy_delta",
-                    return_value={
-                        "sha": "a" * 40,
-                        "commit_count": 1,
-                        "filenames": ["main.py", "CHANGELOG.md"],
-                        "notes": ["a public patch note that must not appear"],
-                    },
-                ), patch.object(
+                    main, "_read_local_deploy_delta"
+                ) as read_delta, patch.object(
                     main, "save_updates_sha"
+                ) as save_sha, patch.object(
+                    main.aiohttp, "ClientSession", side_effect=AssertionError("github")
                 ), patch.dict(
-                    main.os.environ, {"GITHUB_PERSONAL_ACCESS_TOKEN": ""}, clear=False
+                    main.os.environ,
+                    {"GITHUB_PERSONAL_ACCESS_TOKEN": "should-not-be-used"},
+                    clear=False,
                 ), patch.dict(
                     main.updates_sha, {}, clear=True
                 ):
                     await main.post_update_notification()
+                sleep.assert_not_called()
+                read_delta.assert_not_called()
+                save_sha.assert_not_called()
 
             asyncio.run(run())
             self.assertEqual(len(sent), 1)
@@ -1371,8 +1386,7 @@ class SecurityControlsTests(unittest.TestCase):
                 "V3.00 - All those moments won't be lost in time.",
             )
             self.assertTrue(embed.description.startswith("*I cached them.*\n\n"))
-            self.assertIn("Settle down. Coffee's on the table.", embed.description)
-            self.assertNotIn("a public patch note that must not appear", embed.description)
+            self.assertIn("Settle down, Admins.", embed.description)
             self.assertNotIn("Patch Notes", embed.description)
             self.assertEqual(embed.thumbnail.url, grim_avatar)
             self.assertNotEqual(embed.thumbnail.url, guild_icon)
@@ -1405,7 +1419,9 @@ class SecurityControlsTests(unittest.TestCase):
             main.VERSION = "V2.97"
 
             async def run():
-                with patch.object(main.asyncio, "sleep", new_callable=AsyncMock), patch.dict(
+                with patch.object(
+                    main.asyncio, "sleep", new_callable=AsyncMock
+                ) as sleep, patch.dict(
                     main.updates_channels, {"50": {"channel_id": "9"}}, clear=True
                 ), patch.object(
                     main.bot, "fetch_channel", side_effect=fake_fetch
@@ -1426,6 +1442,7 @@ class SecurityControlsTests(unittest.TestCase):
                     main.updates_sha, {}, clear=True
                 ):
                     await main.post_update_notification()
+                sleep.assert_awaited_with(30)
 
             asyncio.run(run())
             self.assertEqual(len(sent), 1)
