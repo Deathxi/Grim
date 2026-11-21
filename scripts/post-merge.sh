@@ -14,7 +14,8 @@ grep -q 'ReadWritePaths=/root/.grim_data' systemd/grim.service
 # Site-packages resolve only via the venv interpreter (not system python3).
 grep -q 'ExecStart=/root/grim/venv/bin/python3' systemd/grim.service
 # Failed deploys must not dump journals into public Actions logs.
-if grep -E '^[[:space:]]*[-|]?[[:space:]]*journalctl\b' .github/workflows/deploy.yml; then
+# Public Grim no longer ships deploy.yml (live deploy is the private repo).
+if [ -f .github/workflows/deploy.yml ] && grep -E '^[[:space:]]*[-|]?[[:space:]]*journalctl\b' .github/workflows/deploy.yml; then
   echo "deploy.yml must not invoke journalctl (public log leak risk)" >&2
   exit 1
 fi
