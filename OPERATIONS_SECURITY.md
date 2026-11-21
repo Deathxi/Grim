@@ -86,9 +86,8 @@ A hotfix is a labeled ship, not a vanished default. It uses the same
 2. Add the operator diary entry to `HOTFIXES.md` in private
    `grim-private-backups`. Do not add a public CHANGELOG bullet for that
    ship. Public HEAD is not stripped yet; live VPS still clones this repo.
-3. Merge to `main` as usual. Droplet origin retarget and Actions secret
-   move are documented on the private repo (`OPERATIONS_SECURITY.md`). Do
-   not disable this public `deploy.yml` until that cutover has succeeded.
+3. Merge to `main` as usual. Live deploy is the private repo. This public
+   tree has no `deploy.yml`; a public `main` push must not SSH the VPS.
 
 Grim will not increment the version counter and will not post a public
 `/grim_updates` card. A `CLASSIFIED` commit label is not a hotfix.
