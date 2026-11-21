@@ -1276,8 +1276,12 @@ class SecurityControlsTests(unittest.TestCase):
             "Call me like you mean it",
             "Say only my name",
             "Silverhand",
+            "I put the season under glass",
+            "It still has a pulse",
+            "V3 is the next breath",
         ):
             self.assertIn(needle, speech)
+        self.assertNotIn("The idle house went quiet", speech)
         self.assertIn("I ", speech)
         self.assertNotIn("we shipped", speech.lower())
         self.assertNotIn("Delta 0", speech)
