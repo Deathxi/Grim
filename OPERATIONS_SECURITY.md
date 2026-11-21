@@ -76,6 +76,22 @@ available to members. Nudges default off and never run on idle channels.
 5. Verify one low-risk command and one administrator-only command in a test
    server. Do not use the live bot to display credentials.
 
+### Hotfixes
+
+A hotfix is a labeled ship, not a vanished default. It uses the same
+`main` deploy job and tests as a regular update.
+
+1. Put `HOTFIX:`, `[HOTFIX]`, or `this is HOTFIX` in the merge commit
+   message (the same detector shape as the old stealth-updates label).
+2. Add an operator entry to `HOTFIXES.md`. Do not add a public CHANGELOG
+   bullet for that ship.
+3. Merge to `main` as usual.
+
+Grim will not increment the version counter and will not post a public
+`/grim_updates` card. A `CLASSIFIED` commit label is not a hotfix.
+Ordinary deploys still bump the version and post public patch notes with
+real filenames. `[REDACTED]` Discord cards stay off.
+
 On a fresh VPS, prefer `setup_vps.sh` (creates `/root/.grim_data` mode `0700`,
 writes `/root/grim/.env` mode `0600`, creates `/root/grim/venv`, installs
 `systemd/grim.service` with sandbox directives). `ExecStart` must use the

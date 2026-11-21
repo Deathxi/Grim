@@ -31,6 +31,7 @@ with xAI's Grok API integration. Live runtime is the VPS deploy path
 - Runtime JSON/SQLite state — under `~/.grim_data/`
 - `OPERATIONS_SECURITY.md` — ops and incident SOP
 - `BACKUP_RESTORE.md` — encrypted weekly backup / restore
+- `HOTFIXES.md` — operator hotfix log (no public card, no version bump)
 - `backup_grim_data.py` / `run_grim_backup.sh` / `systemd/` — backup-only path
 
 ## Developer notes
@@ -39,13 +40,18 @@ When adding new time-based or scheduled commands:
 2. Add an `after_loop` handler to log unexpected stops
 3. Add the task to the `/status` background task list (or the relevant status surface)
 
-Public `/grim_updates` cards and CHANGELOG are always normal: real filenames
+Public `/grim_updates` cards and CHANGELOG are the default: real filenames
 and real patch notes. The deploy card reads those notes from the checkout's
 CHANGELOG for the merge that just shipped, including when the optional GitHub
 token is missing. The V2.x → V3.00 `/grim_updates` card is a first-person memento of V2,
 posted the instant that jump is noticed. From V3.01 on, deploys use the
-regular public changelog card again. Stealth logs, `[REDACTED]` cards, and
-vanished or skip-changelog stay off until Death turns stealth logging back on.
-Do not infer a stealth card from filenames, feature area, or a CLASSIFIED label.
+regular public changelog card again.
+
+Hotfixes are the old stealth-updates path, renamed. Apply them only when the
+merge commit is labeled `HOTFIX:` / `[HOTFIX]` / `this is HOTFIX`. A hotfix
+does not bump the version and does not post a public `/grim_updates` card;
+add the notes to `HOTFIXES.md` instead. Do not infer a hotfix from filenames,
+feature area, or a CLASSIFIED label. `[REDACTED]` Discord cards stay off.
+Ordinary deploys keep real filenames and public patch notes.
 
 Do not reintroduce Replit scaffolding or any “auto-sync source to GitHub” helper.

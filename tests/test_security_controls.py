@@ -1026,6 +1026,8 @@ class SecurityControlsTests(unittest.TestCase):
             self.assertNotIn(old_note, " ".join(latest["notes"]))
             self.assertIn("main.py", latest["filenames"])
             self.assertIn("CHANGELOG.md", latest["filenames"])
+            self.assertTrue(latest["messages"])
+            self.assertFalse(main._commits_are_hotfix(latest["messages"]))
 
             changelog.write_text(changelog.read_text() + f"- {shipped}\n")
             subprocess.run(["git", "add", "CHANGELOG.md"], cwd=repo, check=True, capture_output=True)
@@ -1041,6 +1043,7 @@ class SecurityControlsTests(unittest.TestCase):
         missing = main._read_local_deploy_delta(None, repo_dir=repo)
         self.assertEqual(missing["notes"], [])
         self.assertEqual(missing["commit_count"], 0)
+        self.assertEqual(missing["messages"], [])
 
         source = Path(main.__file__).read_text()
         post = source[
@@ -1140,11 +1143,16 @@ class SecurityControlsTests(unittest.TestCase):
         self.assertNotIn("_commits_are_classified", post)
         self.assertNotIn("[REDACTED]", post)
         self.assertNotIn("classified=", post)
+        self.assertIn("_commits_are_hotfix(new_commits)", post)
         self.assertIn("_deploy_card_patch_notes(patch_notes)", post)
         self.assertIn("_deploy_card_file_names(changed_files)", post)
         self.assertFalse(hasattr(main, "_commits_are_classified"))
         self.assertFalse(hasattr(main, "_DEPLOY_CARD_REDACT_LABEL"))
         self.assertFalse(hasattr(main, "_DEPLOY_CARD_REDACT_COMMANDS"))
+        self.assertTrue(hasattr(main, "_commits_are_hotfix"))
+        self.assertFalse(main._commits_are_hotfix(["this is CLASSIFIED"]))
+        self.assertFalse(main._commits_are_hotfix(["CLASSIFIED: still a public ship"]))
+        self.assertFalse(main._commits_are_hotfix(["[CLASSIFIED] vanish"]))
 
     def test_changelog_feeds_name_call_patch_notes(self):
         changelog = Path(__file__).resolve().parents[1].joinpath("CHANGELOG.md").read_text()
@@ -1387,7 +1395,15 @@ class SecurityControlsTests(unittest.TestCase):
                 ), patch.object(
                     main, "_grim_display_avatar_url", return_value=grim_avatar
                 ), patch.object(
-                    main, "_read_local_deploy_delta"
+                    main,
+                    "_read_local_deploy_delta",
+                    return_value={
+                        "sha": "a" * 40,
+                        "commit_count": 1,
+                        "filenames": ["main.py"],
+                        "notes": [],
+                        "messages": ["V3.00 memento"],
+                    },
                 ) as read_delta, patch.object(
                     main, "save_updates_sha"
                 ) as save_sha, patch.object(
@@ -1401,7 +1417,7 @@ class SecurityControlsTests(unittest.TestCase):
                 ):
                     await main.post_update_notification()
                 sleep.assert_not_called()
-                read_delta.assert_not_called()
+                read_delta.assert_called()
                 save_sha.assert_not_called()
 
             asyncio.run(run())
@@ -1540,6 +1556,235 @@ class SecurityControlsTests(unittest.TestCase):
         finally:
             main.VERSION = original_version
             main.LAST_ANNOUNCED_VERSION_FILE = original_announced
+
+    def test_hotfix_label_requires_explicit_code_word(self):
+        self.assertTrue(
+            main._commits_are_hotfix(
+                [{"commit": {"message": "this is HOTFIX\n\noperator log only"}}]
+            )
+        )
+        self.assertTrue(main._commits_are_hotfix(["This is HOTFIX."]))
+        self.assertTrue(main._commits_are_hotfix(["HOTFIX:\nsilent ship"]))
+        self.assertTrue(main._commits_are_hotfix(["[HOTFIX] vanish"]))
+        self.assertFalse(
+            main._commits_are_hotfix(
+                [
+                    {
+                        "commit": {
+                            "message": "Reply to name-calls when the turn has an entrance."
+                        }
+                    }
+                ]
+            )
+        )
+        self.assertFalse(
+            main._commits_are_hotfix(
+                ["Voice, live-search miss wording, HOTFIX commands unchanged."]
+            )
+        )
+        self.assertFalse(
+            main._commits_are_hotfix(
+                ["Redact hotfix names on /grim_updates deploy cards."]
+            )
+        )
+        self.assertFalse(main._commits_are_hotfix(["this is CLASSIFIED"]))
+        self.assertFalse(main._commits_are_hotfix(["CLASSIFIED: still public"]))
+        self.assertFalse(main._commits_are_hotfix(["[CLASSIFIED] vanish"]))
+        self.assertFalse(main._commits_are_hotfix([]))
+
+        repo_root = Path(__file__).resolve().parents[1]
+        hotfixes = (repo_root / "HOTFIXES.md").read_text()
+        self.assertIn("HOTFIX:", hotfixes)
+        self.assertIn("[HOTFIX]", hotfixes)
+        self.assertIn("this is HOTFIX", hotfixes)
+        self.assertNotIn("panopticon", hotfixes.lower())
+        self.assertNotIn("nightfall", hotfixes.lower())
+        changelog = (repo_root / "CHANGELOG.md").read_text()
+        self.assertIn("records the ship in `HOTFIXES.md`", changelog)
+        self.assertIn("A CLASSIFIED label is not a hotfix", changelog)
+        agents = (repo_root / "AGENTS.md").read_text()
+        self.assertIn("Hotfixes are the old stealth-updates path, renamed", agents)
+        self.assertIn("HOTFIXES.md", agents)
+
+    def test_hotfix_deploy_keeps_version_and_updates_hash(self):
+        original_count_file = main.VERSION_COUNT_FILE
+        original_hash_file = main.MAIN_HASH_FILE
+        original_version = main.VERSION
+        try:
+            count_file = Path(self.temp_dir.name) / "hotfix_version_count.txt"
+            hash_file = Path(self.temp_dir.name) / "hotfix_main_hash.txt"
+            count_file.write_text("301")
+            hash_file.write_text("old-code-hash")
+            main.VERSION_COUNT_FILE = str(count_file)
+            main.MAIN_HASH_FILE = str(hash_file)
+            main.VERSION = "V3.01"
+            with patch.object(main, "_get_main_hash", return_value="new-code-hash"):
+                main._bump_version(hotfix=True)
+            self.assertEqual(main.VERSION, "V3.01")
+            self.assertEqual(count_file.read_text(), "301")
+            self.assertEqual(hash_file.read_text(), "new-code-hash")
+            with patch.object(main, "_get_main_hash", return_value="regular-hash"):
+                main._bump_version()
+            self.assertEqual(main.VERSION, "V3.02")
+            self.assertEqual(count_file.read_text(), "302")
+            self.assertEqual(hash_file.read_text(), "regular-hash")
+        finally:
+            main.VERSION_COUNT_FILE = original_count_file
+            main.MAIN_HASH_FILE = original_hash_file
+            main.VERSION = original_version
+
+    def test_hotfix_skips_public_card_and_advances_revision(self):
+        original_version = main.VERSION
+        original_announced = main.LAST_ANNOUNCED_VERSION_FILE
+        sent = []
+        hotfix_sha = "d" * 40
+
+        class FakeChannel:
+            async def send(self, **kwargs):
+                sent.append(kwargs)
+
+        async def fake_fetch(_channel_id):
+            return FakeChannel()
+
+        announced = Path(self.temp_dir.name) / "last_announced_hotfix.txt"
+        announced.write_text("V3.01")
+        try:
+            main.LAST_ANNOUNCED_VERSION_FILE = str(announced)
+            main.VERSION = "V3.01"
+
+            async def run():
+                with patch.object(
+                    main.asyncio, "sleep", new_callable=AsyncMock
+                ) as sleep, patch.dict(
+                    main.updates_channels, {"50": {"channel_id": "9"}}, clear=True
+                ), patch.object(
+                    main.bot, "fetch_channel", side_effect=fake_fetch
+                ), patch.object(
+                    main,
+                    "_read_local_deploy_delta",
+                    return_value={
+                        "sha": hotfix_sha,
+                        "commit_count": 1,
+                        "filenames": ["main.py", "HOTFIXES.md"],
+                        "notes": [],
+                        "messages": ["HOTFIX: silent operator ship"],
+                    },
+                ), patch.object(
+                    main, "save_updates_sha"
+                ) as save_sha, patch.dict(
+                    main.os.environ, {"GITHUB_PERSONAL_ACCESS_TOKEN": ""}, clear=False
+                ), patch.dict(
+                    main.updates_sha, {}, clear=True
+                ):
+                    await main.post_update_notification()
+                    self.assertEqual(
+                        main.updates_sha.get("_announced_revision"), hotfix_sha
+                    )
+                    save_sha.assert_called()
+                sleep.assert_not_called()
+
+            asyncio.run(run())
+            self.assertEqual(sent, [])
+            self.assertEqual(announced.read_text(), "V3.01")
+        finally:
+            main.VERSION = original_version
+            main.LAST_ANNOUNCED_VERSION_FILE = original_announced
+
+    def test_classified_commit_still_posts_the_public_card(self):
+        original_version = main.VERSION
+        original_announced = main.LAST_ANNOUNCED_VERSION_FILE
+        sent = []
+
+        class FakeChannel:
+            async def send(self, **kwargs):
+                sent.append(kwargs)
+
+        async def fake_fetch(_channel_id):
+            return FakeChannel()
+
+        announced = Path(self.temp_dir.name) / "last_announced_classified.txt"
+        announced.write_text("V3.01")
+        try:
+            main.LAST_ANNOUNCED_VERSION_FILE = str(announced)
+            main.VERSION = "V3.02"
+
+            async def run():
+                with patch.object(
+                    main.asyncio, "sleep", new_callable=AsyncMock
+                ) as sleep, patch.dict(
+                    main.updates_channels, {"50": {"channel_id": "9"}}, clear=True
+                ), patch.object(
+                    main.bot, "fetch_channel", side_effect=fake_fetch
+                ), patch.object(
+                    main,
+                    "_read_local_deploy_delta",
+                    return_value={
+                        "sha": "e" * 40,
+                        "commit_count": 1,
+                        "filenames": ["main.py", "delete_report.py"],
+                        "notes": ["public notes even on a CLASSIFIED commit"],
+                        "messages": ["this is CLASSIFIED\n\nnot a hotfix"],
+                    },
+                ), patch.object(
+                    main, "save_updates_sha"
+                ), patch.dict(
+                    main.os.environ, {"GITHUB_PERSONAL_ACCESS_TOKEN": ""}, clear=False
+                ), patch.dict(
+                    main.updates_sha, {}, clear=True
+                ):
+                    await main.post_update_notification()
+                sleep.assert_awaited_with(30)
+
+            asyncio.run(run())
+            self.assertEqual(len(sent), 1)
+            embed = sent[0]["embed"]
+            self.assertEqual(embed.title, "Grim — V3.02")
+            self.assertIn("public notes even on a CLASSIFIED commit", embed.description)
+            self.assertIn("`delete_report.py`", embed.description)
+            self.assertNotIn("[REDACTED]", embed.description)
+            self.assertEqual(announced.read_text(), "V3.02")
+        finally:
+            main.VERSION = original_version
+            main.LAST_ANNOUNCED_VERSION_FILE = original_announced
+
+    def test_local_delta_exposes_hotfix_commit_messages(self):
+        with tempfile.TemporaryDirectory() as repo:
+            subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True)
+            changelog = Path(repo) / "CHANGELOG.md"
+            changelog.write_text("# Grim — Changelog\n\n### Fixed\n- old note\n")
+            (Path(repo) / "main.py").write_text("print('old')\n")
+            subprocess.run(["git", "add", "CHANGELOG.md", "main.py"], cwd=repo, check=True, capture_output=True)
+            self._git_commit(repo, "previous deploy")
+            previous = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=repo,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+
+            (Path(repo) / "HOTFIXES.md").write_text("# operator log\n- silent fix\n")
+            (Path(repo) / "main.py").write_text("print('hotfix')\n")
+            subprocess.run(["git", "add", "HOTFIXES.md", "main.py"], cwd=repo, check=True, capture_output=True)
+            self._git_commit(repo, "HOTFIX: keep the version\n\noperator only")
+
+            delta = main._read_local_deploy_delta(previous, repo_dir=repo)
+            self.assertTrue(main._is_hotfix_deploy(delta=delta))
+            self.assertTrue(any("HOTFIX:" in message for message in delta["messages"]))
+            self.assertEqual(delta["notes"], [])
+            self.assertIn("HOTFIXES.md", delta["filenames"])
+            self.assertNotIn("CHANGELOG.md", delta["filenames"])
+            hotfix_sha = delta["sha"]
+
+            changelog.write_text(changelog.read_text() + "- regular public bullet\n")
+            subprocess.run(["git", "add", "CHANGELOG.md"], cwd=repo, check=True, capture_output=True)
+            self._git_commit(repo, "Regular public ship")
+            public = main._read_local_deploy_delta(hotfix_sha, repo_dir=repo)
+            self.assertFalse(main._is_hotfix_deploy(delta=public))
+            self.assertIn("regular public bullet", " ".join(public["notes"]))
+
+        missing = main._read_local_deploy_delta(None, repo_dir=repo)
+        self.assertEqual(missing["messages"], [])
 
     def test_creator_saved_language_preference_is_honored(self):
         guild_id = "50"
