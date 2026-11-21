@@ -3,6 +3,11 @@
 Cursor Agent is the development scribe for Grim. Prefer this file plus `README.md`,
 `OPERATIONS_SECURITY.md`, and `BACKUP_RESTORE.md` over any legacy host-specific project notes.
 
+Public `Deathxi/Grim` is the face and landing. Internals are copying additively to
+private `grim-private-backups` (source of truth after VPS origin cutover). Do **not**
+strip this public HEAD yet. Live `/root/grim` still clones this public repo. The
+hotfix diary lives on the private repo; this tree still has the HOTFIX detector.
+
 ## Overview
 Grim is a Discord bot for Seclude & Affiliates. Built with Python and discord.py
 with xAI's Grok API integration. Live runtime is the VPS deploy path

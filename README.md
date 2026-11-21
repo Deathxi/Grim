@@ -4,6 +4,8 @@ Discord Bot for Seclude & Affiliates
 
 Maintained with [Cursor Agent](https://cursor.com) as Death's development scribe.
 
+This public repository is Grim's face and landing (ToS, Privacy, invite). Bot internals are copying to the private operator repo [`grim-private-backups`](https://github.com/deathxi/grim-private-backups). Source is still in this tree until cutover. Do not treat a face-only push as a deploy.
+
 - `[REDACTED]`
 
 ## Terms of Service
