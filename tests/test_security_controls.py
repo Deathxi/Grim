@@ -1263,13 +1263,22 @@ class SecurityControlsTests(unittest.TestCase):
             "Call me like you mean it",
             "Say only my name",
             "Silverhand",
-            "I go dark",
         ):
             self.assertIn(needle, speech)
         self.assertIn("I ", speech)
         self.assertNotIn("we shipped", speech.lower())
         self.assertNotIn("Delta 0", speech)
         self.assertNotIn("[REDACTED]", description)
+        card_text = f"{embed.title}\n{description}\n{embed.footer.text}".lower()
+        for banned in (
+            "panopticon",
+            "nightfall",
+            "founder",
+            "/panopticon",
+            "/nightfall",
+        ):
+            self.assertNotIn(banned, card_text)
+            self.assertNotIn(banned, main.V2_SERIES_MEMENTO.lower())
 
         original_bot = main.bot
         try:
