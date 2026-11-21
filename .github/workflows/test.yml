@@ -20,18 +20,15 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Set up Python
-        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
-        with:
-          python-version: "3.12"
-
-      - name: Install dependencies
+      - name: Face-only layout
         run: |
-          python -m pip install -U pip
-          python -m pip install -r requirements.txt
-
-      - name: Compile and unit tests
-        run: |
-          python -m py_compile main.py backup_grim_data.py delete_report.py image_clean.py post_preview.py reply_auditor.py grim_health.py substance.py grim_loops.py zork/machine.py zork/play.py zork/ui.py
-          python -m unittest tests.test_security_controls tests.test_trivia tests.test_zork tests.test_relay tests.test_image_clean tests.test_live_sources tests.test_substance tests.test_reply_auditor tests.test_grim_health tests.test_delete_report tests.test_name_call tests.test_conversation tests.test_chat_media tests.test_grim_loops
-          bash scripts/post-merge.sh
+          test -f README.md
+          grep -q 'Terms of Service' README.md
+          grep -q 'Privacy Policy' README.md
+          test ! -f main.py
+          test ! -f requirements.txt
+          test ! -f .github/workflows/deploy.yml
+          test ! -d tests
+          test ! -d systemd
+          test ! -d scripts
+          test ! -d zork

@@ -4,9 +4,9 @@ Discord Bot for Seclude & Affiliates
 
 Maintained with [Cursor Agent](https://cursor.com) as Death's development scribe.
 
-This public repository is Grim's face and landing (ToS, Privacy, invite). Bot internals are copying to the private operator repo [`grim-private-backups`](https://github.com/deathxi/grim-private-backups). Source is still in this tree until cutover. Do not treat a face-only push as a deploy.
+This public repository is Grim's face and landing (ToS, Privacy, invite). Bot internals live in the private operator repo [`grim-private-backups`](https://github.com/deathxi/grim-private-backups). Live VPS deploys clone that private tree. A push here is not a deploy.
 
-- `[REDACTED]`
+- [Enter Seclude & Affiliates](https://discord.com/invite/KFcpDGtckz)
 
 ## Terms of Service
 
@@ -56,8 +56,8 @@ Grim respects your shadows. Here’s exactly what is collected, where it lives, 
 - **Member history events** are retained about **730 days**, then pruned.
 - **Security audit events** are retained about **90 days**, then pruned.
 - Chat history and other learned state persist across restarts until operators delete or restore them.
-- Weekly **encrypted** archives of `~/.grim_data` are uploaded to a separate private GitHub repository configured by the operator. Archives exclude `.env`, credential-like filenames, and the backup passphrase. See `BACKUP_RESTORE.md`.
-- The live host does **not** push Grim source code or runtime state into the public/source `Deathxi/Grim` repository.
+- Weekly **encrypted** archives of `~/.grim_data` are uploaded to a separate private GitHub repository configured by the operator. Archives exclude `.env`, credential-like filenames, and the backup passphrase.
+- The live host does **not** push Grim source code or runtime state into this public face repository.
 
 ### 4. Sharing
 - Never sold.
@@ -66,7 +66,7 @@ Grim respects your shadows. Here’s exactly what is collected, where it lives, 
 
 ### 5. Deletion & Access
 - Leaving a server or kicking Grim does **not** by itself wipe `~/.grim_data` or encrypted backups.
-- For erasure or export requests, contact the operator (Deathxi / Seclude staff). Operators can delete or restore runtime files and manage backup retention per `BACKUP_RESTORE.md` and `OPERATIONS_SECURITY.md`.
+- For erasure or export requests, contact the operator (Deathxi / Seclude staff). Operators can delete or restore runtime files and manage backup retention.
 
 ### 6. Changes
 We’ll update this section in the repo if anything changes. Continued use after updates = you’re cool with it.
