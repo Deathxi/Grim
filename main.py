@@ -107,7 +107,17 @@ def _get_main_hash():
     except:
         return None
 
-def _bump_version():
+def _store_main_hash(current_hash):
+    # Version state lives only under ~/.grim_data — never write it back into the
+    # git checkout or push it to the source repository from the live host.
+    if not current_hash:
+        return
+    os.makedirs(os.path.dirname(MAIN_HASH_FILE), exist_ok=True)
+    with open(MAIN_HASH_FILE, "w") as f:
+        f.write(current_hash)
+
+
+def _bump_version(*, hotfix=False):
     global VERSION
     # Only bump if main.py has changed since the last bump
     current_hash = _get_main_hash()
@@ -119,6 +129,12 @@ def _bump_version():
 
     if current_hash and current_hash == stored_hash:
         print(f"[Version] No code change detected — skipping bump, staying at {VERSION}")
+        return
+
+    if hotfix:
+        # Same hash write as a regular ship so a later restart does not bump.
+        _store_main_hash(current_hash)
+        print(f"[Version] Hotfix deploy — keeping {VERSION}, no bump")
         return
 
     try:
@@ -134,13 +150,7 @@ def _bump_version():
     os.makedirs(os.path.dirname(VERSION_COUNT_FILE), exist_ok=True)
     with open(VERSION_COUNT_FILE, "w") as f:
         f.write(str(count))
-    # Store the hash so the next restart without code changes won't bump again.
-    # Version state lives only under ~/.grim_data — never write it back into the
-    # git checkout or push it to the source repository from the live host.
-    if current_hash:
-        os.makedirs(os.path.dirname(MAIN_HASH_FILE), exist_ok=True)
-        with open(MAIN_HASH_FILE, "w") as f:
-            f.write(current_hash)
+    _store_main_hash(current_hash)
     print(f"[Version] Deploy #{count} → {VERSION}")
 
 VERSION = _load_version()
@@ -7564,9 +7574,12 @@ async def on_ready():
     if _vc_active_sessions:
         print(f"[VC] Resumed tracking for {len(_vc_active_sessions)} member(s) already in voice")
 
-    _bump_version()
+    _bump_version(
+        hotfix=_is_hotfix_deploy(updates_sha.get("_announced_revision"))
+    )
     # The V3.00 memento posts inside this task the instant that jump is seen.
     # V3.01+ waits for the 30s cache delay and uses the changelog card.
+    # A hotfix skips the bump above and the public card inside this task.
     asyncio.create_task(post_update_notification())
     for pending_outage in _load_pending_outage_reports():
         _schedule_outage_report(pending_outage)
@@ -7664,10 +7677,38 @@ def _format_patch_notes(notes: list[str], max_notes: int = 8) -> str:
     """Format changelog bullets for a Discord deploy card."""
     return "\n".join(_patch_note_chunks(notes, max_notes=max_notes))
 
-# Stealth logs on /grim_updates are off. Every deploy card lists real
-# filenames and the public changelog bullets. A CLASSIFIED label cannot
-# redact a name, rewrite a note as [REDACTED], or skip the card. That
-# stays off until Death turns stealth logging back on.
+# Hotfixes are the old stealth-updates detector, renamed. An explicit
+# HOTFIX label on a commit in this ship skips the version bump and the
+# public /grim_updates card. The operator log is HOTFIXES.md in the repo.
+# Regular deploys stay public. A CLASSIFIED label is not a hotfix.
+# [REDACTED] Discord cards stay off.
+_HOTFIX_DEPLOY_LABEL = re.compile(
+    r"(?:(?i:this\s+is\s+)HOTFIX\b"
+    r"|^HOTFIX(?:\s*[:.\-]|\s*$)"
+    r"|\[HOTFIX\])",
+    re.MULTILINE,
+)
+
+
+def _commit_message_text(commit) -> str:
+    if isinstance(commit, str):
+        return commit
+    if not isinstance(commit, dict):
+        return ""
+    inner = commit.get("commit")
+    if isinstance(inner, dict):
+        return str(inner.get("message") or "")
+    return str(commit.get("message") or "")
+
+
+def _commits_are_hotfix(commits) -> bool:
+    """True only when a commit explicitly labels the work HOTFIX."""
+    for commit in commits or ():
+        if _HOTFIX_DEPLOY_LABEL.search(_commit_message_text(commit)):
+            return True
+    return False
+
+
 def _deploy_card_file_names(filenames, limit=10, *, classified=False):
     """Real paths for a deploy card.
 
@@ -7714,14 +7755,33 @@ def _valid_git_sha(value) -> str | None:
     return None
 
 
+def _git_log_messages(rev_args: list[str], *, repo_dir: str) -> list[str]:
+    """Subject+body for each commit in rev_args. Empty on git failure."""
+    run = _run_git(["log", "--format=%B%x00", *rev_args], repo_dir=repo_dir)
+    if not run or run.returncode != 0:
+        return []
+    messages = []
+    for chunk in (run.stdout or "").split("\0"):
+        text = chunk.strip()
+        if text:
+            messages.append(text)
+    return messages
+
+
 def _read_local_deploy_delta(since_revision: str | None = None, *, repo_dir: str | None = None) -> dict:
-    """Filenames and changelog bullets in the checkout that just deployed.
+    """Filenames, changelog bullets, and commit messages in the checkout that just deployed.
 
     Compares since_revision..HEAD when that revision is an ancestor.
     Otherwise uses the latest commit only — the merge currently checked out.
     Does not call GitHub and does not write the repository.
     """
-    empty = {"sha": None, "commit_count": 0, "filenames": [], "notes": []}
+    empty = {
+        "sha": None,
+        "commit_count": 0,
+        "filenames": [],
+        "notes": [],
+        "messages": [],
+    }
     repo_dir = repo_dir or os.path.dirname(os.path.abspath(__file__))
     head_run = _run_git(["rev-parse", "HEAD"], repo_dir=repo_dir)
     if not head_run or head_run.returncode != 0:
@@ -7748,6 +7808,7 @@ def _read_local_deploy_delta(since_revision: str | None = None, *, repo_dir: str
         count_run = _run_git(["rev-list", "--count", f"{since}..{head}"], repo_dir=repo_dir)
         count_text = (count_run.stdout or "").strip() if count_run and count_run.returncode == 0 else ""
         commit_count = int(count_text) if count_text.isdigit() else 0
+        messages = _git_log_messages([f"{since}..{head}"], repo_dir=repo_dir)
     else:
         names_run = _run_git(
             ["diff-tree", "-r", "--name-only", "--no-commit-id", head],
@@ -7758,6 +7819,7 @@ def _read_local_deploy_delta(since_revision: str | None = None, *, repo_dir: str
             repo_dir=repo_dir,
         )
         commit_count = 1
+        messages = _git_log_messages(["-1", head], repo_dir=repo_dir)
 
     filenames = []
     if names_run and names_run.returncode == 0:
@@ -7768,14 +7830,46 @@ def _read_local_deploy_delta(since_revision: str | None = None, *, repo_dir: str
     notes = []
     if patch_run and patch_run.returncode == 0:
         notes = _extract_added_changelog_notes(patch_run.stdout or "")
-    if not commit_count and (filenames or notes):
+    if not commit_count and (filenames or notes or messages):
         commit_count = 1
     return {
         "sha": head,
         "commit_count": commit_count,
         "filenames": filenames,
         "notes": notes,
+        "messages": messages,
     }
+
+
+def _is_hotfix_deploy(
+    since_revision: str | None = None,
+    *,
+    repo_dir: str | None = None,
+    delta: dict | None = None,
+) -> bool:
+    """True when this ship is labeled HOTFIX. Do not infer it from filenames."""
+    if delta is None:
+        delta = _read_local_deploy_delta(since_revision, repo_dir=repo_dir)
+    return _commits_are_hotfix(delta.get("messages") or [])
+
+
+def _mark_hotfix_revision(delta: dict | None = None, github_sha: str | None = None) -> None:
+    """Advance the announced revision without posting a public /grim_updates card."""
+    announced_sha = (delta or {}).get("sha")
+    changed = False
+    if announced_sha:
+        updates_sha["_announced_revision"] = announced_sha
+        changed = True
+    if github_sha:
+        updates_sha["_global"] = github_sha
+        changed = True
+    if changed:
+        save_updates_sha(updates_sha)
+    _save_last_announced_version(VERSION)
+    print(
+        f"[Updates] Hotfix recorded at {announced_sha or 'unknown sha'}; "
+        f"version stays {VERSION}"
+    )
 
 
 def _build_deploy_update_embed(
@@ -7929,13 +8023,23 @@ async def post_update_notification():
     Patch notes come from the checkout's CHANGELOG (the merge that shipped).
     The optional GitHub token only fills in when that local diff has no notes.
     A failed send does not advance the announced revision, so the next start
-    can still post the real notes. Stealth logs cannot fire.
+    can still post the real notes.
+
+    Hotfixes reuse the old stealth-updates detector: an explicit HOTFIX
+    label skips this public card. The operator log is HOTFIXES.md in the repo.
+    CLASSIFIED is not a hotfix.
 
     The V3.00 memento posts immediately when that jump is noticed. It does
     not wait for the cache delay, a /grim_updates run, or the changelog pass.
     V3.01 and later use the regular delayed changelog card.
     """
     async with _update_notification_lock:
+        delta = _read_local_deploy_delta(updates_sha.get("_announced_revision"))
+        if _commits_are_hotfix(delta.get("messages") or []):
+            print("[Updates] Hotfix deploy — skipped public /grim_updates card.")
+            _mark_hotfix_revision(delta)
+            return
+
         if not updates_channels:
             print("[Updates] No channels registered, skipping.")
             return
@@ -7990,11 +8094,16 @@ async def post_update_notification():
         repo = "Deathxi/Grim"
         branch = "main"
         delta = _read_local_deploy_delta(updates_sha.get("_announced_revision"))
+        if _commits_are_hotfix(delta.get("messages") or []):
+            print("[Updates] Hotfix deploy — skipped public /grim_updates card.")
+            _mark_hotfix_revision(delta)
+            return
         patch_notes = list(delta["notes"])
         changed_files = {name: "modified" for name in delta["filenames"]}
         commit_count = delta["commit_count"]
         announced_sha = delta["sha"]
         github_sha = None
+        new_commits = []
         if patch_notes:
             print(f"[Updates] {len(patch_notes)} changelog note(s) from the deployed checkout.")
         else:
@@ -8049,8 +8158,15 @@ async def post_update_notification():
             except Exception as e:
                 print(f"[Updates] Could not fetch GitHub commit data: {e}")
 
+        # Old stealth-updates hook, remade as hotfix: vanish instead of a
+        # redacted card. Regular deploys still post a public card below.
+        if _commits_are_hotfix(new_commits):
+            print("[Updates] Hotfix deploy — skipped public /grim_updates card.")
+            _mark_hotfix_revision(delta, github_sha)
+            return
+
         # Always a normal public card: real filenames and public changelog
-        # bullets. Stealth logs cannot fire. Majors already returned above.
+        # bullets. Hotfix ships already returned above. Majors already returned above.
         public_notes = _deploy_card_patch_notes(patch_notes)
         file_names = _deploy_card_file_names(changed_files)
         embed = _build_deploy_update_embed(
