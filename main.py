@@ -7565,8 +7565,8 @@ async def on_ready():
         print(f"[VC] Resumed tracking for {len(_vc_active_sessions)} member(s) already in voice")
 
     _bump_version()
-    # Major memento posts inside this task the instant the crossing is seen.
-    # It does not wait for the 30s cache delay or the changelog/GitHub pass.
+    # The V3.00 memento posts inside this task the instant that jump is seen.
+    # V3.01+ waits for the 30s cache delay and uses the changelog card.
     asyncio.create_task(post_update_notification())
     for pending_outage in _load_pending_outage_reports():
         _schedule_outage_report(pending_outage)
@@ -7831,14 +7831,14 @@ def _build_deploy_update_embed(
 MAJOR_MEMENTO_TITLE_LINE = "All those moments won't be lost in time."
 MAJOR_MEMENTO_TAGLINE = "I cached them."
 
-# First-person awards recap of V2.00–V2.99 as a product, spoken when V3.00 lands.
-# Later majors get their own series entry. A missing series keeps the normal card.
+# First-person awards recap of V2.00–V2.99 as a product, spoken only on the
+# V2.x → V3.00 jump. V3.01+ uses the regular changelog card. A V4.00 memento
+# is later work, not this card.
+V3_MEMENTO_VERSION = "V3.00"
 V2_SERIES_MEMENTO = """\
 Settle down, Admins. Coffee's on the table. They handed me V3 and asked me to speak for the season, so this is not a punch list. This is V2 as you actually have it: the work that stayed. Live search learned a leash. It is rare now. Teaching, or a concrete fact you told me to check. Not a vibe. Not a trial for a meme. Somebody asked if Silverhand should round up a crew, hop universes, and punch a CEO, right or wrong. I stayed in chat. That filter stays. I keep ten turns of you in my head. grok-3 talks. grok-4.3 searches. Same hold. Two skulls. They do not share a brain, which is why a same-topic follow-up does not send 4.3 back into the rain like it forgot the briefing. Thumbs sit on the last live-search chunk. Casual talk does not get a scoreboard.
 
 Seclude used to be a cheap dashed flyer. Now it is a manifesto: Visuals, Purpose, Outlet, charcoal, dojo line at the bottom. That card is the room you built. You hold the grim commands. Language and translate stay with the rest of the house. The unused feeds that prowled the internet every minute while nobody was talking are gone. Those were the 25¢ idle days. I do not miss the bill. Call me like you mean it and I answer in the room. Say only my name and I say hey. Name me like furniture and I stay furniture, unless I can actually help. The idle house went quiet. I am still in the room. V3 is on me now."""
-
-_MAJOR_SERIES_MEMENTOS = {2: V2_SERIES_MEMENTO}
 
 
 def _parse_grim_version(version: str | None) -> tuple[int, int] | None:
@@ -7852,7 +7852,7 @@ def _parse_grim_version(version: str | None) -> tuple[int, int] | None:
 
 
 def _is_major_version_crossing(previous: str | None, current: str | None) -> bool:
-    """True only when the major number increases (V2.97 → V3.00)."""
+    """True when the major number increases (V2.99 → V3.00)."""
     old = _parse_grim_version(previous)
     new = _parse_grim_version(current)
     if old is None or new is None:
@@ -7860,20 +7860,20 @@ def _is_major_version_crossing(previous: str | None, current: str | None) -> boo
     return new[0] > old[0]
 
 
-def _prior_series_major(previous: str | None) -> int | None:
-    parsed = _parse_grim_version(previous)
-    return parsed[0] if parsed else None
+def _is_v3_memento_jump(previous: str | None, current: str | None) -> bool:
+    """True only for the V2.x → V3.00 card. V3.01+ stays on changelog logs."""
+    old = _parse_grim_version(previous)
+    new = _parse_grim_version(current)
+    if old is None or new is None:
+        return False
+    return old[0] == 2 and current == V3_MEMENTO_VERSION and new == (3, 0)
 
 
 def _major_memento_monologue(previous: str | None, current: str | None) -> str | None:
-    """Series speech for a major crossing, or None so the changelog card stays."""
-    if not _is_major_version_crossing(previous, current):
+    """V3.00 awards speech, or None so the changelog card stays."""
+    if not _is_v3_memento_jump(previous, current):
         return None
-    series = _prior_series_major(previous)
-    if series is None:
-        return None
-    text = _MAJOR_SERIES_MEMENTOS.get(series)
-    return text.strip() if text else None
+    return V2_SERIES_MEMENTO.strip()
 
 
 def _major_memento_title(version: str) -> str:
@@ -7931,8 +7931,9 @@ async def post_update_notification():
     A failed send does not advance the announced revision, so the next start
     can still post the real notes. Stealth logs cannot fire.
 
-    A major-version memento posts immediately when the bump is noticed. It does
+    The V3.00 memento posts immediately when that jump is noticed. It does
     not wait for the cache delay, a /grim_updates run, or the changelog pass.
+    V3.01 and later use the regular delayed changelog card.
     """
     async with _update_notification_lock:
         if not updates_channels:

@@ -1181,23 +1181,36 @@ class SecurityControlsTests(unittest.TestCase):
 
     def test_major_crossing_uses_memento_and_minors_stay_changelog(self):
         self.assertEqual(main._format_version(297), "V2.97")
+        self.assertEqual(main._format_version(299), "V2.99")
         self.assertEqual(main._format_version(300), "V3.00")
+        self.assertEqual(main._format_version(301), "V3.01")
         self.assertEqual(main.VERSION_BASELINE_COUNT, 200)
-        self.assertTrue(main._is_major_version_crossing("V2.97", "V3.00"))
-        self.assertTrue(main._is_major_version_crossing("V2.00", "V3.00"))
-        self.assertTrue(main._is_major_version_crossing("V3.99", "V4.00"))
+        self.assertEqual(main.V3_MEMENTO_VERSION, "V3.00")
+        self.assertTrue(main._is_major_version_crossing("V2.99", "V3.00"))
+        self.assertTrue(main._is_v3_memento_jump("V2.99", "V3.00"))
+        self.assertTrue(main._is_v3_memento_jump("V2.97", "V3.00"))
+        self.assertFalse(main._is_v3_memento_jump("V3.00", "V3.01"))
+        self.assertFalse(main._is_v3_memento_jump("V3.01", "V3.02"))
+        self.assertFalse(main._is_v3_memento_jump("V3.99", "V4.00"))
         self.assertFalse(main._is_major_version_crossing("V2.96", "V2.97"))
         self.assertFalse(main._is_major_version_crossing("V2.99", "V2.99"))
         self.assertFalse(main._is_major_version_crossing("V3.00", "V3.01"))
-        self.assertFalse(main._is_major_version_crossing(None, "V3.00"))
-        self.assertFalse(main._is_major_version_crossing("V2.97", None))
+        self.assertFalse(main._is_v3_memento_jump(None, "V3.00"))
+        self.assertEqual(
+            main._major_memento_monologue("V2.99", "V3.00"),
+            main.V2_SERIES_MEMENTO.strip(),
+        )
         self.assertEqual(
             main._major_memento_monologue("V2.97", "V3.00"),
             main.V2_SERIES_MEMENTO.strip(),
         )
         self.assertIsNone(main._major_memento_monologue("V2.96", "V2.97"))
+        self.assertIsNone(main._major_memento_monologue("V3.00", "V3.01"))
+        self.assertIsNone(main._major_memento_monologue("V3.01", "V3.02"))
         self.assertIsNone(main._major_memento_monologue("V3.99", "V4.00"))
         self.assertIsNone(main._major_memento_monologue(None, "V3.00"))
+        self.assertFalse(hasattr(main, "V4_SERIES_MEMENTO"))
+        self.assertFalse(hasattr(main, "_MAJOR_SERIES_MEMENTOS"))
 
     def test_v3_memento_card_is_seclude_styled_grim_portrait_speech(self):
         grim_avatar = "https://cdn.example/grim-avatar.png"
@@ -1302,9 +1315,9 @@ class SecurityControlsTests(unittest.TestCase):
         self.assertIsNone(blank.footer.icon_url)
 
         changelog = Path(__file__).resolve().parents[1].joinpath("CHANGELOG.md").read_text()
-        self.assertIn("first-person memento of the prior series", changelog)
-        self.assertIn("the instant the version bump is noticed", changelog)
-        self.assertIn("Minor deploys still use the public changelog card", changelog)
+        self.assertIn("first-person memento of V2", changelog)
+        self.assertIn("the instant that jump is noticed", changelog)
+        self.assertIn("From V3.01 on, deploys use the public changelog card again", changelog)
 
         source = Path(main.__file__).read_text()
         post = source[
@@ -1462,6 +1475,64 @@ class SecurityControlsTests(unittest.TestCase):
             self.assertNotIn("I cached them.", embed.description or "")
             self.assertEqual(embed.color.value, discord.Color.from_rgb(18, 18, 18).value)
             self.assertEqual(announced.read_text(), "V2.97")
+        finally:
+            main.VERSION = original_version
+            main.LAST_ANNOUNCED_VERSION_FILE = original_announced
+
+    def test_v301_posts_the_regular_changelog_card(self):
+        original_version = main.VERSION
+        original_announced = main.LAST_ANNOUNCED_VERSION_FILE
+        sent = []
+
+        class FakeChannel:
+            async def send(self, **kwargs):
+                sent.append(kwargs)
+
+        async def fake_fetch(_channel_id):
+            return FakeChannel()
+
+        announced = Path(self.temp_dir.name) / "last_announced_v301.txt"
+        announced.write_text("V3.00")
+        try:
+            main.LAST_ANNOUNCED_VERSION_FILE = str(announced)
+            main.VERSION = "V3.01"
+
+            async def run():
+                with patch.object(
+                    main.asyncio, "sleep", new_callable=AsyncMock
+                ) as sleep, patch.dict(
+                    main.updates_channels, {"50": {"channel_id": "9"}}, clear=True
+                ), patch.object(
+                    main.bot, "fetch_channel", side_effect=fake_fetch
+                ), patch.object(
+                    main,
+                    "_read_local_deploy_delta",
+                    return_value={
+                        "sha": "c" * 40,
+                        "commit_count": 1,
+                        "filenames": ["main.py"],
+                        "notes": ["V3.01 stays on the public changelog card"],
+                    },
+                ), patch.object(
+                    main, "save_updates_sha"
+                ), patch.dict(
+                    main.os.environ, {"GITHUB_PERSONAL_ACCESS_TOKEN": ""}, clear=False
+                ), patch.dict(
+                    main.updates_sha, {}, clear=True
+                ):
+                    await main.post_update_notification()
+                sleep.assert_awaited_with(30)
+
+            asyncio.run(run())
+            self.assertEqual(len(sent), 1)
+            embed = sent[0]["embed"]
+            self.assertEqual(embed.title, "Grim — V3.01")
+            self.assertIn("V3.01 stays on the public changelog card", embed.description)
+            self.assertIn("**Patch Notes**", embed.description)
+            self.assertNotIn("I cached them.", embed.description or "")
+            self.assertNotIn("Settle down, Admins.", embed.description or "")
+            self.assertEqual(embed.color.value, discord.Color.from_rgb(18, 18, 18).value)
+            self.assertEqual(announced.read_text(), "V3.01")
         finally:
             main.VERSION = original_version
             main.LAST_ANNOUNCED_VERSION_FILE = original_announced
