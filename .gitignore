@@ -1,60 +1,17 @@
-# Python
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
-
-# Virtual environments
-.env
-.venv
-env/
-venv/
-ENV/
-.pythonlibs/
-
-# IDE
+# OS / editor
+.DS_Store
+Thumbs.db
 .idea/
 .vscode/
 *.swp
 *.swo
+__pycache__/
+*.py[cod]
 
-# OS
-.DS_Store
-Thumbs.db
-
-# Local
-.local/
-.cache/
-*.log
-
-# Bot data files — runtime lives in ~/.grim_data/; never commit workspace copies
-*_data.json
-updates_data.json
-version_count.txt
-chat_history.db
-*.db
+# Accidental secrets
+.env
 .env.*
-grim-backup.env
-**/passphrase
 *.pem
 *.key
 *.enc
-github_deploy
-github_deploy.pub
-authorized_keys
+*.log
