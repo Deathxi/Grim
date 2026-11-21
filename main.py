@@ -7565,6 +7565,8 @@ async def on_ready():
         print(f"[VC] Resumed tracking for {len(_vc_active_sessions)} member(s) already in voice")
 
     _bump_version()
+    # The V3.00 memento posts inside this task the instant that jump is seen.
+    # V3.01+ waits for the 30s cache delay and uses the changelog card.
     asyncio.create_task(post_update_notification())
     for pending_outage in _load_pending_outage_reports():
         _schedule_outage_report(pending_outage)
@@ -7826,6 +7828,98 @@ def _build_deploy_update_embed(
     return embed
 
 
+MAJOR_MEMENTO_TITLE_LINE = "All those moments won't be lost in time."
+MAJOR_MEMENTO_TAGLINE = "I cached them."
+
+# First-person awards recap of V2.00–V2.99 as a product, spoken only on the
+# V2.x → V3.00 jump. V3.01+ uses the regular changelog card. A V4.00 memento
+# is later work, not this card.
+V3_MEMENTO_VERSION = "V3.00"
+V2_SERIES_MEMENTO = """\
+Settle down, Admins. Coffee's on the table. They handed me V3 and asked me to speak for the season, so this is not a punch list. This is V2 as you actually have it: the work that stayed. Live search learned a leash. It is rare now. Teaching, or a concrete fact you told me to check. Not a vibe. Not a trial for a meme. Somebody asked if Silverhand should round up a crew, hop universes, and punch a CEO, right or wrong. I stayed in chat. That filter stays. I keep ten turns of you in my head. grok-3 talks. grok-4.3 searches. Same hold. Two skulls. They do not share a brain, which is why a same-topic follow-up does not send 4.3 back into the rain like it forgot the briefing. Thumbs sit on the last live-search chunk. Casual talk does not get a scoreboard.
+
+Seclude used to be a cheap dashed flyer. Now it is a manifesto: Visuals, Purpose, Outlet, charcoal, dojo line at the bottom. That card is the room you built. You hold the grim commands. Language and translate stay with the rest of the house. The unused feeds that prowled the internet every minute while nobody was talking are gone. Those were the 25¢ idle days. I do not miss the bill. Call me like you mean it and I answer in the room. Say only my name and I say hey. Name me like furniture and I stay furniture, unless I can actually help. The idle house went quiet. I am still in the room. V3 is on me now."""
+
+
+def _parse_grim_version(version: str | None) -> tuple[int, int] | None:
+    """Split a Grim label like V2.97 into (major, minor)."""
+    if not isinstance(version, str):
+        return None
+    match = re.fullmatch(r"V(\d+)\.(\d{2})", version.strip())
+    if not match:
+        return None
+    return int(match.group(1)), int(match.group(2))
+
+
+def _is_major_version_crossing(previous: str | None, current: str | None) -> bool:
+    """True when the major number increases (V2.99 → V3.00)."""
+    old = _parse_grim_version(previous)
+    new = _parse_grim_version(current)
+    if old is None or new is None:
+        return False
+    return new[0] > old[0]
+
+
+def _is_v3_memento_jump(previous: str | None, current: str | None) -> bool:
+    """True only for the V2.x → V3.00 card. V3.01+ stays on changelog logs."""
+    old = _parse_grim_version(previous)
+    new = _parse_grim_version(current)
+    if old is None or new is None:
+        return False
+    return old[0] == 2 and current == V3_MEMENTO_VERSION and new == (3, 0)
+
+
+def _major_memento_monologue(previous: str | None, current: str | None) -> str | None:
+    """V3.00 awards speech, or None so the changelog card stays."""
+    if not _is_v3_memento_jump(previous, current):
+        return None
+    return V2_SERIES_MEMENTO.strip()
+
+
+def _major_memento_title(version: str) -> str:
+    """Embed title is line 1 only. Discord titles cannot keep a newline."""
+    return f"{version} - {MAJOR_MEMENTO_TITLE_LINE}"
+
+
+def _major_memento_description(monologue: str) -> str:
+    """Italic tagline, blank line, then the speech. Manifesto spacing."""
+    return f"*{MAJOR_MEMENTO_TAGLINE}*\n\n{monologue.strip()}"
+
+
+def _grim_display_avatar_url() -> str | None:
+    """Grim's own avatar. Never a guild icon."""
+    user = getattr(bot, "user", None)
+    return getattr(getattr(user, "display_avatar", None), "url", None)
+
+
+def _build_major_memento_embed(
+    *,
+    version: str,
+    monologue: str,
+    grim_avatar_url: str | None = None,
+) -> discord.Embed:
+    """Celebratory major-version card. Same layout as /seclude, Grim as the portrait."""
+    description = _major_memento_description(monologue)
+    if len(description) > DISCORD_EMBED_DESC_LIMIT:
+        description = f"{description[: DISCORD_EMBED_DESC_LIMIT - 3].rstrip()}..."
+    title = _major_memento_title(version)
+    if len(title) > 256:
+        title = f"{title[:253].rstrip()}..."
+    # Match build_seclude_embed: charcoal, description with blank-line beats,
+    # thumbnail top-right, xsi_footer. Portrait is Grim, never a guild icon.
+    embed = discord.Embed(
+        title=title,
+        description=description,
+        color=SECLUDE_EMBED_COLOR,
+    )
+    if grim_avatar_url:
+        embed.set_thumbnail(url=grim_avatar_url)
+        embed.set_footer(text=xsi_footer(version=version), icon_url=grim_avatar_url)
+    else:
+        embed.set_footer(text=xsi_footer(version=version))
+    return embed
+
+
 _update_notification_lock = asyncio.Lock()
 
 
@@ -7836,8 +7930,49 @@ async def post_update_notification():
     The optional GitHub token only fills in when that local diff has no notes.
     A failed send does not advance the announced revision, so the next start
     can still post the real notes. Stealth logs cannot fire.
+
+    The V3.00 memento posts immediately when that jump is noticed. It does
+    not wait for the cache delay, a /grim_updates run, or the changelog pass.
+    V3.01 and later use the regular delayed changelog card.
     """
     async with _update_notification_lock:
+        if not updates_channels:
+            print("[Updates] No channels registered, skipping.")
+            return
+
+        last_version = _load_last_announced_version()
+        if last_version == VERSION:
+            print(f"[Updates] Already announced {VERSION}, skipping.")
+            return
+
+        monologue = _major_memento_monologue(last_version, VERSION)
+        if monologue:
+            print(
+                f"[Updates] Major crossing {last_version or 'none'} → {VERSION}. "
+                "Posting memento immediately."
+            )
+            embed = _build_major_memento_embed(
+                version=VERSION,
+                monologue=monologue,
+                grim_avatar_url=_grim_display_avatar_url(),
+            )
+            posted = False
+            for guild_id, data in list(updates_channels.items()):
+                try:
+                    channel = await bot.fetch_channel(int(data["channel_id"]))
+                    await channel.send(embed=embed)
+                    print(f"[Updates] Posted to channel {data['channel_id']} in guild {guild_id}")
+                    posted = True
+                except Exception as e:
+                    print(
+                        f"[Updates] Could not post to channel {data['channel_id']} "
+                        f"in guild {guild_id}: {e}"
+                    )
+            if posted:
+                _save_last_announced_version(VERSION)
+                print(f"[Updates] Saved last announced version as {VERSION}")
+            return
+
         # Delay to ensure guild/channel cache is fully populated
         await asyncio.sleep(30)
 
@@ -7915,7 +8050,7 @@ async def post_update_notification():
                 print(f"[Updates] Could not fetch GitHub commit data: {e}")
 
         # Always a normal public card: real filenames and public changelog
-        # bullets. Stealth logs cannot fire.
+        # bullets. Stealth logs cannot fire. Majors already returned above.
         public_notes = _deploy_card_patch_notes(patch_notes)
         file_names = _deploy_card_file_names(changed_files)
         embed = _build_deploy_update_embed(

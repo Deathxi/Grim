@@ -1179,6 +1179,364 @@ class SecurityControlsTests(unittest.TestCase):
         self.assertNotIn("_commits_are_classified", source)
         self.assertIn("_deploy_card_patch_notes(patch_notes)", source)
 
+    def test_major_crossing_uses_memento_and_minors_stay_changelog(self):
+        self.assertEqual(main._format_version(297), "V2.97")
+        self.assertEqual(main._format_version(299), "V2.99")
+        self.assertEqual(main._format_version(300), "V3.00")
+        self.assertEqual(main._format_version(301), "V3.01")
+        self.assertEqual(main.VERSION_BASELINE_COUNT, 200)
+        self.assertEqual(main.V3_MEMENTO_VERSION, "V3.00")
+        self.assertTrue(main._is_major_version_crossing("V2.99", "V3.00"))
+        self.assertTrue(main._is_v3_memento_jump("V2.99", "V3.00"))
+        self.assertTrue(main._is_v3_memento_jump("V2.97", "V3.00"))
+        self.assertFalse(main._is_v3_memento_jump("V3.00", "V3.01"))
+        self.assertFalse(main._is_v3_memento_jump("V3.01", "V3.02"))
+        self.assertFalse(main._is_v3_memento_jump("V3.99", "V4.00"))
+        self.assertFalse(main._is_major_version_crossing("V2.96", "V2.97"))
+        self.assertFalse(main._is_major_version_crossing("V2.99", "V2.99"))
+        self.assertFalse(main._is_major_version_crossing("V3.00", "V3.01"))
+        self.assertFalse(main._is_v3_memento_jump(None, "V3.00"))
+        self.assertEqual(
+            main._major_memento_monologue("V2.99", "V3.00"),
+            main.V2_SERIES_MEMENTO.strip(),
+        )
+        self.assertEqual(
+            main._major_memento_monologue("V2.97", "V3.00"),
+            main.V2_SERIES_MEMENTO.strip(),
+        )
+        self.assertIsNone(main._major_memento_monologue("V2.96", "V2.97"))
+        self.assertIsNone(main._major_memento_monologue("V3.00", "V3.01"))
+        self.assertIsNone(main._major_memento_monologue("V3.01", "V3.02"))
+        self.assertIsNone(main._major_memento_monologue("V3.99", "V4.00"))
+        self.assertIsNone(main._major_memento_monologue(None, "V3.00"))
+        self.assertFalse(hasattr(main, "V4_SERIES_MEMENTO"))
+        self.assertFalse(hasattr(main, "_MAJOR_SERIES_MEMENTOS"))
+
+    def test_v3_memento_card_is_seclude_styled_grim_portrait_speech(self):
+        grim_avatar = "https://cdn.example/grim-avatar.png"
+        guild_icon = "https://cdn.example/seclude-guild.png"
+        title = main._major_memento_title("V3.00")
+        body = main._major_memento_description(main.V2_SERIES_MEMENTO)
+        embed = main._build_major_memento_embed(
+            version="V3.00",
+            monologue=main.V2_SERIES_MEMENTO,
+            grim_avatar_url=grim_avatar,
+        )
+        description = embed.description or ""
+
+        self.assertEqual(title, "V3.00 - All those moments won't be lost in time.")
+        self.assertEqual(embed.title, title)
+        self.assertNotIn("\n", embed.title)
+        self.assertNotIn("I cached them.", embed.title)
+        self.assertTrue(description.startswith("*I cached them.*\n\n"))
+        self.assertEqual(description, body)
+        self.assertIn("\n\nSettle down, Admins.", description)
+        self.assertEqual(embed.color.value, discord.Color.from_rgb(27, 26, 30).value)
+        self.assertEqual(embed.color.value, main.SECLUDE_EMBED_COLOR.value)
+        self.assertEqual(embed.color.value, 0x1B1A1E)
+        self.assertNotEqual(embed.color.value, 0x121212)
+        self.assertEqual(len(embed.fields), 0)
+        self.assertEqual(embed.thumbnail.url, grim_avatar)
+        self.assertNotEqual(embed.thumbnail.url, guild_icon)
+        self.assertNotEqual(embed.thumbnail.url, main.SECLUDE_ICON_URL)
+        self.assertEqual(embed.footer.text, main.xsi_footer(version="V3.00"))
+        self.assertEqual(embed.footer.icon_url, grim_avatar)
+        self.assertLessEqual(len(embed.title), 256)
+        self.assertLessEqual(len(description), main.DISCORD_EMBED_DESC_LIMIT)
+        self.assertLessEqual(len(embed.footer.text), 2048)
+        self.assertLessEqual(
+            len(embed.title) + len(description) + len(embed.footer.text),
+            6000,
+        )
+
+        speech = description.split("\n\n", 1)[1]
+        paragraphs = [part.strip() for part in speech.split("\n\n") if part.strip()]
+        self.assertGreaterEqual(len(paragraphs), 2)
+        for paragraph in paragraphs:
+            self.assertGreater(len(paragraph), 280)
+        self.assertNotIn("• ", speech)
+        self.assertNotIn("\n- ", speech)
+        self.assertNotIn("Patch Notes", description)
+        self.assertNotIn("commit(s) deployed", description)
+        for needle in (
+            "Admins",
+            "leash",
+            "ten turns",
+            "grok-3 talks",
+            "grok-4.3 searches",
+            "do not share a brain",
+            "same-topic follow-up",
+            "last live-search chunk",
+            "cheap dashed flyer",
+            "manifesto",
+            "You hold the grim commands",
+            "Language and translate",
+            "unused feeds",
+            "25¢ idle days",
+            "Call me like you mean it",
+            "Say only my name",
+            "Silverhand",
+        ):
+            self.assertIn(needle, speech)
+        self.assertIn("I ", speech)
+        self.assertNotIn("we shipped", speech.lower())
+        self.assertNotIn("Delta 0", speech)
+        self.assertNotIn("[REDACTED]", description)
+        card_text = f"{embed.title}\n{description}\n{embed.footer.text}".lower()
+        for banned in (
+            "panopticon",
+            "nightfall",
+            "founder",
+            "/panopticon",
+            "/nightfall",
+        ):
+            self.assertNotIn(banned, card_text)
+            self.assertNotIn(banned, main.V2_SERIES_MEMENTO.lower())
+
+        original_bot = main.bot
+        try:
+            main.bot = SimpleNamespace(
+                user=SimpleNamespace(display_avatar=SimpleNamespace(url=grim_avatar)),
+                guilds=[SimpleNamespace(icon=SimpleNamespace(url=guild_icon))],
+            )
+            self.assertEqual(main._grim_display_avatar_url(), grim_avatar)
+            main.bot = SimpleNamespace(user=None, guilds=[SimpleNamespace(icon=SimpleNamespace(url=guild_icon))])
+            self.assertIsNone(main._grim_display_avatar_url())
+        finally:
+            main.bot = original_bot
+
+        blank = main._build_major_memento_embed(
+            version="V3.00",
+            monologue=main.V2_SERIES_MEMENTO,
+            grim_avatar_url=None,
+        )
+        self.assertIsNone(blank.thumbnail.url)
+        self.assertEqual(blank.footer.text, main.xsi_footer(version="V3.00"))
+        self.assertIsNone(blank.footer.icon_url)
+
+        changelog = Path(__file__).resolve().parents[1].joinpath("CHANGELOG.md").read_text()
+        self.assertIn("first-person memento of V2", changelog)
+        self.assertIn("the instant that jump is noticed", changelog)
+        self.assertIn("From V3.01 on, deploys use the public changelog card again", changelog)
+
+        source = Path(main.__file__).read_text()
+        post = source[
+            source.index("async def post_update_notification") : source.index(
+                "async def post_outage_after_report"
+            )
+        ]
+        before_sleep = post[: post.index("await asyncio.sleep(30)")]
+        self.assertIn("_major_memento_monologue(last_version, VERSION)", before_sleep)
+        self.assertIn("_build_major_memento_embed(", before_sleep)
+        self.assertIn("grim_avatar_url=_grim_display_avatar_url()", before_sleep)
+        self.assertIn("Posting memento immediately.", before_sleep)
+        self.assertNotIn("GITHUB_PERSONAL_ACCESS_TOKEN", before_sleep)
+        self.assertIn("_build_deploy_update_embed(", post)
+        self.assertLess(
+            post.index("_build_major_memento_embed("),
+            post.index("await asyncio.sleep(30)"),
+        )
+        self.assertNotIn("SECLUDE_ICON_URL", post)
+        self.assertNotIn("guild.icon", post)
+        self.assertNotIn("[REDACTED]", post)
+        builder = source[
+            source.index("def _build_major_memento_embed(") : source.index(
+                "_update_notification_lock = asyncio.Lock()"
+            )
+        ]
+        self.assertIn("SECLUDE_EMBED_COLOR", builder)
+        self.assertIn("set_thumbnail(url=grim_avatar_url)", builder)
+        self.assertNotIn("SECLUDE_ICON_URL", builder)
+        self.assertNotIn("guild.icon", builder)
+        self.assertIn("xsi_footer(version=version)", builder)
+
+    def test_major_memento_post_uses_grim_avatar_not_guild_icon(self):
+        original_version = main.VERSION
+        original_announced = main.LAST_ANNOUNCED_VERSION_FILE
+        grim_avatar = "https://cdn.example/grim-portrait.png"
+        guild_icon = main.SECLUDE_ICON_URL
+        sent = []
+
+        class FakeChannel:
+            def __init__(self):
+                self.guild = SimpleNamespace(icon=SimpleNamespace(url=guild_icon))
+
+            async def send(self, **kwargs):
+                sent.append(kwargs)
+
+        async def fake_fetch(_channel_id):
+            return FakeChannel()
+
+        announced = Path(self.temp_dir.name) / "last_announced_version.txt"
+        announced.write_text("V2.97")
+        try:
+            main.LAST_ANNOUNCED_VERSION_FILE = str(announced)
+            main.VERSION = "V3.00"
+
+            async def run():
+                with patch.object(
+                    main.asyncio, "sleep", new_callable=AsyncMock
+                ) as sleep, patch.dict(
+                    main.updates_channels, {"50": {"channel_id": "9"}}, clear=True
+                ), patch.object(
+                    main.bot, "fetch_channel", side_effect=fake_fetch
+                ), patch.object(
+                    main, "_grim_display_avatar_url", return_value=grim_avatar
+                ), patch.object(
+                    main, "_read_local_deploy_delta"
+                ) as read_delta, patch.object(
+                    main, "save_updates_sha"
+                ) as save_sha, patch.object(
+                    main.aiohttp, "ClientSession", side_effect=AssertionError("github")
+                ), patch.dict(
+                    main.os.environ,
+                    {"GITHUB_PERSONAL_ACCESS_TOKEN": "should-not-be-used"},
+                    clear=False,
+                ), patch.dict(
+                    main.updates_sha, {}, clear=True
+                ):
+                    await main.post_update_notification()
+                sleep.assert_not_called()
+                read_delta.assert_not_called()
+                save_sha.assert_not_called()
+
+            asyncio.run(run())
+            self.assertEqual(len(sent), 1)
+            embed = sent[0]["embed"]
+            self.assertEqual(
+                embed.title,
+                "V3.00 - All those moments won't be lost in time.",
+            )
+            self.assertTrue(embed.description.startswith("*I cached them.*\n\n"))
+            self.assertIn("Settle down, Admins.", embed.description)
+            self.assertNotIn("Patch Notes", embed.description)
+            self.assertEqual(embed.thumbnail.url, grim_avatar)
+            self.assertNotEqual(embed.thumbnail.url, guild_icon)
+            self.assertNotEqual(embed.thumbnail.url, main.SECLUDE_ICON_URL)
+            self.assertEqual(embed.color.value, 0x1B1A1E)
+            self.assertEqual(len(embed.fields), 0)
+            self.assertEqual(embed.footer.text, "Powered by XSI • V3.00")
+            self.assertEqual(embed.footer.icon_url, grim_avatar)
+            self.assertEqual(announced.read_text(), "V3.00")
+        finally:
+            main.VERSION = original_version
+            main.LAST_ANNOUNCED_VERSION_FILE = original_announced
+
+    def test_minor_deploy_still_posts_the_changelog_card(self):
+        original_version = main.VERSION
+        original_announced = main.LAST_ANNOUNCED_VERSION_FILE
+        sent = []
+
+        class FakeChannel:
+            async def send(self, **kwargs):
+                sent.append(kwargs)
+
+        async def fake_fetch(_channel_id):
+            return FakeChannel()
+
+        announced = Path(self.temp_dir.name) / "last_announced_minor.txt"
+        announced.write_text("V2.96")
+        try:
+            main.LAST_ANNOUNCED_VERSION_FILE = str(announced)
+            main.VERSION = "V2.97"
+
+            async def run():
+                with patch.object(
+                    main.asyncio, "sleep", new_callable=AsyncMock
+                ) as sleep, patch.dict(
+                    main.updates_channels, {"50": {"channel_id": "9"}}, clear=True
+                ), patch.object(
+                    main.bot, "fetch_channel", side_effect=fake_fetch
+                ), patch.object(
+                    main,
+                    "_read_local_deploy_delta",
+                    return_value={
+                        "sha": "b" * 40,
+                        "commit_count": 1,
+                        "filenames": ["main.py"],
+                        "notes": ["minor still lists this changelog bullet"],
+                    },
+                ), patch.object(
+                    main, "save_updates_sha"
+                ), patch.dict(
+                    main.os.environ, {"GITHUB_PERSONAL_ACCESS_TOKEN": ""}, clear=False
+                ), patch.dict(
+                    main.updates_sha, {}, clear=True
+                ):
+                    await main.post_update_notification()
+                sleep.assert_awaited_with(30)
+
+            asyncio.run(run())
+            self.assertEqual(len(sent), 1)
+            embed = sent[0]["embed"]
+            self.assertEqual(embed.title, "Grim — V2.97")
+            self.assertIn("minor still lists this changelog bullet", embed.description)
+            self.assertIn("**Patch Notes**", embed.description)
+            self.assertNotIn("I cached them.", embed.description or "")
+            self.assertEqual(embed.color.value, discord.Color.from_rgb(18, 18, 18).value)
+            self.assertEqual(announced.read_text(), "V2.97")
+        finally:
+            main.VERSION = original_version
+            main.LAST_ANNOUNCED_VERSION_FILE = original_announced
+
+    def test_v301_posts_the_regular_changelog_card(self):
+        original_version = main.VERSION
+        original_announced = main.LAST_ANNOUNCED_VERSION_FILE
+        sent = []
+
+        class FakeChannel:
+            async def send(self, **kwargs):
+                sent.append(kwargs)
+
+        async def fake_fetch(_channel_id):
+            return FakeChannel()
+
+        announced = Path(self.temp_dir.name) / "last_announced_v301.txt"
+        announced.write_text("V3.00")
+        try:
+            main.LAST_ANNOUNCED_VERSION_FILE = str(announced)
+            main.VERSION = "V3.01"
+
+            async def run():
+                with patch.object(
+                    main.asyncio, "sleep", new_callable=AsyncMock
+                ) as sleep, patch.dict(
+                    main.updates_channels, {"50": {"channel_id": "9"}}, clear=True
+                ), patch.object(
+                    main.bot, "fetch_channel", side_effect=fake_fetch
+                ), patch.object(
+                    main,
+                    "_read_local_deploy_delta",
+                    return_value={
+                        "sha": "c" * 40,
+                        "commit_count": 1,
+                        "filenames": ["main.py"],
+                        "notes": ["V3.01 stays on the public changelog card"],
+                    },
+                ), patch.object(
+                    main, "save_updates_sha"
+                ), patch.dict(
+                    main.os.environ, {"GITHUB_PERSONAL_ACCESS_TOKEN": ""}, clear=False
+                ), patch.dict(
+                    main.updates_sha, {}, clear=True
+                ):
+                    await main.post_update_notification()
+                sleep.assert_awaited_with(30)
+
+            asyncio.run(run())
+            self.assertEqual(len(sent), 1)
+            embed = sent[0]["embed"]
+            self.assertEqual(embed.title, "Grim — V3.01")
+            self.assertIn("V3.01 stays on the public changelog card", embed.description)
+            self.assertIn("**Patch Notes**", embed.description)
+            self.assertNotIn("I cached them.", embed.description or "")
+            self.assertNotIn("Settle down, Admins.", embed.description or "")
+            self.assertEqual(embed.color.value, discord.Color.from_rgb(18, 18, 18).value)
+            self.assertEqual(announced.read_text(), "V3.01")
+        finally:
+            main.VERSION = original_version
+            main.LAST_ANNOUNCED_VERSION_FILE = original_announced
+
     def test_creator_saved_language_preference_is_honored(self):
         guild_id = "50"
         creator_id = str(main.CREATOR_DISCORD_ID)

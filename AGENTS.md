@@ -42,8 +42,10 @@ When adding new time-based or scheduled commands:
 Public `/grim_updates` cards and CHANGELOG are always normal: real filenames
 and real patch notes. The deploy card reads those notes from the checkout's
 CHANGELOG for the merge that just shipped, including when the optional GitHub
-token is missing. Stealth logs, `[REDACTED]` cards, and vanished or
-skip-changelog stay off until Death turns stealth logging back on. Do not
-infer a stealth card from filenames, feature area, or a CLASSIFIED label.
+token is missing. The V2.x → V3.00 `/grim_updates` card is a first-person memento of V2,
+posted the instant that jump is noticed. From V3.01 on, deploys use the
+regular public changelog card again. Stealth logs, `[REDACTED]` cards, and
+vanished or skip-changelog stay off until Death turns stealth logging back on.
+Do not infer a stealth card from filenames, feature area, or a CLASSIFIED label.
 
 Do not reintroduce Replit scaffolding or any “auto-sync source to GitHub” helper.
